@@ -99,6 +99,8 @@ import io.trino.operator.scalar.json.JsonValueFunction;
 import io.trino.server.PluginManager.PluginsProvider;
 import io.trino.server.SliceSerialization.SliceDeserializer;
 import io.trino.server.SliceSerialization.SliceSerializer;
+import io.trino.server.protobuf.DomainProtoMapper;
+import io.trino.server.protobuf.DynamicFilterDomainsProtoMapper;
 import io.trino.server.protocol.PreparedStatementEncoder;
 import io.trino.server.protocol.spooling.SpoolingServerModule;
 import io.trino.server.remotetask.HttpLocationFactory;
@@ -323,6 +325,8 @@ public class ServerMainModule
         binder.bind(NullSafeHashCompiler.class).in(Scopes.SINGLETON);
         binder.bind(PagesIndex.Factory.class).to(PagesIndex.DefaultFactory.class);
         binder.bind(PagesInputStreamFactory.class);
+        binder.bind(DomainProtoMapper.class).in(Scopes.SINGLETON);
+        binder.bind(DynamicFilterDomainsProtoMapper.class).in(Scopes.SINGLETON);
         jaxrsBinder(binder).bind(IoExceptionSuppressingWriterInterceptor.class);
 
         // exchange client
