@@ -72,10 +72,10 @@ public final class ExecutionFailureInfoProtoMapper
                         : null,
                 proto.hasErrorCode()
                         ? new ErrorCode(
-                                proto.getErrorCode().getCode(),
-                                proto.getErrorCode().getName(),
-                                io.trino.spi.ErrorType.valueOf(proto.getErrorCode().getType().name()),
-                                proto.getErrorCode().getFatal())
+                        proto.getErrorCode().getCode(),
+                        proto.getErrorCode().getName(),
+                        io.trino.spi.ErrorType.valueOf(proto.getErrorCode().getType().name()),
+                        proto.getErrorCode().getFatal())
                         : null,
                 proto.hasRemoteHost() ? HostAddress.fromString(proto.getRemoteHost()) : null);
     }

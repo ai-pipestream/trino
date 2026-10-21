@@ -47,14 +47,14 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
-import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
-import static io.trino.metadata.InternalBlockEncodingSerde.TESTING_BLOCK_ENCODING_SERDE;
 import static io.airlift.tracing.Tracing.noopTracer;
 import static io.trino.execution.TaskState.FAILED;
 import static io.trino.execution.TaskState.RUNNING;
 import static io.trino.execution.TaskStatus.STARTING_VERSION;
+import static io.trino.metadata.InternalBlockEncodingSerde.TESTING_BLOCK_ENCODING_SERDE;
 import static io.trino.metadata.TestingMetadataManager.createTestingMetadataManager;
 import static io.trino.sql.planner.TestingPlannerContext.PLANNER_CONTEXT;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
