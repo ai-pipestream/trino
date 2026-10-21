@@ -49,6 +49,17 @@ public interface Connector
     }
 
     /**
+     * Binary codecs for this connector's handles, used when the task control
+     * plane runs with protobuf encoding. Connectors that do not provide
+     * codecs fail queries loudly under that encoding; there is no fallback
+     * to JSON handle serialization.
+     */
+    default Optional<ConnectorHandleCodecProvider> getHandleCodecProvider()
+    {
+        return Optional.empty();
+    }
+
+    /**
      * Guaranteed to be called at most once per transaction. The returned metadata will only be accessed
      * in a single threaded context.
      */

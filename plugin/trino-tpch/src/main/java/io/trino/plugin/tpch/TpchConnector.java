@@ -16,6 +16,7 @@ package io.trino.plugin.tpch;
 import com.google.inject.Inject;
 import io.airlift.bootstrap.LifeCycleManager;
 import io.trino.spi.connector.Connector;
+import io.trino.spi.connector.ConnectorHandleCodecProvider;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorNodePartitioningProvider;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
@@ -23,6 +24,9 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.transaction.IsolationLevel;
+import io.trino.spi.type.TypeManager;
+
+import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
@@ -34,15 +38,23 @@ public class TpchConnector
     private final ConnectorSplitManager splitManager;
     private final ConnectorNodePartitioningProvider nodePartitioningProvider;
     private final ConnectorPageSourceProvider pageSourceProvider;
+    private final ConnectorHandleCodecProvider handleCodecProvider;
 
     @Inject
-    public TpchConnector(LifeCycleManager lifeCycleManager, ConnectorMetadata metadata, ConnectorSplitManager splitManager, ConnectorNodePartitioningProvider nodePartitioningProvider, ConnectorPageSourceProvider pageSourceProvider)
+    public TpchConnector(LifeCycleManager lifeCycleManager, ConnectorMetadata metadata, ConnectorSplitManager splitManager, ConnectorNodePartitioningProvider nodePartitioningProvider, ConnectorPageSourceProvider pageSourceProvider, TypeManager typeManager)
     {
         this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
         this.metadata = requireNonNull(metadata, "metadata is null");
         this.splitManager = requireNonNull(splitManager, "splitManager is null");
         this.nodePartitioningProvider = requireNonNull(nodePartitioningProvider, "nodePartitioningProvider is null");
         this.pageSourceProvider = requireNonNull(pageSourceProvider, "pageSourceProvider is null");
+        this.handleCodecProvider = new TpchHandleCodecProvider(requireNonNull(typeManager, "typeManager is null"));
+    }
+
+    @Override
+    public Optional<ConnectorHandleCodecProvider> getHandleCodecProvider()
+    {
+        return Optional.of(handleCodecProvider);
     }
 
     @Override
