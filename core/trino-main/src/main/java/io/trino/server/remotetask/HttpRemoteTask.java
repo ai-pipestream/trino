@@ -109,7 +109,6 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static io.airlift.http.client.FullJsonResponseHandler.createFullJsonResponseHandler;
 import static io.airlift.http.client.HeaderNames.CONTENT_TYPE;
-import static io.trino.server.protobuf.ProtobufMediaTypes.APPLICATION_X_PROTOBUF;
 import static io.airlift.http.client.HttpStatus.OK;
 import static io.airlift.http.client.HttpUriBuilder.uriBuilderFrom;
 import static io.airlift.http.client.Request.Builder.prepareDelete;
@@ -126,6 +125,7 @@ import static io.trino.execution.DynamicFiltersCollector.INITIAL_DYNAMIC_FILTERS
 import static io.trino.execution.TaskInfo.createInitialTask;
 import static io.trino.execution.TaskState.FAILED;
 import static io.trino.execution.TaskStatus.failWith;
+import static io.trino.server.protobuf.ProtobufMediaTypes.APPLICATION_X_PROTOBUF;
 import static io.trino.server.remotetask.RequestErrorTracker.logError;
 import static io.trino.spi.HostAddress.fromUri;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;

@@ -22,5 +22,5 @@ package io.trino.server;
 public enum ControlPlaneEncoding
 {
     JSON,
-    PROTOBUF
+    PROTOBUF,
 }
