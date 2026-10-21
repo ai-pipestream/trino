@@ -31,7 +31,10 @@ import io.trino.execution.buffer.OutputBufferInfo;
 import io.trino.execution.buffer.OutputBufferStatus;
 import io.trino.operator.RetryPolicy;
 import io.trino.operator.TaskStats;
+import io.trino.server.ControlPlaneEncoding;
 import io.trino.server.DynamicFilterService;
+import io.trino.server.protobuf.DomainProtoMapper;
+import io.trino.server.protobuf.DynamicFilterDomainsProtoMapper;
 import io.trino.spi.type.TypeOperators;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -44,6 +47,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
+import static io.trino.metadata.InternalBlockEncodingSerde.TESTING_BLOCK_ENCODING_SERDE;
 import static io.airlift.tracing.Tracing.noopTracer;
 import static io.trino.execution.TaskState.FAILED;
 import static io.trino.execution.TaskState.RUNNING;
@@ -217,6 +222,8 @@ public class TestTaskInfoFetcherInstanceMismatch
                 TASK_URI,
                 new Duration(10, SECONDS),
                 JsonCodec.jsonCodec(VersionedDynamicFilterDomains.class),
+                ControlPlaneEncoding.JSON,
+                new DynamicFilterDomainsProtoMapper(new DomainProtoMapper(TESTING_BLOCK_ENCODING_SERDE, TESTING_TYPE_MANAGER)),
                 executor,
                 new TestingHttpClient(_ -> { throw new UnsupportedOperationException(); }),
                 () -> noopTracer().spanBuilder("test"),
@@ -234,6 +241,7 @@ public class TestTaskInfoFetcherInstanceMismatch
                 initialStatus,
                 new Duration(10, SECONDS),
                 JsonCodec.jsonCodec(TaskStatus.class),
+                ControlPlaneEncoding.JSON,
                 dynamicFiltersFetcher,
                 executor,
                 new TestingHttpClient(_ -> { throw new UnsupportedOperationException(); }),

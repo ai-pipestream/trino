@@ -38,6 +38,7 @@ public class InternalCommunicationConfig
     private String trustStorePath;
     private String trustStorePassword;
     private boolean httpServerHttpsEnabled;
+    private ControlPlaneEncoding controlPlaneEncoding = ControlPlaneEncoding.JSON;
 
     @NotNull
     public Optional<String> getSharedSecret()
@@ -145,6 +146,20 @@ public class InternalCommunicationConfig
     public InternalCommunicationConfig setHttpServerHttpsEnabled(boolean httpServerHttpsEnabled)
     {
         this.httpServerHttpsEnabled = httpServerHttpsEnabled;
+        return this;
+    }
+
+    @NotNull
+    public ControlPlaneEncoding getControlPlaneEncoding()
+    {
+        return controlPlaneEncoding;
+    }
+
+    @Config("internal-communication.control-plane.encoding")
+    @ConfigDescription("Wire encoding for the task control plane; must be the same on every node")
+    public InternalCommunicationConfig setControlPlaneEncoding(ControlPlaneEncoding controlPlaneEncoding)
+    {
+        this.controlPlaneEncoding = controlPlaneEncoding;
         return this;
     }
 

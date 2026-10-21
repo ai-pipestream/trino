@@ -38,7 +38,8 @@ public class TestInternalCommunicationConfig
                 .setKeyStorePassword(null)
                 .setTrustStorePath(null)
                 .setTrustStorePassword(null)
-                .setHttpServerHttpsEnabled(false));
+                .setHttpServerHttpsEnabled(false)
+                .setControlPlaneEncoding(ControlPlaneEncoding.JSON));
     }
 
     @Test
@@ -57,6 +58,7 @@ public class TestInternalCommunicationConfig
                 .put("internal-communication.https.truststore.path", truststoreFile.toString())
                 .put("internal-communication.https.truststore.key", "trust-key")
                 .put("http-server.https.enabled", "true")
+                .put("internal-communication.control-plane.encoding", "PROTOBUF")
                 .buildOrThrow();
 
         InternalCommunicationConfig expected = new InternalCommunicationConfig()
@@ -67,7 +69,8 @@ public class TestInternalCommunicationConfig
                 .setKeyStorePassword("key-key")
                 .setTrustStorePath(truststoreFile.toString())
                 .setTrustStorePassword("trust-key")
-                .setHttpServerHttpsEnabled(true);
+                .setHttpServerHttpsEnabled(true)
+                .setControlPlaneEncoding(ControlPlaneEncoding.PROTOBUF);
 
         assertFullMapping(properties, expected);
     }

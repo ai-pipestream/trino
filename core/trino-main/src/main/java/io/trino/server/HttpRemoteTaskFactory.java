@@ -37,6 +37,7 @@ import io.trino.execution.buffer.OutputBuffers;
 import io.trino.metadata.Split;
 import io.trino.node.InternalNode;
 import io.trino.operator.ForScheduler;
+import io.trino.server.protobuf.DynamicFilterDomainsProtoMapper;
 import io.trino.server.remotetask.HttpRemoteTask;
 import io.trino.server.remotetask.RemoteTaskStats;
 import io.trino.spi.connector.ConnectorTableCredentials;
@@ -82,6 +83,8 @@ public class HttpRemoteTaskFactory
     private final Tracer tracer;
     private final RemoteTaskStats stats;
     private final DynamicFilterService dynamicFilterService;
+    private final ControlPlaneEncoding controlPlaneEncoding;
+    private final DynamicFilterDomainsProtoMapper dynamicFilterDomainsProtoMapper;
 
     @Inject
     public HttpRemoteTaskFactory(
@@ -96,7 +99,9 @@ public class HttpRemoteTaskFactory
             JsonCodec<FailTaskRequest> failTaskRequestCoded,
             Tracer tracer,
             RemoteTaskStats stats,
-            DynamicFilterService dynamicFilterService)
+            DynamicFilterService dynamicFilterService,
+            InternalCommunicationConfig internalCommunicationConfig,
+            DynamicFilterDomainsProtoMapper dynamicFilterDomainsProtoMapper)
     {
         this.httpClient = httpClient;
         this.locationFactory = locationFactory;
@@ -115,6 +120,8 @@ public class HttpRemoteTaskFactory
         this.tracer = requireNonNull(tracer, "tracer is null");
         this.stats = requireNonNull(stats, "stats is null");
         this.dynamicFilterService = requireNonNull(dynamicFilterService, "dynamicFilterService is null");
+        this.controlPlaneEncoding = requireNonNull(internalCommunicationConfig, "internalCommunicationConfig is null").getControlPlaneEncoding();
+        this.dynamicFilterDomainsProtoMapper = requireNonNull(dynamicFilterDomainsProtoMapper, "dynamicFilterDomainsProtoMapper is null");
 
         this.updateScheduledExecutor = newSingleThreadScheduledExecutor(daemonThreadsNamed("task-info-update-scheduler-%s"));
         this.errorScheduledExecutor = newSingleThreadScheduledExecutor(daemonThreadsNamed("remote-task-error-delay-%s"));
@@ -176,6 +183,8 @@ public class HttpRemoteTaskFactory
                 taskInfoCodec,
                 taskUpdateRequestCodec,
                 failTaskRequestCoded,
+                controlPlaneEncoding,
+                dynamicFilterDomainsProtoMapper,
                 partitionedSplitCountTracker,
                 tracer,
                 stats,
