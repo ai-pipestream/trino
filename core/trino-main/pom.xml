@@ -50,6 +50,11 @@
         </dependency>
 
         <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+        </dependency>
+
+        <dependency>
             <groupId>com.nimbusds</groupId>
             <artifactId>nimbus-jose-jwt</artifactId>
         </dependency>
@@ -563,6 +568,29 @@
             <plugin>
                 <groupId>org.antlr</groupId>
                 <artifactId>antlr4-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>com.github.os72</groupId>
+                <artifactId>protoc-jar-maven-plugin</artifactId>
+                <version>3.11.4</version>
+                <configuration>
+                    <protocArtifact>com.google.protobuf:protoc:${dep.protobuf.version}</protocArtifact>
+                    <protocVersion>${dep.protobuf.version}</protocVersion>
+                    <addSources>main</addSources>
+                    <inputDirectories>
+                        <include>src/main/proto</include>
+                    </inputDirectories>
+                    <outputDirectory>target/generated-sources/protobuf</outputDirectory>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>generate-sources</id>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <phase>generate-sources</phase>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

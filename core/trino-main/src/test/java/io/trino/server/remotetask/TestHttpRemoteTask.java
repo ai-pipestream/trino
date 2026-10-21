@@ -63,7 +63,10 @@ import io.trino.node.InternalNode;
 import io.trino.server.DynamicFilterService;
 import io.trino.server.FailTaskRequest;
 import io.trino.server.HttpRemoteTaskFactory;
+import io.trino.server.InternalCommunicationConfig;
 import io.trino.server.TaskUpdateRequest;
+import io.trino.server.protobuf.DomainProtoMapper;
+import io.trino.server.protobuf.DynamicFilterDomainsProtoMapper;
 import io.trino.simd.BlockEncodingSimdSupport;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.NodeVersion;
@@ -120,6 +123,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
+import static io.trino.metadata.InternalBlockEncodingSerde.TESTING_BLOCK_ENCODING_SERDE;
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.inject.Scopes.SINGLETON;
 import static io.airlift.json.JsonBinder.jsonBinder;
@@ -762,7 +766,9 @@ public class TestHttpRemoteTask
                                 failTaskRequestCodec,
                                 noopTracer(),
                                 new RemoteTaskStats(),
-                                dynamicFilterService);
+                                dynamicFilterService,
+                                new InternalCommunicationConfig(),
+                                new DynamicFilterDomainsProtoMapper(new DomainProtoMapper(TESTING_BLOCK_ENCODING_SERDE, TESTING_TYPE_MANAGER)));
                     }
                 });
         Injector injector = app

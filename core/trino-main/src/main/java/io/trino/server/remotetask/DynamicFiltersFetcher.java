@@ -25,7 +25,9 @@ import io.airlift.units.Duration;
 import io.opentelemetry.api.trace.SpanBuilder;
 import io.trino.execution.DynamicFiltersCollector.VersionedDynamicFilterDomains;
 import io.trino.execution.TaskId;
+import io.trino.server.ControlPlaneEncoding;
 import io.trino.server.DynamicFilterService;
+import io.trino.server.protobuf.DynamicFilterDomainsProtoMapper;
 import io.trino.spi.TrinoException;
 
 import java.net.URI;
@@ -44,6 +46,8 @@ import static io.airlift.units.Duration.nanosSince;
 import static io.trino.execution.DynamicFiltersCollector.INITIAL_DYNAMIC_FILTERS_VERSION;
 import static io.trino.server.InternalHeaders.TRINO_CURRENT_VERSION_HEADER;
 import static io.trino.server.InternalHeaders.TRINO_MAX_WAIT_HEADER;
+import static io.trino.server.protobuf.ProtobufMediaTypes.APPLICATION_X_PROTOBUF;
+import static io.trino.server.remotetask.ProtobufResponseHandler.createProtobufResponseHandler;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -54,6 +58,8 @@ class DynamicFiltersFetcher
     private final URI taskUri;
     private final Consumer<Throwable> onFail;
     private final JsonCodec<VersionedDynamicFilterDomains> dynamicFilterDomainsCodec;
+    private final ControlPlaneEncoding controlPlaneEncoding;
+    private final DynamicFilterDomainsProtoMapper dynamicFilterDomainsProtoMapper;
     private final Duration refreshMaxWait;
     private final Executor executor;
     private final HttpClient httpClient;
@@ -69,7 +75,7 @@ class DynamicFiltersFetcher
     @GuardedBy("this")
     private boolean running;
     @GuardedBy("this")
-    private ListenableFuture<JsonResponse<VersionedDynamicFilterDomains>> future;
+    private ListenableFuture<?> future;
 
     public DynamicFiltersFetcher(
             Consumer<Throwable> onFail,
@@ -77,6 +83,8 @@ class DynamicFiltersFetcher
             URI taskUri,
             Duration refreshMaxWait,
             JsonCodec<VersionedDynamicFilterDomains> dynamicFilterDomainsCodec,
+            ControlPlaneEncoding controlPlaneEncoding,
+            DynamicFilterDomainsProtoMapper dynamicFilterDomainsProtoMapper,
             Executor executor,
             HttpClient httpClient,
             Supplier<SpanBuilder> spanBuilderFactory,
@@ -91,6 +99,8 @@ class DynamicFiltersFetcher
 
         this.refreshMaxWait = requireNonNull(refreshMaxWait, "refreshMaxWait is null");
         this.dynamicFilterDomainsCodec = requireNonNull(dynamicFilterDomainsCodec, "dynamicFilterDomainsCodec is null");
+        this.controlPlaneEncoding = requireNonNull(controlPlaneEncoding, "controlPlaneEncoding is null");
+        this.dynamicFilterDomainsProtoMapper = requireNonNull(dynamicFilterDomainsProtoMapper, "dynamicFilterDomainsProtoMapper is null");
 
         this.executor = requireNonNull(executor, "executor is null");
         this.httpClient = requireNonNull(httpClient, "httpClient is null");
@@ -158,15 +168,23 @@ class DynamicFiltersFetcher
 
         Request request = prepareGet()
                 .setUri(uriBuilderFrom(taskUri).appendPath("dynamicfilters").build())
-                .setHeader(CONTENT_TYPE, JSON_UTF_8.toString())
+                .setHeader(CONTENT_TYPE, controlPlaneEncoding == ControlPlaneEncoding.PROTOBUF ? APPLICATION_X_PROTOBUF : JSON_UTF_8.toString())
                 .setHeader(TRINO_CURRENT_VERSION_HEADER, Long.toString(localDynamicFiltersVersion))
                 .setHeader(TRINO_MAX_WAIT_HEADER, refreshMaxWait.toString())
                 .setSpanBuilder(spanBuilderFactory.get())
                 .build();
 
         errorTracker.startRequest();
-        future = httpClient.executeAsync(request, createFullJsonResponseHandler(dynamicFilterDomainsCodec));
-        addCallback(future, new SimpleHttpResponseHandler<>(new DynamicFiltersResponseCallback(dynamicFiltersVersion), request.getUri(), stats), executor);
+        if (controlPlaneEncoding == ControlPlaneEncoding.PROTOBUF) {
+            ListenableFuture<ProtobufResponseHandler.ProtobufResponse<VersionedDynamicFilterDomains>> protobufFuture = httpClient.executeAsync(request, createProtobufResponseHandler(dynamicFilterDomainsProtoMapper::parseFrom));
+            future = protobufFuture;
+            addCallback(protobufFuture, new SimpleProtobufHttpResponseHandler<>(new DynamicFiltersResponseCallback(dynamicFiltersVersion), request.getUri(), stats), executor);
+        }
+        else {
+            ListenableFuture<JsonResponse<VersionedDynamicFilterDomains>> jsonFuture = httpClient.executeAsync(request, createFullJsonResponseHandler(dynamicFilterDomainsCodec));
+            future = jsonFuture;
+            addCallback(jsonFuture, new SimpleHttpResponseHandler<>(new DynamicFiltersResponseCallback(dynamicFiltersVersion), request.getUri(), stats), executor);
+        }
     }
 
     private class DynamicFiltersResponseCallback

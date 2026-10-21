@@ -61,9 +61,12 @@ import io.trino.metadata.Split;
 import io.trino.node.InternalNode;
 import io.trino.operator.RetryPolicy;
 import io.trino.operator.TaskStats;
+import io.trino.server.ControlPlaneEncoding;
 import io.trino.server.DynamicFilterService;
 import io.trino.server.FailTaskRequest;
 import io.trino.server.TaskUpdateRequest;
+import io.trino.server.protobuf.DynamicFilterDomainsProtoMapper;
+import io.trino.server.protobuf.FailTaskRequestProtoMapper;
 import io.trino.spi.SplitWeight;
 import io.trino.spi.TrinoException;
 import io.trino.spi.TrinoTransportException;
@@ -106,6 +109,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static io.airlift.http.client.FullJsonResponseHandler.createFullJsonResponseHandler;
 import static io.airlift.http.client.HeaderNames.CONTENT_TYPE;
+import static io.trino.server.protobuf.ProtobufMediaTypes.APPLICATION_X_PROTOBUF;
 import static io.airlift.http.client.HttpStatus.OK;
 import static io.airlift.http.client.HttpUriBuilder.uriBuilderFrom;
 import static io.airlift.http.client.Request.Builder.prepareDelete;
@@ -196,6 +200,7 @@ public final class HttpRemoteTask
     private final JsonCodec<TaskInfo> taskInfoCodec;
     private final JsonCodec<TaskUpdateRequest> taskUpdateRequestCodec;
     private final JsonCodec<FailTaskRequest> failTaskRequestCodec;
+    private final ControlPlaneEncoding controlPlaneEncoding;
 
     private final RequestErrorTracker updateErrorTracker;
 
@@ -238,6 +243,8 @@ public final class HttpRemoteTask
             JsonCodec<TaskInfo> taskInfoCodec,
             JsonCodec<TaskUpdateRequest> taskUpdateRequestCodec,
             JsonCodec<FailTaskRequest> failTaskRequestCodec,
+            ControlPlaneEncoding controlPlaneEncoding,
+            DynamicFilterDomainsProtoMapper dynamicFilterDomainsProtoMapper,
             PartitionedSplitCountTracker partitionedSplitCountTracker,
             Tracer tracer,
             RemoteTaskStats stats,
@@ -281,6 +288,8 @@ public final class HttpRemoteTask
             this.taskInfoCodec = taskInfoCodec;
             this.taskUpdateRequestCodec = taskUpdateRequestCodec;
             this.failTaskRequestCodec = failTaskRequestCodec;
+            this.controlPlaneEncoding = requireNonNull(controlPlaneEncoding, "controlPlaneEncoding is null");
+            requireNonNull(dynamicFilterDomainsProtoMapper, "dynamicFilterDomainsProtoMapper is null");
             this.updateErrorTracker = new RequestErrorTracker(taskId, location, maxErrorDuration, errorScheduledExecutor, "updating task");
             this.partitionedSplitCountTracker = requireNonNull(partitionedSplitCountTracker, "partitionedSplitCountTracker is null");
             this.tracer = requireNonNull(tracer, "tracer is null");
@@ -337,6 +346,8 @@ public final class HttpRemoteTask
                     location,
                     taskStatusRefreshMaxWait,
                     dynamicFilterDomainsCodec,
+                    controlPlaneEncoding,
+                    dynamicFilterDomainsProtoMapper,
                     executor,
                     httpClient,
                     () -> createSpanBuilder("task-dynamic-filters", span),
@@ -350,6 +361,7 @@ public final class HttpRemoteTask
                     initialTask.taskStatus(),
                     taskStatusRefreshMaxWait,
                     taskStatusCodec,
+                    controlPlaneEncoding,
                     dynamicFiltersFetcher,
                     executor,
                     httpClient,
@@ -987,6 +999,14 @@ public final class HttpRemoteTask
     {
         HttpUriBuilder uriBuilder = getHttpUriBuilder(getTaskStatus());
         uriBuilder = uriBuilder.appendPath("fail");
+        if (controlPlaneEncoding == ControlPlaneEncoding.PROTOBUF) {
+            return preparePost()
+                    .setUri(uriBuilder.build())
+                    .setHeader(CONTENT_TYPE, APPLICATION_X_PROTOBUF)
+                    .setBodyGenerator(createStaticBodyGenerator(FailTaskRequestProtoMapper.toByteArray(failTaskRequest)))
+                    .setSpanBuilder(createSpanBuilder("task-fail", span))
+                    .build();
+        }
         return preparePost()
                 .setUri(uriBuilder.build())
                 .setHeader(CONTENT_TYPE, MediaType.JSON_UTF_8.toString())

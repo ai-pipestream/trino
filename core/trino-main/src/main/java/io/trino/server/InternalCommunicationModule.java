@@ -35,6 +35,7 @@ public class InternalCommunicationModule
             configBinder(binder).bindConfigDefaults(HttpsConfig.class, config -> config.setAutomaticHttpsSharedSecret(sharedSecret));
             configBinder(binder).bindConfigGlobalDefaults(NodeConfig.class, config -> config.setInternalAddressSource(IP_ENCODED_AS_HOSTNAME));
         }
+        configBinder(binder).bindConfig(InternalCommunicationConfig.class);
         binder.bind(InternalAuthenticationManager.class).in(Scopes.SINGLETON);
     }
 }

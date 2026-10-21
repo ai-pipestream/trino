@@ -35,6 +35,9 @@ import io.trino.execution.TaskStatus;
 import io.trino.execution.buffer.BufferResult;
 import io.trino.execution.buffer.PipelinedOutputBuffers;
 import io.trino.metadata.SessionPropertyManager;
+import io.trino.server.protobuf.DynamicFilterDomainsProtoMapper;
+import io.trino.server.protobuf.FailTaskRequestProtoMapper;
+import io.trino.server.protobuf.TaskStatusProtoMapper;
 import io.trino.server.security.ResourceSecurity;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -73,6 +76,7 @@ import static io.airlift.jaxrs.AsyncResponseHandler.bindAsyncResponse;
 import static io.trino.TrinoMediaTypes.TRINO_PAGES;
 import static io.trino.execution.buffer.BufferResult.emptyResults;
 import static io.trino.server.AsyncResponseUtils.withFallbackAfterTimeout;
+import static io.trino.server.protobuf.ProtobufMediaTypes.APPLICATION_X_PROTOBUF;
 import static io.trino.server.InternalHeaders.TRINO_BUFFER_COMPLETE;
 import static io.trino.server.InternalHeaders.TRINO_CURRENT_VERSION;
 import static io.trino.server.InternalHeaders.TRINO_MAX_SIZE;
@@ -106,6 +110,8 @@ public class TaskResource
     private final Executor responseExecutor;
     private final ScheduledExecutorService timeoutExecutor;
     private final FailureInjector failureInjector;
+    private final ControlPlaneEncoding controlPlaneEncoding;
+    private final DynamicFilterDomainsProtoMapper dynamicFilterDomainsProtoMapper;
     private final TimeStat readFromOutputBufferTime = new TimeStat();
     private final TimeStat resultsRequestTime = new TimeStat();
 
@@ -117,7 +123,9 @@ public class TaskResource
             PagesInputStreamFactory pagesInputStreamFactory,
             @ForAsyncHttp BoundedExecutor responseExecutor,
             @ForAsyncHttp ScheduledExecutorService timeoutExecutor,
-            FailureInjector failureInjector)
+            FailureInjector failureInjector,
+            InternalCommunicationConfig internalCommunicationConfig,
+            DynamicFilterDomainsProtoMapper dynamicFilterDomainsProtoMapper)
     {
         this.startupStatus = requireNonNull(startupStatus, "startupStatus is null");
         this.taskManager = requireNonNull(taskManager, "taskManager is null");
@@ -126,6 +134,8 @@ public class TaskResource
         this.responseExecutor = requireNonNull(responseExecutor, "responseExecutor is null");
         this.timeoutExecutor = requireNonNull(timeoutExecutor, "timeoutExecutor is null");
         this.failureInjector = requireNonNull(failureInjector, "failureInjector is null");
+        this.controlPlaneEncoding = requireNonNull(internalCommunicationConfig, "internalCommunicationConfig is null").getControlPlaneEncoding();
+        this.dynamicFilterDomainsProtoMapper = requireNonNull(dynamicFilterDomainsProtoMapper, "dynamicFilterDomainsProtoMapper is null");
     }
 
     @GET
@@ -228,7 +238,7 @@ public class TaskResource
 
     @GET
     @Path("{taskId}/status")
-    @Produces(MediaType.APPLICATION_JSON)
+    @Produces({MediaType.APPLICATION_JSON, APPLICATION_X_PROTOBUF})
     public void getTaskStatus(
             @PathParam("taskId") TaskId taskId,
             @HeaderParam(TRINO_CURRENT_VERSION) Long currentVersion,
@@ -246,7 +256,7 @@ public class TaskResource
 
         if (currentVersion == null || maxWait == null) {
             TaskStatus taskStatus = taskManager.getTaskStatus(taskId);
-            asyncResponse.resume(taskStatus);
+            asyncResponse.resume(taskStatusResponse(taskStatus));
             return;
         }
 
@@ -266,13 +276,13 @@ public class TaskResource
         // For hard timeout, add an additional time to max wait for thread scheduling contention and GC
         Duration timeout = new Duration(waitTime.toMillis() + ADDITIONAL_WAIT_TIME.toMillis(), MILLISECONDS);
 
-        ListenableFuture<Response> response = Futures.transform(futureTaskStatus, taskStatus -> Response.ok(taskStatus).build(), directExecutor());
+        ListenableFuture<Response> response = Futures.transform(futureTaskStatus, this::taskStatusResponse, directExecutor());
         bindAsyncResponse(asyncResponse, withFallbackAfterTimeout(response, timeout, () -> serviceUnavailable(timeout), timeoutExecutor), responseExecutor);
     }
 
     @GET
     @Path("{taskId}/dynamicfilters")
-    @Produces(MediaType.APPLICATION_JSON)
+    @Produces({MediaType.APPLICATION_JSON, APPLICATION_X_PROTOBUF})
     public void acknowledgeAndGetNewDynamicFilterDomains(
             @PathParam("taskId") TaskId taskId,
             @HeaderParam(TRINO_CURRENT_VERSION) Long currentDynamicFiltersVersion,
@@ -288,6 +298,13 @@ public class TaskResource
             return;
         }
 
+        if (controlPlaneEncoding == ControlPlaneEncoding.PROTOBUF) {
+            asyncResponse.resume(Response.ok()
+                    .type(APPLICATION_X_PROTOBUF)
+                    .entity(dynamicFilterDomainsProtoMapper.toByteArray(taskManager.acknowledgeAndGetNewDynamicFilterDomains(taskId, currentDynamicFiltersVersion)))
+                    .build());
+            return;
+        }
         asyncResponse.resume(taskManager.acknowledgeAndGetNewDynamicFilterDomains(taskId, currentDynamicFiltersVersion));
     }
 
@@ -325,6 +342,22 @@ public class TaskResource
     {
         requireNonNull(taskId, "taskId is null");
         requireNonNull(failTaskRequest, "failTaskRequest is null");
+        return taskManager.failTask(taskId, failTaskRequest.getFailureInfo().toException());
+    }
+
+    // Protobuf variant of failTask. The TaskInfo response stays JSON until
+    // TaskInfo gets a protobuf schema (phase 5 of the experiment); the
+    // FailTaskRequest body itself never falls back to JSON.
+    @POST
+    @Path("{taskId}/fail")
+    @Consumes(APPLICATION_X_PROTOBUF)
+    @Produces(MediaType.APPLICATION_JSON)
+    public TaskInfo failTaskProtobuf(
+            @PathParam("taskId") TaskId taskId,
+            byte[] failTaskRequestBytes)
+    {
+        requireNonNull(taskId, "taskId is null");
+        FailTaskRequest failTaskRequest = FailTaskRequestProtoMapper.parseFrom(requireNonNull(failTaskRequestBytes, "failTaskRequestBytes is null"));
         return taskManager.failTask(taskId, failTaskRequest.getFailureInfo().toException());
     }
 
@@ -518,6 +551,17 @@ public class TaskResource
     public TimeStat getResultsRequestTime()
     {
         return resultsRequestTime;
+    }
+
+    private Response taskStatusResponse(TaskStatus taskStatus)
+    {
+        if (controlPlaneEncoding == ControlPlaneEncoding.PROTOBUF) {
+            return Response.ok()
+                    .type(APPLICATION_X_PROTOBUF)
+                    .entity(TaskStatusProtoMapper.toByteArray(taskStatus))
+                    .build();
+        }
+        return Response.ok(taskStatus).build();
     }
 
     private static boolean shouldSummarize(UriInfo uriInfo)
