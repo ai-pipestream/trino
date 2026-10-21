@@ -1,0 +1,107 @@
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package io.trino.plugin.tpch;
+
+option java_package = "io.trino.plugin.tpch.protobuf";
+option java_multiple_files = true;
+
+// Connector-owned handle payloads for protobuf control-plane encoding.
+// The engine wraps these bytes in its ConnectorHandle message.
+
+message TpchColumnHandle {
+  string column_name = 1;
+  string type_id = 2;
+}
+
+// Native scalar value of a Domain. Non-scalar values (blocks for array, row
+// or map types) are rejected by the codec with a clear error.
+message ScalarValue {
+  oneof value {
+    int64 long_value = 1;
+    double double_value = 2;
+    bool bool_value = 3;
+    bytes slice_value = 4;
+    Int128Value int128_value = 5;
+  }
+}
+
+message Int128Value {
+  int64 high = 1;
+  int64 low = 2;
+}
+
+message DomainRange {
+  bool low_inclusive = 1;
+  ScalarValue low = 2;
+  bool high_inclusive = 3;
+  ScalarValue high = 4;
+}
+
+message DomainDiscreteValues {
+  bool inclusive = 1;
+  repeated ScalarValue values = 2;
+}
+
+message DomainRanges {
+  repeated DomainRange ranges = 1;
+}
+
+message Domain {
+  string type_id = 1;
+  bool null_allowed = 2;
+  oneof values {
+    bool all = 3;
+    DomainDiscreteValues discrete = 4;
+    DomainRanges ranges = 5;
+  }
+}
+
+message TupleDomainEntry {
+  TpchColumnHandle column = 1;
+  Domain domain = 2;
+}
+
+enum TupleDomainKind {
+  TUPLE_DOMAIN_KIND_UNSPECIFIED = 0;
+  ALL = 1;
+  NONE = 2;
+  ENTRIES = 3;
+}
+
+message TupleDomain {
+  TupleDomainKind kind = 1;
+  repeated TupleDomainEntry entries = 2;
+}
+
+message TpchTableHandle {
+  string schema_name = 1;
+  string table_name = 2;
+  double scale_factor = 3;
+  TupleDomain constraint = 4;
+}
+
+message TpchSplit {
+  int32 part_number = 1;
+  int32 total_parts = 2;
+  repeated string addresses = 3;
+}
+
+message TpchPartitioningHandle {
+  string table = 1;
+  int64 total_rows = 2;
+}
+
+message TpchTransactionHandle {
+}
