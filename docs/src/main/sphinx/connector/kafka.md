@@ -34,22 +34,6 @@ To connect to Kafka, you need:
 - Network access from the Trino coordinator and workers to the Kafka nodes.
   Port 9092 is the default port.
 
-When using Protobuf decoder with the {ref}`Confluent table description
-supplier<confluent-table-description-supplier>`, the following additional steps
-must be taken:
-
-- Copy the `kafka-protobuf-provider` and `kafka-protobuf-types` JAR files
-  from [Confluent](https://packages.confluent.io/maven/io/confluent/) for
-  Confluent version 8.1.1 to the Kafka connector plugin directory (`<install
-  directory>/plugin/kafka`) on all nodes in the cluster.
-  The plugin directory depends on the {doc}`/installation` method.
-- By copying those JARs and using them, you agree to the terms of the [Confluent
-  Community License Agreement](https://github.com/confluentinc/schema-registry/blob/master/LICENSE-ConfluentCommunity)
-  under which Confluent makes them available.
-
-These steps are not required if you are not using Protobuf and Confluent table
-description supplier.
-
 ## Configuration
 
 To configure the Kafka connector, create a catalog properties file
@@ -395,15 +379,20 @@ table description supplier are:
 - Schema updates are detected automatically.
 - There is no need to define tables manually.
 - Some Protobuf specific types like `oneof` and `any` are supported and mapped to JSON.
-
-When using Protobuf decoder with the Confluent table description supplier, some
-additional steps are necessary. For details, refer to {ref}`kafka-requirements`.
+- Protobuf records are decoded with the schema they were written with, so a
+  topic can hold records written with different versions of its schema. Columns
+  that a record's schema does not define are `NULL`.
+- Protobuf schemas that reference other subjects, including the Google
+  well-known types, are resolved through the schema registry. No additional
+  JAR files are required.
 
 Set `kafka.table-description-supplier` to `CONFLUENT` to use the
 schema registry. You must also configure the additional properties in the following table:
 
 :::{note}
-Inserts are not supported, and the only data format supported is AVRO.
+The supported data formats are AVRO and PROTOBUF. Inserts are supported only for
+PROTOBUF tables: rows are encoded with the latest schema registered for the
+subject and written in the Confluent wire format.
 :::
 
 :::{list-table} Confluent table description supplier properties
