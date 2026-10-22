@@ -430,6 +430,29 @@ public class TestProtobufQueryDataDecoder
                 .addValues(Value.newBuilder().setBigint(1)))))
                 .isInstanceOf(ProtobufFormatException.class)
                 .hasMessage("Map has 2 keys but 1 values");
+        // a duplicate key is a corrupt segment, not an entry to drop silently
+        assertThatThrownBy(() -> decode(varcharToBigint, Value.newBuilder().setMap(MapValue.newBuilder()
+                .addKeys(Value.newBuilder().setVarchar("a"))
+                .addKeys(Value.newBuilder().setVarchar("a"))
+                .addValues(Value.newBuilder().setBigint(1))
+                .addValues(NULL))))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessage("Map has duplicate key: a");
+        // a null value does not look like a duplicate
+        assertDecodes(varcharToBigint, Value.newBuilder().setMap(MapValue.newBuilder()
+                .addKeys(Value.newBuilder().setVarchar("a"))
+                .addKeys(Value.newBuilder().setVarchar("b"))
+                .addValues(NULL)
+                .addValues(NULL)), nullValues("a", "b"));
+    }
+
+    private static Map<Object, Object> nullValues(Object... keys)
+    {
+        Map<Object, Object> map = new HashMap<>();
+        for (Object key : keys) {
+            map.put(key, null);
+        }
+        return map;
     }
 
     @Test

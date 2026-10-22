@@ -138,7 +138,7 @@ The decoder checks every segment it reads and fails with
 - a `Value` whose field does not match the column type ("Expected value field
   10 but got 6"), or that sets no field;
 - a `Row` with more values than columns, or fewer;
-- a map with a different number of keys and values;
+- a map with a different number of keys and values, or with a duplicate key;
 - a precision outside 0 to 12, a UUID or IP address that is not 16 bytes;
 - temporal fields outside their range: picoseconds of a day, of a
   microsecond or of a millisecond, a time zone offset beyond ±14:00 for

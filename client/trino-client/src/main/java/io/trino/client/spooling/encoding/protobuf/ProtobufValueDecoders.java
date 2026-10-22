@@ -1086,6 +1086,10 @@ public final class ProtobufValueDecoders
             Map<Object, Object> map = new HashMap<>(keys.size());
             for (int i = 0; i < keys.size(); i++) {
                 map.put(keys.get(i), values.get(i));
+                // the server never writes two equal keys, so a duplicate is a corrupt segment, not an entry to drop
+                if (map.size() != i + 1) {
+                    throw new ProtobufFormatException("Map has duplicate key: " + keys.get(i));
+                }
             }
             return unmodifiableMap(map);
         }
