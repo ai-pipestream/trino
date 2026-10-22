@@ -28,10 +28,15 @@ import static java.util.stream.Collectors.joining;
 
 public class QueryDataDecoders
 {
+    // Order is the client's preference, sent to the server which picks the first one it supports.
+    // The protobuf encodings are supported but not preferred yet, so a client must opt in to them.
     private static final List<Factory> decoders = ImmutableList.of(
             new JsonQueryDataDecoder.ZstdFactory(),
             new JsonQueryDataDecoder.Lz4Factory(),
-            new JsonQueryDataDecoder.Factory());
+            new JsonQueryDataDecoder.Factory(),
+            new ProtobufQueryDataDecoder.ZstdFactory(),
+            new ProtobufQueryDataDecoder.Lz4Factory(),
+            new ProtobufQueryDataDecoder.Factory());
 
     private static final Map<String, Factory> encodingMap = factoriesMap();
 
