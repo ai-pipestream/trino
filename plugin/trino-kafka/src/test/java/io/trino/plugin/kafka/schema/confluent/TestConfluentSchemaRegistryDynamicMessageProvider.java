@@ -22,7 +22,9 @@ import com.google.protobuf.DescriptorProtos.FieldDescriptorProto.Label;
 import com.google.protobuf.DescriptorProtos.FieldDescriptorProto.Type;
 import com.google.protobuf.DescriptorProtos.FileDescriptorProto;
 import com.google.protobuf.DescriptorProtos.MessageOptions;
+import com.google.protobuf.DescriptorProtos.OneofDescriptorProto;
 import com.google.protobuf.Descriptors.Descriptor;
+import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.Descriptors.FileDescriptor;
 import com.google.protobuf.DynamicMessage;
 import io.confluent.kafka.schemaregistry.ParsedSchema;
@@ -202,6 +204,54 @@ public class TestConfluentSchemaRegistryDynamicMessageProvider
         DynamicMessage decodedMessage = provider.parseDynamicMessage(messageRecord);
         assertThat(decodedMessage.getDescriptorForType().findFieldByName("attributes").isMapField()).isTrue();
         assertThat(decodedMessage.getRepeatedFieldCount(decodedMessage.getDescriptorForType().findFieldByName("attributes"))).isEqualTo(1);
+    }
+
+    @Test
+    public void testDecodeProto3OptionalOfConfluentSerializer()
+            throws Exception
+    {
+        // protoc represents a proto3 optional field as the only member of a synthetic oneof, which the
+        // text the serializer registers must declare with the optional keyword for presence to survive
+        DescriptorProto message = DescriptorProto.newBuilder()
+                .setName("schema")
+                .addField(field("count", 1, Type.TYPE_INT64, Label.LABEL_OPTIONAL).setProto3Optional(true).setOneofIndex(0))
+                .addField(field("plain", 2, Type.TYPE_INT64, Label.LABEL_OPTIONAL))
+                .addOneofDecl(OneofDescriptorProto.newBuilder().setName("_count"))
+                .build();
+        FileDescriptor protocFile = FileDescriptor.buildFrom(
+                FileDescriptorProto.newBuilder()
+                        .setName("test.proto")
+                        .setSyntax("proto3")
+                        .addMessageType(message)
+                        .build(),
+                new FileDescriptor[0]);
+        Descriptor protocMessage = protocFile.findMessageTypeByName("schema");
+        FieldDescriptor protocCount = protocMessage.findFieldByName("count");
+
+        MockSchemaRegistryClient serializerClient = new MockSchemaRegistryClient(ImmutableList.of(new ProtobufSchemaProvider()));
+        byte[] unsetRecord;
+        byte[] defaultRecord;
+        try (KafkaProtobufSerializer<DynamicMessage> serializer = new KafkaProtobufSerializer<>(serializerClient)) {
+            serializer.configure(ImmutableMap.of(SCHEMA_REGISTRY_URL_CONFIG, "mock://registry"), false);
+            unsetRecord = serializer.serialize("counts", DynamicMessage.newBuilder(protocMessage).build());
+            defaultRecord = serializer.serialize("counts", DynamicMessage.newBuilder(protocMessage).setField(protocCount, 0L).build());
+        }
+
+        MockSchemaRegistryClient client = createClient();
+        int id = serializerClient.getLatestSchemaMetadata("counts-value").getId();
+        assertThat(client.register("counts-value", schema(client, serializerClient.getSchemaById(id).canonicalString()))).isEqualTo(id);
+        ConfluentSchemaRegistryDynamicMessageProvider provider = new ConfluentSchemaRegistryDynamicMessageProvider(client);
+
+        DynamicMessage unset = provider.parseDynamicMessage(unsetRecord);
+        FieldDescriptor count = unset.getDescriptorForType().findFieldByName("count");
+        assertThat(count.hasPresence()).isTrue();
+        assertThat(count.getRealContainingOneof()).isNull();
+        assertThat(unset.hasField(count)).isFalse();
+        assertThat(unset.getDescriptorForType().findFieldByName("plain").hasPresence()).isFalse();
+
+        DynamicMessage setToDefault = provider.parseDynamicMessage(defaultRecord);
+        assertThat(setToDefault.hasField(count)).isTrue();
+        assertThat(setToDefault.getField(count)).isEqualTo(0L);
     }
 
     @Test
