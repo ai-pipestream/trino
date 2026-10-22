@@ -20,13 +20,12 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.io.Resources;
 import com.google.protobuf.Any;
+import com.google.protobuf.Descriptors;
 import com.google.protobuf.Descriptors.Descriptor;
+import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.Timestamp;
 import io.airlift.slice.Slices;
-import io.confluent.kafka.schemaregistry.protobuf.ProtobufSchema;
-import io.confluent.kafka.schemaregistry.protobuf.ProtobufSchemaProvider;
-import io.confluent.kafka.schemaregistry.protobuf.ProtobufSchemaUtils;
 import io.trino.decoder.DecoderColumnHandle;
 import io.trino.decoder.DecoderTestColumnHandle;
 import io.trino.decoder.FieldValueProvider;
@@ -44,13 +43,13 @@ import io.trino.type.JsonType;
 import org.junit.jupiter.api.Test;
 
 import java.io.File;
+import java.io.IOException;
 import java.net.URI;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import static com.google.common.io.Resources.getResource;
 import static io.trino.decoder.protobuf.ProtobufRowDecoderFactory.DEFAULT_MESSAGE;
 import static io.trino.decoder.util.DecoderTestUtil.TESTING_SESSION;
 import static io.trino.decoder.util.DecoderTestUtil.checkValue;
@@ -166,7 +165,7 @@ public class TestProtobufDecoder
     }
 
     @Test
-    public void testOneofFixedSchemaProvider()
+    public void testOneofFieldsArePresentInDescriptor()
             throws Exception
     {
         Set<String> oneofColumnNames = Set.of(
@@ -182,15 +181,19 @@ public class TestProtobufDecoder
                 "rowColumn",
                 "nestedRowColumn");
 
-        // Uses the file-based schema parser which generates a Descriptor that does not have any oneof fields -- all are null
         Descriptor descriptor = getDescriptor("test_oneof.proto");
+        Descriptors.OneofDescriptor oneof = descriptor.getOneofs().getFirst();
+        assertThat(oneof.getName()).isEqualTo("testOneofColumn");
         for (String oneofColumnName : oneofColumnNames) {
-            assertThat(descriptor.findFieldByName(oneofColumnName)).isNull();
+            FieldDescriptor field = descriptor.findFieldByName(oneofColumnName);
+            assertThat(field).isNotNull();
+            assertThat(field.getContainingOneof()).isEqualTo(oneof);
         }
+        assertThat(descriptor.findFieldByName("column").getContainingOneof()).isNull();
     }
 
     @Test
-    public void testOneofConfluentSchemaProvider()
+    public void testOneof()
             throws Exception
     {
         String stringData = "Trino";
@@ -203,11 +206,7 @@ public class TestProtobufDecoder
         SqlTimestamp sqlTimestamp = sqlTimestampOf(3, LocalDateTime.parse("2020-12-12T15:35:45.923"));
         byte[] bytesData = "X'65683F'".getBytes(UTF_8);
 
-        // Uses the Confluent schema parser to generate the Descriptor which will include the oneof columns as fields
-        Descriptor descriptor = ((ProtobufSchema) new ProtobufSchemaProvider()
-                .parseSchema(Resources.toString(getResource("decoder/protobuf/test_oneof.proto"), UTF_8), List.of(), true)
-                .get())
-                .toDescriptor();
+        Descriptor descriptor = getDescriptor("test_oneof.proto");
 
         // Build the Row message
         Descriptor rowDescriptor = descriptor.findNestedTypeByName("Row");
@@ -316,8 +315,7 @@ public class TestProtobufDecoder
 
         final var message = messageBuilder.setField(messageBuilder.getDescriptorForType().findFieldByName("column"), "value").build();
 
-        final var descriptor = ProtobufSchemaUtils.getSchema(message).toDescriptor();
-        final var decoder = new ProtobufRowDecoder(new FixedSchemaDynamicMessageProvider(descriptor), ImmutableSet.of(testColumnHandle, testOneofColumn), TESTING_TYPE_MANAGER, new FileDescriptorProvider());
+        final var decoder = new ProtobufRowDecoder(new FixedSchemaDynamicMessageProvider(message.getDescriptorForType()), ImmutableSet.of(testColumnHandle, testOneofColumn), TESTING_TYPE_MANAGER, new FileDescriptorProvider());
 
         Map<DecoderColumnHandle, FieldValueProvider> decodedRow = decoder
                 .decodeRow(message.toByteArray())
@@ -664,7 +662,7 @@ public class TestProtobufDecoder
     }
 
     private Descriptor getDescriptor(String fileName)
-            throws Exception
+            throws IOException
     {
         return ProtobufUtils.getFileDescriptor(ProtobufUtils.getProtoFile("decoder/protobuf/" + fileName)).findMessageTypeByName(DEFAULT_MESSAGE);
     }

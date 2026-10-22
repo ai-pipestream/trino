@@ -14,6 +14,7 @@
 package io.trino.plugin.kafka.protobuf;
 
 import com.google.common.collect.ImmutableList;
+import com.google.protobuf.ByteString;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.Timestamp;
@@ -130,7 +131,7 @@ public class TestProtobufEncoder
         messageBuilder.setField(descriptor.findFieldByName("booleanColumn"), booleanData);
         messageBuilder.setField(descriptor.findFieldByName("numberColumn"), descriptor.findEnumTypeByName("Number").findValueByName(enumData));
         messageBuilder.setField(descriptor.findFieldByName("timestampColumn"), getTimestamp(sqlTimestamp));
-        messageBuilder.setField(descriptor.findFieldByName("bytesColumn"), bytesData);
+        messageBuilder.setField(descriptor.findFieldByName("bytesColumn"), ByteString.copyFrom(bytesData));
 
         RowEncoder rowEncoder = createRowEncoder(
                 "all_datatypes.proto",
@@ -224,7 +225,7 @@ public class TestProtobufEncoder
         rowBuilder.setField(rowDescriptor.findFieldByName("boolean_column"), booleanData);
         rowBuilder.setField(rowDescriptor.findFieldByName("number_column"), descriptor.findEnumTypeByName("Number").findValueByName(enumData));
         rowBuilder.setField(rowDescriptor.findFieldByName("timestamp_column"), getTimestamp(sqlTimestamp));
-        rowBuilder.setField(rowDescriptor.findFieldByName("bytes_column"), bytesData);
+        rowBuilder.setField(rowDescriptor.findFieldByName("bytes_column"), ByteString.copyFrom(bytesData));
         messageBuilder.setField(descriptor.findFieldByName("row"), rowBuilder.build());
 
         List<EncoderColumnHandle> columnHandles = ImmutableList.of(
@@ -338,7 +339,7 @@ public class TestProtobufEncoder
         rowBuilder.setField(rowDescriptor.findFieldByName("boolean_column"), booleanData);
         rowBuilder.setField(rowDescriptor.findFieldByName("number_column"), descriptor.findEnumTypeByName("Number").findValueByName(enumData));
         rowBuilder.setField(rowDescriptor.findFieldByName("timestamp_column"), getTimestamp(sqlTimestamp));
-        rowBuilder.setField(rowDescriptor.findFieldByName("bytes_column"), bytesData);
+        rowBuilder.setField(rowDescriptor.findFieldByName("bytes_column"), ByteString.copyFrom(bytesData));
         nestedMessageBuilder.setField(nestedDescriptor.findFieldByName("nested_list"), ImmutableList.of(rowBuilder.build()));
 
         Descriptor mapDescriptor = nestedDescriptor.findFieldByName("nested_map").getMessageType();
@@ -474,7 +475,7 @@ public class TestProtobufEncoder
         rowBuilder.setField(rowDescriptor.findFieldByName("boolean_column"), booleanData);
         rowBuilder.setField(rowDescriptor.findFieldByName("number_column"), descriptor.findEnumTypeByName("Number").findValueByName(enumData));
         rowBuilder.setField(rowDescriptor.findFieldByName("timestamp_column"), getTimestamp(sqlTimestamp));
-        rowBuilder.setField(rowDescriptor.findFieldByName("bytes_column"), bytesData);
+        rowBuilder.setField(rowDescriptor.findFieldByName("bytes_column"), ByteString.copyFrom(bytesData));
         messageBuilder.setField(descriptor.findFieldByName("row"), rowBuilder.build());
 
         RowEncoder rowEncoder = createRowEncoder(
