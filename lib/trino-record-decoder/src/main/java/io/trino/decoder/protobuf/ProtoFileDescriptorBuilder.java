@@ -46,7 +46,6 @@ import com.google.type.ExprProto;
 import com.google.type.FractionProto;
 import com.google.type.IntervalProto;
 import com.google.type.LatLngProto;
-import com.google.type.LocalizedTextProto;
 import com.google.type.MoneyProto;
 import com.google.type.MonthProto;
 import com.google.type.PhoneNumberProto;
@@ -123,7 +122,8 @@ public final class ProtoFileDescriptorBuilder
                     TimestampProto.getDescriptor(),
                     TypeProto.getDescriptor(),
                     WrappersProto.getDescriptor(),
-                    // the Google common types, which schema registry serializers do not register as references either
+                    // the Google common types that schema registry serializers treat as known types and do not
+                    // register as references either; the other files of google/type resolve like any import
                     CalendarPeriodProto.getDescriptor(),
                     ColorProto.getDescriptor(),
                     DateProto.getDescriptor(),
@@ -134,7 +134,6 @@ public final class ProtoFileDescriptorBuilder
                     FractionProto.getDescriptor(),
                     IntervalProto.getDescriptor(),
                     LatLngProto.getDescriptor(),
-                    LocalizedTextProto.getDescriptor(),
                     MoneyProto.getDescriptor(),
                     MonthProto.getDescriptor(),
                     PhoneNumberProto.getDescriptor(),
