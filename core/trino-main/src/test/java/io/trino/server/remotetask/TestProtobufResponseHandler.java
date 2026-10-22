@@ -20,8 +20,11 @@ import io.airlift.http.client.HttpStatus;
 import io.airlift.http.client.HttpVersion;
 import io.airlift.http.client.Request;
 import io.airlift.http.client.Response;
+import io.trino.execution.DynamicFiltersCollector.VersionedDynamicFilterDomains;
 import io.trino.execution.TaskId;
 import io.trino.execution.TaskStatus;
+import io.trino.server.protobuf.DomainProtoMapper;
+import io.trino.server.protobuf.DynamicFilterDomainsProtoMapper;
 import io.trino.server.protobuf.TaskStatusProtoMapper;
 import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
@@ -32,8 +35,11 @@ import java.net.URI;
 
 import static io.airlift.http.client.HeaderNames.CONTENT_TYPE;
 import static io.airlift.http.client.Request.Builder.prepareGet;
+import static io.trino.execution.DynamicFiltersCollector.INITIAL_DYNAMIC_FILTER_DOMAINS;
+import static io.trino.metadata.InternalBlockEncodingSerde.TESTING_BLOCK_ENCODING_SERDE;
 import static io.trino.server.protobuf.ProtobufMediaTypes.APPLICATION_X_PROTOBUF;
 import static io.trino.server.remotetask.ProtobufResponseHandler.createProtobufResponseHandler;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -91,12 +97,30 @@ public class TestProtobufResponseHandler
     }
 
     @Test
-    public void testEmptyOkBodyHasNoValue()
+    public void testEmptyOkBodyIsDecodedAsDefaultMessage()
     {
+        // A worker that has not started the task returns the initial domains,
+        // which encode to zero bytes
+        DynamicFilterDomainsProtoMapper mapper = new DynamicFilterDomainsProtoMapper(new DomainProtoMapper(TESTING_BLOCK_ENCODING_SERDE, TESTING_TYPE_MANAGER));
+        byte[] body = mapper.toByteArray(INITIAL_DYNAMIC_FILTER_DOMAINS);
+        assertThat(body).isEmpty();
+
+        ProtobufResponseHandler.ProtobufResponse<VersionedDynamicFilterDomains> response = createProtobufResponseHandler(mapper::parseFrom)
+                .handle(request(), new TestResponse(HttpStatus.OK, ImmutableListMultimap.of(CONTENT_TYPE, APPLICATION_X_PROTOBUF), body));
+        assertThat(response.getException()).isNull();
+        assertThat(response.hasValue()).isTrue();
+        assertThat(response.getValue().getVersion()).isEqualTo(INITIAL_DYNAMIC_FILTER_DOMAINS.getVersion());
+        assertThat(response.getValue().getDynamicFilterDomains()).isEmpty();
+    }
+
+    @Test
+    public void testEmptyOkBodyWithInvalidDefaultsIsCapturedAsException()
+    {
+        // An empty TaskStatus has an empty task ID, which does not decode
         ProtobufResponseHandler.ProtobufResponse<TaskStatus> response = createProtobufResponseHandler(TaskStatusProtoMapper::parseFrom)
                 .handle(request(), new TestResponse(HttpStatus.OK, ImmutableListMultimap.of(CONTENT_TYPE, APPLICATION_X_PROTOBUF), new byte[0]));
         assertThat(response.hasValue()).isFalse();
-        assertThat(response.getException()).isNull();
+        assertThat(response.getException()).isNotNull();
     }
 
     @Test

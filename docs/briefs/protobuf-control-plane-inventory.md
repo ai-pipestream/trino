@@ -21,7 +21,7 @@ Status column: **done** = protobuf message and mapper exist on this branch,
 | --- | --- | --- |
 | `io.trino.execution.TaskStatus` (record, 23 components) | no | `task.proto: TaskStatusProto` |
 | `io.trino.execution.TaskId` | no | dotted string form (`TaskId.valueOf` / `toString`) |
-| `io.trino.execution.TaskState` | no | enum: PLANNED, RUNNING, FLUSHING, FINISHED, CANCELED, ABORTED, FAILED |
+| `io.trino.execution.TaskState` | no | enum: PLANNED, RUNNING, FLUSHING, FINISHED, CANCELING, CANCELED, ABORTING, ABORTED, FAILING, FAILED |
 | `io.trino.execution.ExecutionFailureInfo` (recursive) | no | shared with `FailTaskRequest` |
 | `io.trino.client.ErrorLocation` | no | line/column |
 | `io.trino.spi.ErrorCode` | no | code, name, `ErrorType`, fatal |

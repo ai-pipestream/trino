@@ -27,6 +27,7 @@ import java.util.OptionalInt;
 import java.util.OptionalLong;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.server.protobuf.ExecutionFailureInfoProtoMapper.newCodedInputStream;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
@@ -75,7 +76,7 @@ public final class TaskStatusProtoMapper
                 TaskId.valueOf(proto.getTaskId()),
                 proto.getTaskInstanceId(),
                 proto.getVersion(),
-                taskState(proto.getState()),
+                taskState(proto),
                 URI.create(proto.getSelf()),
                 proto.getNodeId(),
                 proto.getSpeculative(),
@@ -102,10 +103,12 @@ public final class TaskStatusProtoMapper
                 proto.getRunningPartitionedSplitsWeight());
     }
 
-    private static TaskState taskState(io.trino.server.protocol.v1.TaskState state)
+    private static TaskState taskState(io.trino.server.protocol.v1.TaskStatus proto)
     {
+        io.trino.server.protocol.v1.TaskState state = proto.getState();
+        // UNRECOGNIZED has no number, so report the raw wire value
         if (state == io.trino.server.protocol.v1.TaskState.TASK_STATE_UNSPECIFIED || state == io.trino.server.protocol.v1.TaskState.UNRECOGNIZED) {
-            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Invalid task state in protobuf TaskStatus: " + state.getNumber());
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Invalid task state in protobuf TaskStatus: " + proto.getStateValue());
         }
         return TaskState.valueOf(state.name());
     }
@@ -118,7 +121,7 @@ public final class TaskStatusProtoMapper
     public static TaskStatus parseFrom(byte[] bytes)
     {
         try {
-            return fromProto(io.trino.server.protocol.v1.TaskStatus.parseFrom(bytes));
+            return fromProto(io.trino.server.protocol.v1.TaskStatus.parser().parseFrom(newCodedInputStream(bytes)));
         }
         catch (InvalidProtocolBufferException e) {
             throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to decode protobuf TaskStatus", e);

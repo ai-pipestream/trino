@@ -13,6 +13,7 @@
  */
 package io.trino.server.protobuf;
 
+import com.google.protobuf.CodedInputStream;
 import io.trino.client.ErrorLocation;
 import io.trino.execution.ExecutionFailureInfo;
 import io.trino.spi.ErrorCode;
@@ -24,7 +25,21 @@ import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 
 public final class ExecutionFailureInfoProtoMapper
 {
+    // Failures.toFailure does not bound the cause chain, so allow the nesting
+    // depth the JSON codec accepts (Jackson's default) instead of protobuf's 100
+    private static final int MAX_NESTING_DEPTH = 1000;
+
     private ExecutionFailureInfoProtoMapper() {}
+
+    /**
+     * Input for messages that embed {@code ExecutionFailureInfo}.
+     */
+    static CodedInputStream newCodedInputStream(byte[] bytes)
+    {
+        CodedInputStream input = CodedInputStream.newInstance(bytes);
+        input.setRecursionLimit(MAX_NESTING_DEPTH);
+        return input;
+    }
 
     public static io.trino.server.protocol.v1.ExecutionFailureInfo toProto(ExecutionFailureInfo failureInfo)
     {
@@ -76,16 +91,18 @@ public final class ExecutionFailureInfoProtoMapper
                         ? new ErrorCode(
                         proto.getErrorCode().getCode(),
                         proto.getErrorCode().getName(),
-                        errorType(proto.getErrorCode().getType()),
+                        errorType(proto.getErrorCode()),
                         proto.getErrorCode().getFatal())
                         : null,
                 proto.hasRemoteHost() ? HostAddress.fromString(proto.getRemoteHost()) : null);
     }
 
-    private static io.trino.spi.ErrorType errorType(io.trino.server.protocol.v1.ErrorType errorType)
+    private static io.trino.spi.ErrorType errorType(io.trino.server.protocol.v1.ErrorCode errorCode)
     {
+        io.trino.server.protocol.v1.ErrorType errorType = errorCode.getType();
+        // UNRECOGNIZED has no number, so report the raw wire value
         if (errorType == io.trino.server.protocol.v1.ErrorType.ERROR_TYPE_UNSPECIFIED || errorType == io.trino.server.protocol.v1.ErrorType.UNRECOGNIZED) {
-            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Invalid error type in protobuf ExecutionFailureInfo: " + errorType.getNumber());
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Invalid error type in protobuf ExecutionFailureInfo: " + errorCode.getTypeValue());
         }
         return io.trino.spi.ErrorType.valueOf(errorType.name());
     }
