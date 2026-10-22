@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.NoSuchElementException;
 
@@ -100,32 +101,51 @@ public class ProtobufRowIterator
             throws IOException
     {
         while (true) {
-            long tag = readVarint();
-            if (tag == -1) {
+            long value = readVarint();
+            if (value == -1) {
                 return null;
             }
-            if (fieldNumber((int) tag) != SEGMENT_ROWS) {
+            if (value > 0xFFFFFFFFL || fieldNumber((int) value) == 0) {
+                throw new ProtobufFormatException("Invalid segment field tag: " + value);
+            }
+            int tag = (int) value;
+            if (fieldNumber(tag) != SEGMENT_ROWS) {
                 // a field added to Segment by a newer server
-                skipField((int) tag);
+                skipField(tag);
                 continue;
             }
-            if (wireType((int) tag) != WIRETYPE_LENGTH_DELIMITED) {
-                throw new ProtobufFormatException(format("Unexpected wire type %s for segment rows", wireType((int) tag)));
+            if (wireType(tag) != WIRETYPE_LENGTH_DELIMITED) {
+                throw new ProtobufFormatException(format("Unexpected wire type %s for segment rows", wireType(tag)));
             }
             long length = readVarint();
             if (length < 0 || length > MAX_ROW_SIZE) {
                 throw new ProtobufFormatException("Invalid row length: " + length);
             }
             int rowLength = (int) length;
-            if (rowBuffer.length < rowLength) {
-                rowBuffer = new byte[Math.max(rowLength, rowBuffer.length * 2)];
-            }
-            int read = input.readNBytes(rowBuffer, 0, rowLength);
-            if (read != rowLength) {
-                throw new EOFException(format("Truncated row: expected %s bytes but got %s", rowLength, read));
-            }
+            readRowBytes(rowLength);
             reader.reset(rowBuffer, 0, rowLength);
             return decodeRow();
+        }
+    }
+
+    /**
+     * Reads the row into the row buffer. The buffer grows with the bytes actually read, so a corrupt
+     * length cannot make the client allocate more memory than the segment holds.
+     */
+    private void readRowBytes(int rowLength)
+            throws IOException
+    {
+        int position = 0;
+        while (position < rowLength) {
+            if (position == rowBuffer.length) {
+                rowBuffer = Arrays.copyOf(rowBuffer, (int) Math.min(rowLength, 2L * rowBuffer.length));
+            }
+            int chunk = Math.min(rowLength, rowBuffer.length) - position;
+            int read = input.readNBytes(rowBuffer, position, chunk);
+            position += read;
+            if (read != chunk) {
+                throw new EOFException(format("Truncated row: expected %s bytes but got %s", rowLength, position));
+            }
         }
     }
 

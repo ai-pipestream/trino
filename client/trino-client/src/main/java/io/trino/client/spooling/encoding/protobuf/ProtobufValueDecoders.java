@@ -158,9 +158,11 @@ public final class ProtobufValueDecoders
     private static final long PICOSECONDS_PER_SECOND = 1_000_000_000_000L;
     private static final long PICOSECONDS_PER_MINUTE = 60 * PICOSECONDS_PER_SECOND;
     private static final long PICOSECONDS_PER_HOUR = 60 * PICOSECONDS_PER_MINUTE;
+    private static final long PICOSECONDS_PER_DAY = 24 * PICOSECONDS_PER_HOUR;
     private static final int MAX_PRECISION = 12;
-    // java.time limit of zone offsets
+    // java.time and Trino limits of zone offsets
     private static final int MAX_OFFSET_SECONDS = 18 * 60 * 60;
+    private static final int MAX_TIME_ZONE_OFFSET_MINUTES = 14 * 60;
     private static final DateTimeFormatter TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss");
     private static final long[] POWERS_OF_TEN = {
             1L,
@@ -639,7 +641,11 @@ public final class ProtobufValueDecoders
         @Override
         Object decodeMessage(ProtobufWireReader reader)
         {
-            return formatDecimal(readDecimal(reader));
+            DecimalValue decimal = readDecimal(reader);
+            if (decimal.scale < 0) {
+                throw new ProtobufFormatException("Invalid decimal scale: " + decimal.scale);
+            }
+            return formatDecimal(decimal);
         }
     }
 
@@ -668,7 +674,11 @@ public final class ProtobufValueDecoders
                     break;
                 case DECIMAL_UNSCALED_BYTES:
                     expectWireType(tag, WIRETYPE_LENGTH_DELIMITED);
-                    unscaled = new BigInteger(reader.readBytes(reader.readLength()));
+                    byte[] bytes = reader.readBytes(reader.readLength());
+                    if (bytes.length == 0) {
+                        throw new ProtobufFormatException("Decimal has empty unscaled bytes");
+                    }
+                    unscaled = new BigInteger(bytes);
                     break;
                 case DECIMAL_SCALE:
                     expectWireType(tag, WIRETYPE_VARINT);
@@ -712,6 +722,7 @@ public final class ProtobufValueDecoders
                         reader.skipField(tag);
                 }
             }
+            checkRange("picos", picos, 0, PICOSECONDS_PER_DAY - 1);
             StringBuilder builder = new StringBuilder(8 + (precision == 0 ? 0 : 1 + precision));
             formatTime(picos, checkPrecision(precision), builder);
             return builder.toString();
@@ -751,6 +762,8 @@ public final class ProtobufValueDecoders
                         reader.skipField(tag);
                 }
             }
+            checkRange("picos", picos, 0, PICOSECONDS_PER_DAY - 1);
+            checkRange("offset minutes", offsetMinutes, -MAX_TIME_ZONE_OFFSET_MINUTES, MAX_TIME_ZONE_OFFSET_MINUTES);
             StringBuilder builder = new StringBuilder(14 + (precision == 0 ? 0 : 1 + precision));
             formatTime(picos, checkPrecision(precision), builder);
             builder.append(offsetMinutes >= 0 ? '+' : '-');
@@ -794,6 +807,7 @@ public final class ProtobufValueDecoders
                         reader.skipField(tag);
                 }
             }
+            checkRange("picos of micro", picosOfMicro, 0, PICOSECONDS_PER_MICROSECOND - 1);
             return formatTimestamp(checkPrecision(precision), epochMicros, picosOfMicro);
         }
     }
@@ -885,6 +899,7 @@ public final class ProtobufValueDecoders
                         reader.skipField(tag);
                 }
             }
+            checkRange("picos of micro", picosOfMicro, 0, PICOSECONDS_PER_MICROSECOND - 1);
             return IntervalDayTime.formatInterval(micros, picosOfMicro, checkPrecision(fractionalPrecision));
         }
     }

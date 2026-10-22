@@ -279,6 +279,11 @@ public class TestProtobufQueryDataDecoder
         assertThatThrownBy(() -> decode(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(0).setPicosOfMilli(1_000_000_000).setPrecision(12).setZoneId("UTC"))))
                 .isInstanceOf(ProtobufFormatException.class)
                 .hasMessage("Invalid picos of milli: 1000000000");
+        assertThatThrownBy(() -> decode(timestamp, Value.newBuilder().setTimestamp(Timestamp.newBuilder().setEpochMicros(0).setPicosOfMicro(1_000_000).setPrecision(12))))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessage("Invalid picos of micro: 1000000");
+        assertThatThrownBy(() -> decode(timestamp, Value.newBuilder().setTimestamp(Timestamp.newBuilder().setEpochMicros(0).setPicosOfMicro(-1).setPrecision(12))))
+                .isInstanceOf(ProtobufFormatException.class);
     }
 
     @Test
@@ -516,6 +521,45 @@ public class TestProtobufQueryDataDecoder
     }
 
     @Test
+    public void testOutOfRangeTemporalValues()
+    {
+        long picosPerDay = 86_400_000_000_000_000L;
+        assertDecodes(column(TIME), Value.newBuilder().setTime(Time.newBuilder().setPicos(picosPerDay - 1).setPrecision(12)), "23:59:59.999999999999");
+        assertThatThrownBy(() -> decode(column(TIME), Value.newBuilder().setTime(Time.newBuilder().setPicos(picosPerDay).setPrecision(12))))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessage("Invalid picos: 86400000000000000");
+        assertThatThrownBy(() -> decode(column(TIME), Value.newBuilder().setTime(Time.newBuilder().setPicos(-1).setPrecision(12))))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessage("Invalid picos: -1");
+        assertThatThrownBy(() -> decode(column(TIME_WITH_TIME_ZONE), Value.newBuilder().setTimeWithTimeZone(TimeWithTimeZone.newBuilder().setPicos(picosPerDay).setPrecision(3))))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessage("Invalid picos: 86400000000000000");
+        assertDecodes(column(TIME_WITH_TIME_ZONE), Value.newBuilder().setTimeWithTimeZone(TimeWithTimeZone.newBuilder().setPicos(0).setPrecision(0).setOffsetMinutes(-14 * 60)), "00:00:00-14:00");
+        assertThatThrownBy(() -> decode(column(TIME_WITH_TIME_ZONE), Value.newBuilder().setTimeWithTimeZone(TimeWithTimeZone.newBuilder().setPicos(0).setPrecision(0).setOffsetMinutes(14 * 60 + 1))))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessage("Invalid offset minutes: 841");
+        assertThatThrownBy(() -> decode(column(INTERVAL_DAY_TO_SECOND), Value.newBuilder().setIntervalDayToSecond(IntervalDayToSecond.newBuilder().setMicros(1).setPicosOfMicro(1_000_000).setFractionalPrecision(12))))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessage("Invalid picos of micro: 1000000");
+    }
+
+    @Test
+    public void testMalformedDecimals()
+    {
+        assertThatThrownBy(() -> decode(column(DECIMAL), Value.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledLong(1).setScale(-1))))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessage("Invalid decimal scale: -1");
+        assertThatThrownBy(() -> decode(column(DECIMAL), Value.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledBytes(ByteString.EMPTY).setScale(2))))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessage("Decimal has empty unscaled bytes");
+        assertThatThrownBy(() -> decode(column(DECIMAL), Value.newBuilder().setDecimal(Decimal.newBuilder().setScale(2))))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessage("Decimal has no unscaled value");
+        // NUMBER is rendered through BigDecimal, so a negative scale is a valid number
+        assertDecodes(column(NUMBER), Value.newBuilder().setNumber(NumberValue.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledLong(12).setScale(-3))), "1.2E+4");
+    }
+
+    @Test
     public void testMalformedSegments()
     {
         Segment segment = Segment.newBuilder()
@@ -548,6 +592,17 @@ public class TestProtobufQueryDataDecoder
                 .hasMessage("Unexpected wire type 0 for segment rows");
         // an empty segment has no rows
         assertThat(decode(columns, new byte[0], false)).isEmpty();
+        // a corrupt row length close to 2 GB fails as truncated, without allocating a buffer of that size first
+        assertThatThrownBy(() -> decode(columns, bytes(0x0A, 0xF7, 0xFF, 0xFF, 0xFF, 0x07, 0x0A, 0x02), false))
+                .isInstanceOf(UncheckedIOException.class)
+                .hasMessageContaining("Truncated row: expected 2147483639 bytes but got 2");
+        // field number 0, and a tag that does not fit in 32 bits
+        assertThatThrownBy(() -> decode(columns, bytes(0x02, 0x00), false))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessage("Invalid segment field tag: 2");
+        assertThatThrownBy(() -> decode(columns, bytes(0x8A, 0x80, 0x80, 0x80, 0x10, 0x00), false))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessage("Invalid segment field tag: 4294967306");
         // an empty row is a row with no values, which is an error for a query with columns
         assertThatThrownBy(() -> decode(columns, bytes(0x0A, 0x00), false))
                 .isInstanceOf(ProtobufFormatException.class)
