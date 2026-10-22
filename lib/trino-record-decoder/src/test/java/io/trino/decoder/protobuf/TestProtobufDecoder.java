@@ -561,6 +561,70 @@ public class TestProtobufDecoder
     }
 
     @Test
+    public void testUnsetProto3OptionalFieldsAreNull()
+    {
+        Descriptor descriptor = ProtobufUtils.getFileDescriptor(
+                """
+                syntax = "proto3";
+                message schema {
+                  optional int64 count = 1;
+                  int64 plain = 2;
+                  message Detail {
+                    optional string note = 1;
+                    string label = 2;
+                  }
+                  Detail detail = 3;
+                }
+                """).findMessageTypeByName(DEFAULT_MESSAGE);
+        Descriptor detailDescriptor = descriptor.findFieldByName("detail").getMessageType();
+        DecoderTestColumnHandle countColumn = new DecoderTestColumnHandle(0, "count", BIGINT, "count", null, null, false, false, false);
+        DecoderTestColumnHandle plainColumn = new DecoderTestColumnHandle(1, "plain", BIGINT, "plain", null, null, false, false, false);
+        DecoderTestColumnHandle noteColumn = new DecoderTestColumnHandle(2, "note", VARCHAR, "detail/note", null, null, false, false, false);
+        DecoderTestColumnHandle detailColumn = new DecoderTestColumnHandle(
+                3,
+                "detail",
+                RowType.from(ImmutableList.of(RowType.field("note", VARCHAR), RowType.field("label", VARCHAR))),
+                "detail",
+                null,
+                null,
+                false,
+                false,
+                false);
+        ProtobufRowDecoder decoder = new ProtobufRowDecoder(
+                new FixedSchemaDynamicMessageProvider(descriptor),
+                ImmutableSet.of(countColumn, plainColumn, noteColumn, detailColumn),
+                TESTING_TYPE_MANAGER,
+                new FileDescriptorProvider());
+
+        // unset optional fields are NULL, while fields without presence decode as their default value
+        DynamicMessage unset = DynamicMessage.newBuilder(descriptor)
+                .setField(descriptor.findFieldByName("detail"), DynamicMessage.newBuilder(detailDescriptor).build())
+                .build();
+        Map<DecoderColumnHandle, FieldValueProvider> decodedRow = decoder.decodeRow(unset.toByteArray()).orElseThrow(AssertionError::new);
+        assertThat(decodedRow.get(countColumn).isNull()).isTrue();
+        assertThat(decodedRow.get(plainColumn).getLong()).isEqualTo(0);
+        assertThat(decodedRow.get(noteColumn).isNull()).isTrue();
+        SqlRow detail = (SqlRow) decodedRow.get(detailColumn).getObject();
+        assertThat(detail.getRawFieldBlock(0).isNull(detail.getRawIndex())).isTrue();
+        assertThat(VARCHAR.getObjectValue(detail.getRawFieldBlock(1), detail.getRawIndex())).isEqualTo("");
+
+        // an optional field set to its default value is not NULL
+        DynamicMessage setToDefault = DynamicMessage.newBuilder(descriptor)
+                .setField(descriptor.findFieldByName("count"), 0L)
+                .setField(descriptor.findFieldByName("detail"), DynamicMessage.newBuilder(detailDescriptor)
+                        .setField(detailDescriptor.findFieldByName("note"), "")
+                        .build())
+                .build();
+        decodedRow = decoder.decodeRow(setToDefault.toByteArray()).orElseThrow(AssertionError::new);
+        assertThat(decodedRow.get(countColumn).isNull()).isFalse();
+        assertThat(decodedRow.get(countColumn).getLong()).isEqualTo(0);
+        assertThat(decodedRow.get(noteColumn).isNull()).isFalse();
+        assertThat(decodedRow.get(noteColumn).getSlice().toStringUtf8()).isEmpty();
+        detail = (SqlRow) decodedRow.get(detailColumn).getObject();
+        assertThat(VARCHAR.getObjectValue(detail.getRawFieldBlock(0), detail.getRawIndex())).isEqualTo("");
+    }
+
+    @Test
     public void testRowFlattening()
             throws Exception
     {

@@ -58,6 +58,7 @@ import static com.fasterxml.jackson.databind.SerializationFeature.ORDER_MAP_ENTR
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static io.trino.decoder.protobuf.ProtobufValueProvider.isUnsetProto3Optional;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.GENERIC_USER_ERROR;
 import static io.trino.spi.type.StandardTypes.JSON;
@@ -165,6 +166,9 @@ public class ProtobufColumnDecoder
             }
 
             FieldDescriptor fieldDescriptor = valueDescriptor.get().findFieldByName(pathElement);
+            if (isUnsetProto3Optional((DynamicMessage) value, fieldDescriptor)) {
+                return null;
+            }
             value = ((DynamicMessage) value).getField(fieldDescriptor);
             valueDescriptor = getDescriptor(fieldDescriptor);
         }
