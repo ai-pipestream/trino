@@ -56,6 +56,7 @@ import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.variant.Variant;
 import io.trino.type.IntervalDayTimeType;
 import io.trino.type.LongInterval;
+import io.trino.util.variant.VariantUtil;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
@@ -75,6 +76,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.function.Consumer;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
@@ -948,6 +950,122 @@ public class TestProtobufEncodingUtils
         });
     }
 
+    @Test
+    public void testLegacyIntervalMapKeysCollide()
+            throws IOException
+    {
+        // Without PARAMETRIC_INTERVAL, keys are rounded to milliseconds, which can make two keys equal.
+        // The json encoding fails instead of dropping an entry, and so does the protobuf encoding.
+        IntervalDayTimeType type = createIntervalDayTimeType(DAY, SECOND, 9, 6);
+        MapType mapType = mapType(type, BIGINT);
+        Page colliding = page(block(mapType, builder -> ((MapBlockBuilder) builder).buildEntry((keys, values) -> {
+            type.writeLong(keys, 1_000_100L);
+            BIGINT.writeLong(values, 1);
+            type.writeLong(keys, 1_000_200L);
+            BIGINT.writeLong(values, 2);
+        })));
+        Session session = sessionWithoutCapability(ClientCapabilities.PARAMETRIC_INTERVAL);
+        List<TypedColumn> columns = ImmutableList.of(typed("col", mapType));
+        for (String encoding : ImmutableList.<String>builder().add("json").addAll(PROTOBUF_ENCODINGS).build()) {
+            assertThatThrownBy(() -> encode(session, columns, encoding, ImmutableList.of(colliding)))
+                    .as("encoding %s", encoding)
+                    .hasMessage("Interval map keys collide at millisecond precision; use a client supporting PARAMETRIC_INTERVAL");
+        }
+
+        // a collision of keys nested in a row key
+        RowType rowKey = RowType.anonymousRow(type);
+        MapType nested = mapType(rowKey, BIGINT);
+        Page nestedColliding = page(block(nested, builder -> ((MapBlockBuilder) builder).buildEntry((keys, values) -> {
+            ((RowBlockBuilder) keys).buildEntry(fields -> type.writeLong(fields.getFirst(), 1_000_100L));
+            BIGINT.writeLong(values, 1);
+            ((RowBlockBuilder) keys).buildEntry(fields -> type.writeLong(fields.getFirst(), 1_000_200L));
+            BIGINT.writeLong(values, 2);
+        })));
+        for (String encoding : ImmutableList.<String>builder().add("json").addAll(PROTOBUF_ENCODINGS).build()) {
+            assertThatThrownBy(() -> encode(session, ImmutableList.of(typed("col", nested)), encoding, ImmutableList.of(nestedColliding)))
+                    .as("encoding %s", encoding)
+                    .hasMessage("Interval map keys collide at millisecond precision; use a client supporting PARAMETRIC_INTERVAL");
+        }
+
+        // keys that stay distinct after rounding, and the colliding keys for a client with the capability
+        assertRoundTrip(session, columns, page(block(mapType, builder -> ((MapBlockBuilder) builder).buildEntry((keys, values) -> {
+            type.writeLong(keys, 1_000_100L);
+            BIGINT.writeLong(values, 1);
+            type.writeLong(keys, 1_002_000L);
+            BIGINT.writeLong(values, 2);
+        }))));
+        assertRoundTrip(TEST_SESSION, columns, colliding);
+    }
+
+    @Test
+    public void testLegacyIntervalOutOfRange()
+            throws IOException
+    {
+        // The json encoding formats the rounded legacy value as text, so it can exceed the microsecond range;
+        // the protobuf encoding sends microseconds and fails for the two values within half a millisecond of the
+        // ends of the range. Only clients without PARAMETRIC_INTERVAL are affected.
+        IntervalDayTimeType type = createIntervalDayTimeType(DAY, SECOND, 9, 6);
+        Session session = sessionWithoutCapability(ClientCapabilities.PARAMETRIC_INTERVAL);
+        List<TypedColumn> columns = ImmutableList.of(typed("col", type));
+        Page page = page(block(type, builder -> type.writeLong(builder, Long.MAX_VALUE)));
+        assertThat(decode(session, columns, "json", ImmutableList.of(page)))
+                .isEqualTo(ImmutableList.of(ImmutableList.of("106751991 04:00:54.776")));
+        for (String encoding : PROTOBUF_ENCODINGS) {
+            assertThatThrownBy(() -> encode(session, columns, encoding, ImmutableList.of(page)))
+                    .hasMessage("Value out of range for an interval after rounding");
+        }
+        assertRoundTrip(session, columns, page(block(type, builder -> {
+            type.writeLong(builder, Long.MAX_VALUE - 500);
+            type.writeLong(builder, Long.MIN_VALUE + 500);
+        })));
+    }
+
+    @Test
+    public void testVariantJsonTextIsSentAsWritten()
+            throws IOException
+    {
+        // Without VARIANT_BINARY the client gets the variant's JSON text. The json decoder of the client copies the
+        // JSON value through a parser, which normalizes numbers (1.50 becomes 1.5, and a decimal beyond double
+        // precision is rounded); the protobuf decoder returns the text the server wrote, without that loss.
+        List<Variant> variants = ImmutableList.of(
+                Variant.ofDecimal(new BigDecimal("1.50")),
+                Variant.ofDecimal(new BigDecimal("12345678901234567890.123")),
+                Variant.ofDouble(0.1),
+                Variant.ofDouble(1e300),
+                Variant.ofFloat(1.1f),
+                Variant.ofString("quote \" line separator \u2028 control \u0001"),
+                Variant.ofArray(List.of(Variant.ofDouble(2.5), Variant.ofLong(Long.MAX_VALUE), Variant.NULL_VALUE)));
+        Session session = sessionWithoutCapability(ClientCapabilities.VARIANT_BINARY);
+        List<TypedColumn> columns = ImmutableList.of(typed("col", VARIANT));
+        Page page = page(block(VARIANT, builder -> variants.forEach(variant -> VARIANT.writeObject(builder, variant))));
+        List<List<Object>> expected = variants.stream()
+                .map(variant -> ImmutableList.<Object>of(VariantUtil.asJson(variant).toStringUtf8()))
+                .collect(toImmutableList());
+        assertThat(expected.get(0)).isEqualTo(ImmutableList.of("1.50"));
+        for (String encoding : PROTOBUF_ENCODINGS) {
+            assertThat(decode(session, columns, encoding, ImmutableList.of(page)))
+                    .as("encoding %s", encoding)
+                    .isEqualTo(expected);
+        }
+        assertThat(decode(session, columns, "json", ImmutableList.of(page)).get(0)).isEqualTo(ImmutableList.of("1.5"));
+    }
+
+    @Test
+    public void testMalformedUtf8Varchar()
+            throws IOException
+    {
+        // A varchar is not guaranteed to be valid UTF-8. The json decoder of the client fails on it; the protobuf
+        // decoder replaces each malformed sequence with U+FFFD, like new String(bytes, UTF_8)
+        List<TypedColumn> columns = ImmutableList.of(typed("col", VARCHAR));
+        Page page = page(block(VARCHAR, builder -> VARCHAR.writeSlice(builder, wrappedBuffer(new byte[] {'a', (byte) 0xC3, 'b', (byte) 0xFF}))));
+        assertThatThrownBy(() -> decode(TEST_SESSION, columns, "json", ImmutableList.of(page)))
+                .hasMessageContaining("Invalid UTF-8");
+        for (String encoding : PROTOBUF_ENCODINGS) {
+            assertThat(decode(TEST_SESSION, columns, encoding, ImmutableList.of(page)))
+                    .isEqualTo(ImmutableList.of(ImmutableList.of("a\uFFFDb\uFFFD")));
+        }
+    }
+
     private void assertRoundTrip(Type type, Consumer<BlockBuilder> values)
             throws IOException
     {
@@ -1020,9 +1138,9 @@ public class TestProtobufEncodingUtils
         QueryDataEncodingConfigStub config = new QueryDataEncodingConfigStub();
         return switch (encoding) {
             case "json" -> new JsonQueryDataEncoder.Factory(new JsonMapper());
-            case "protobuf" -> new ProtobufQueryDataEncoder.Factory();
-            case "protobuf+zstd" -> new ProtobufQueryDataEncoder.ZstdFactory(config);
-            case "protobuf+lz4" -> new ProtobufQueryDataEncoder.Lz4Factory(config);
+            case "protobuf" -> new ProtobufQueryDataEncoder.Factory(new JsonMapper());
+            case "protobuf+zstd" -> new ProtobufQueryDataEncoder.ZstdFactory(config, new JsonMapper());
+            case "protobuf+lz4" -> new ProtobufQueryDataEncoder.Lz4Factory(config, new JsonMapper());
             default -> throw new IllegalArgumentException("Unknown encoding: " + encoding);
         };
     }

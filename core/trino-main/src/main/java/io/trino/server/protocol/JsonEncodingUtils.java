@@ -472,7 +472,7 @@ public final class JsonEncodingUtils
         }
     }
 
-    private static boolean containsDayTimeInterval(Type type)
+    static boolean containsDayTimeInterval(Type type)
     {
         return type instanceof IntervalDayTimeType || type.getTypeParameters().stream().anyMatch(JsonEncodingUtils::containsDayTimeInterval);
     }

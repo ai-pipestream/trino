@@ -63,7 +63,9 @@ message Value {
     double double = 8;
     // DECIMAL(p, s)
     Decimal decimal = 9;
-    // VARCHAR(n): UTF-8
+    // VARCHAR(n): UTF-8. The bytes are sent as stored, and a stored value is
+    // not guaranteed to be valid UTF-8; the Java client replaces malformed
+    // sequences with U+FFFD, while generated proto3 parsers reject them
     string varchar = 10;
     // CHAR(n): UTF-8, without the trailing pad spaces; the reader pads the
     // value to n code points

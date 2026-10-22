@@ -13,6 +13,7 @@
  */
 package io.trino.server.protocol.spooling.encoding;
 
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.io.CountingOutputStream;
 import com.google.inject.Inject;
 import io.trino.Session;
@@ -50,12 +51,12 @@ public class ProtobufQueryDataEncoder
     private TypeEncoder[] typeEncoders;
     private int[] sourcePageChannels;
 
-    public ProtobufQueryDataEncoder(Session session, List<OutputColumn> columns)
+    public ProtobufQueryDataEncoder(Session session, List<OutputColumn> columns, JsonMapper jsonMapper)
     {
         this.typeEncoders = createTypeEncoders(session, requireNonNull(columns, "columns is null")
                 .stream()
                 .map(OutputColumn::type)
-                .collect(toImmutableList()));
+                .collect(toImmutableList()), jsonMapper);
         this.sourcePageChannels = columns.stream()
                 .mapToInt(OutputColumn::sourcePageChannel)
                 .toArray();
@@ -101,13 +102,19 @@ public class ProtobufQueryDataEncoder
     public static class Factory
             implements QueryDataEncoder.Factory
     {
+        // The json documents of types without a dedicated encoding are written like the json encoding writes them
+        protected final JsonMapper jsonMapper;
+
         @Inject
-        public Factory() {}
+        public Factory(JsonMapper jsonMapper)
+        {
+            this.jsonMapper = requireNonNull(jsonMapper, "jsonMapper is null");
+        }
 
         @Override
         public QueryDataEncoder create(Session session, List<OutputColumn> columns)
         {
-            return new ProtobufQueryDataEncoder(session, columns);
+            return new ProtobufQueryDataEncoder(session, columns, jsonMapper);
         }
 
         @Override
@@ -123,8 +130,9 @@ public class ProtobufQueryDataEncoder
         private final int compressionThreshold;
 
         @Inject
-        public ZstdFactory(QueryDataEncodingConfig config)
+        public ZstdFactory(QueryDataEncodingConfig config, JsonMapper jsonMapper)
         {
+            super(jsonMapper);
             this.compressionThreshold = toIntExact(config.getCompressionThreshold().toBytes());
         }
 
@@ -147,8 +155,9 @@ public class ProtobufQueryDataEncoder
         private final int compressionThreshold;
 
         @Inject
-        public Lz4Factory(QueryDataEncodingConfig config)
+        public Lz4Factory(QueryDataEncodingConfig config, JsonMapper jsonMapper)
         {
+            super(jsonMapper);
             this.compressionThreshold = toIntExact(config.getCompressionThreshold().toBytes());
         }
 

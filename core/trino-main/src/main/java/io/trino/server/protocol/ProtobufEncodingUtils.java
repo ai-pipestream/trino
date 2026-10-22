@@ -77,12 +77,15 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.time.Instant;
 import java.time.zone.ZoneRules;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static com.google.common.base.Verify.verify;
+import static io.airlift.slice.Slices.wrappedBuffer;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.ARRAY_ELEMENTS;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.DECIMAL_SCALE;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.DECIMAL_UNSCALED_BYTES;
@@ -146,6 +149,8 @@ import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.VARI
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.VARIANT_BINARY_METADATA;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.VARIANT_BINARY_VALUE;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.VARIANT_JSON;
+import static io.trino.server.protocol.JsonEncodingUtils.containsDayTimeInterval;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.StandardErrorCode.SERIALIZATION_ERROR;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
@@ -196,7 +201,7 @@ public final class ProtobufEncodingUtils
     private static final TypeEncoder IPADDRESS_ENCODER = new IpAddressEncoder();
     private static final TypeEncoder INTERVAL_YEAR_MONTH_ENCODER = new IntervalYearMonthEncoder();
 
-    public static TypeEncoder[] createTypeEncoders(Session session, List<Type> types)
+    public static TypeEncoder[] createTypeEncoders(Session session, List<Type> types, JsonMapper jsonMapper)
     {
         verify(!types.isEmpty(), "Columns must not be empty");
 
@@ -209,7 +214,7 @@ public final class ProtobufEncodingUtils
                 clientCapabilities.contains(ClientCapabilities.VARIANT_BINARY.toString()));
 
         return types.stream()
-                .map(type -> createTypeEncoder(type, capabilities))
+                .map(type -> createTypeEncoder(type, capabilities, jsonMapper))
                 .toArray(TypeEncoder[]::new);
     }
 
@@ -217,20 +222,14 @@ public final class ProtobufEncodingUtils
      * The client capabilities that change what a column looks like to the client, and so what the
      * encoder must send: the same adjustments the json encoding makes.
      */
-    public record Capabilities(
+    private record Capabilities(
             boolean supportsParametricDateTime,
             boolean supportsParametricInterval,
             boolean supportsNumber,
             boolean supportsVariant,
-            boolean supportsVariantBinary)
-    {
-        public static Capabilities all()
-        {
-            return new Capabilities(true, true, true, true, true);
-        }
-    }
+            boolean supportsVariantBinary) {}
 
-    public static TypeEncoder createTypeEncoder(Type type, Capabilities capabilities)
+    private static TypeEncoder createTypeEncoder(Type type, Capabilities capabilities, JsonMapper jsonMapper)
     {
         return switch (type) {
             case BooleanType _ -> BOOLEAN_ENCODER;
@@ -256,12 +255,16 @@ public final class ProtobufEncodingUtils
             case IntervalDayTimeType intervalType when capabilities.supportsParametricInterval() -> new IntervalDayTimeEncoder(intervalType);
             case NumberType numberType -> new NumberEncoder(numberType, capabilities.supportsNumber());
             case VariantType _ -> new VariantEncoder(capabilities.supportsVariant(), capabilities.supportsVariantBinary());
-            case ArrayType arrayType -> new ArrayEncoder(arrayType, createTypeEncoder(arrayType.getElementType(), capabilities));
-            case MapType mapType -> new MapEncoder(mapType, createTypeEncoder(mapType.getKeyType(), capabilities), createTypeEncoder(mapType.getValueType(), capabilities));
+            case ArrayType arrayType -> new ArrayEncoder(arrayType, createTypeEncoder(arrayType.getElementType(), capabilities, jsonMapper));
+            case MapType mapType -> new MapEncoder(
+                    mapType,
+                    createTypeEncoder(mapType.getKeyType(), capabilities, jsonMapper),
+                    createTypeEncoder(mapType.getValueType(), capabilities, jsonMapper),
+                    !capabilities.supportsParametricInterval() && containsDayTimeInterval(mapType.getKeyType()));
             case RowType rowType -> new RowEncoder(rowType, rowType.getFieldTypes().stream()
-                    .map(fieldType -> createTypeEncoder(fieldType, capabilities))
+                    .map(fieldType -> createTypeEncoder(fieldType, capabilities, jsonMapper))
                     .toArray(TypeEncoder[]::new));
-            case Type _ -> new TypeObjectValueEncoder(type, capabilities);
+            case Type _ -> new TypeObjectValueEncoder(type, capabilities, jsonMapper);
         };
     }
 
@@ -818,12 +821,14 @@ public final class ProtobufEncodingUtils
         private final MapType type;
         private final TypeEncoder keyEncoder;
         private final TypeEncoder valueEncoder;
+        private final boolean checkLegacyIntervalKeys;
 
-        private MapEncoder(MapType type, TypeEncoder keyEncoder, TypeEncoder valueEncoder)
+        private MapEncoder(MapType type, TypeEncoder keyEncoder, TypeEncoder valueEncoder, boolean checkLegacyIntervalKeys)
         {
             this.type = requireNonNull(type, "type is null");
             this.keyEncoder = requireNonNull(keyEncoder, "keyEncoder is null");
             this.valueEncoder = requireNonNull(valueEncoder, "valueEncoder is null");
+            this.checkLegacyIntervalKeys = checkLegacyIntervalKeys;
         }
 
         @Override
@@ -834,8 +839,15 @@ public final class ProtobufEncodingUtils
             Block keys = sqlMap.getRawKeyBlock();
             Block values = sqlMap.getRawValueBlock();
             ProtobufWireWriter map = writer.child();
+            // Day to second intervals rounded to milliseconds for a legacy client can make distinct keys equal,
+            // which the client would silently merge; fail like the json encoding does
+            Set<Slice> legacyKeys = checkLegacyIntervalKeys ? new HashSet<>() : Set.of();
             for (int i = 0; i < sqlMap.getSize(); i++) {
+                int start = map.size();
                 writeValue(map, MAP_KEYS, keyEncoder, keys, offset + i);
+                if (checkLegacyIntervalKeys && !legacyKeys.add(wrappedBuffer(Arrays.copyOfRange(map.buffer(), start, map.size())))) {
+                    throw new TrinoException(NOT_SUPPORTED, "Interval map keys collide at millisecond precision; use a client supporting PARAMETRIC_INTERVAL");
+                }
             }
             for (int i = 0; i < sqlMap.getSize(); i++) {
                 writeValue(map, MAP_VALUES, valueEncoder, values, offset + i);
@@ -877,16 +889,16 @@ public final class ProtobufEncodingUtils
     private static final class TypeObjectValueEncoder
             implements TypeEncoder
     {
-        private static final JsonMapper JSON_MAPPER = new JsonMapper();
-
         private final Type type;
         private final Capabilities capabilities;
+        private final JsonMapper jsonMapper;
         private final Zones zones = new Zones();
 
-        private TypeObjectValueEncoder(Type type, Capabilities capabilities)
+        private TypeObjectValueEncoder(Type type, Capabilities capabilities, JsonMapper jsonMapper)
         {
             this.type = requireNonNull(type, "type is null");
             this.capabilities = requireNonNull(capabilities, "capabilities is null");
+            this.jsonMapper = requireNonNull(jsonMapper, "jsonMapper is null");
         }
 
         @Override
@@ -918,7 +930,7 @@ public final class ProtobufEncodingUtils
                 case String text -> writer.writeString(VALUE_TEXT, text);
                 default -> {
                     try {
-                        writer.writeString(VALUE_JSON_OBJECT, JSON_MAPPER.writeValueAsString(value));
+                        writer.writeString(VALUE_JSON_OBJECT, jsonMapper.writeValueAsString(value));
                     }
                     catch (JsonProcessingException e) {
                         throw new TrinoException(SERIALIZATION_ERROR, "Could not serialize value of type " + type.getDisplayName(), e);

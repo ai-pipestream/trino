@@ -234,9 +234,9 @@ public class BenchmarkQueryDataEncoding
             case "json" -> new JsonQueryDataEncoder.Factory(mapper);
             case "json+zstd" -> new JsonQueryDataEncoder.ZstdFactory(config, mapper);
             case "json+lz4" -> new JsonQueryDataEncoder.Lz4Factory(config, mapper);
-            case "protobuf" -> new ProtobufQueryDataEncoder.Factory();
-            case "protobuf+zstd" -> new ProtobufQueryDataEncoder.ZstdFactory(config);
-            case "protobuf+lz4" -> new ProtobufQueryDataEncoder.Lz4Factory(config);
+            case "protobuf" -> new ProtobufQueryDataEncoder.Factory(mapper);
+            case "protobuf+zstd" -> new ProtobufQueryDataEncoder.ZstdFactory(config, mapper);
+            case "protobuf+lz4" -> new ProtobufQueryDataEncoder.Lz4Factory(config, mapper);
             default -> throw new IllegalArgumentException("Unknown encoding: " + encoding);
         };
     }
