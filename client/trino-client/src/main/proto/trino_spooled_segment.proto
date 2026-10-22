@@ -1,0 +1,202 @@
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
+// Wire contract of the `protobuf` spooled query data encoding.
+//
+// A spooled segment is exactly one `Segment` message. `Segment.rows` is a
+// length-delimited field, so a reader can decode the segment row by row
+// without buffering it. The column types are not repeated here: the client
+// already knows them from the `columns` of the query results, and each
+// `Value` carries the field of the Trino type family it was produced from so
+// a reader can verify that the server and client agree.
+//
+// The Java client and server use a hand-written reader and writer of this
+// format (see `io.trino.client.spooling.encoding.protobuf`) so that the
+// client stays free of a protobuf runtime dependency. This file is the
+// authoritative definition; the tests compile it with protoc and check both
+// directions against the generated classes.
+
+syntax = "proto3";
+
+package trino.client.spooling.v1;
+
+option java_package = "io.trino.client.spooling.encoding.protobuf.generated";
+option java_multiple_files = true;
+
+// One spooled segment.
+message Segment {
+  repeated Row rows = 1;
+}
+
+// A result row, or the value of a ROW typed column: one Value per field, in
+// declaration order.
+message Row {
+  repeated Value values = 1;
+}
+
+// One value of any Trino type. Exactly one field of `kind` is set. The value
+// of a NULL of any type is `null`.
+message Value {
+  oneof kind {
+    NullValue null = 1;
+
+    // BOOLEAN
+    bool boolean = 2;
+    // TINYINT, SMALLINT, INTEGER, BIGINT: zig-zag varints
+    sint32 tinyint = 3;
+    sint32 smallint = 4;
+    sint32 integer = 5;
+    sint64 bigint = 6;
+    // REAL, DOUBLE: IEEE 754 bit patterns (NaN and infinities round-trip)
+    float real = 7;
+    double double = 8;
+    // DECIMAL(p, s)
+    Decimal decimal = 9;
+    // VARCHAR(n): UTF-8
+    string varchar = 10;
+    // CHAR(n): UTF-8, without the trailing pad spaces; the reader pads the
+    // value to n code points
+    string char = 11;
+    // VARBINARY, and every other type whose client value is a byte array
+    // (HyperLogLog, P4HyperLogLog, SetDigest, qdigest, tdigest, ...)
+    bytes varbinary = 12;
+    // DATE: days since 1970-01-01
+    sint32 date = 13;
+    // TIME(p), TIME(p) WITH TIME ZONE
+    Time time = 14;
+    TimeWithTimeZone time_with_time_zone = 15;
+    // TIMESTAMP(p), TIMESTAMP(p) WITH TIME ZONE
+    Timestamp timestamp = 16;
+    TimestampWithTimeZone timestamp_with_time_zone = 17;
+    // INTERVAL YEAR TO MONTH: total months
+    sint32 interval_year_to_month = 18;
+    // INTERVAL DAY TO SECOND
+    IntervalDayToSecond interval_day_to_second = 19;
+    // JSON: the JSON text
+    string json = 20;
+    // UUID: 16 bytes, network byte order (RFC 4122)
+    bytes uuid = 21;
+    // IPADDRESS: 16 bytes; an IPv4 address is IPv4-mapped (::ffff:a.b.c.d)
+    bytes ipaddress = 22;
+    // NUMBER
+    NumberValue number = 23;
+    // VARIANT
+    VariantValue variant = 24;
+    // ARRAY(T), MAP(K, V), ROW(...)
+    ArrayValue array = 25;
+    MapValue map = 26;
+    Row row = 27;
+    // Every other type whose client value is text (Geometry, SphericalGeography, color, ...)
+    string text = 28;
+    // Every other type: the JSON document the server would have sent with the
+    // json encoding (BingTile, KdbTree, ...). Only types outside the list
+    // above use this field.
+    string json_object = 29;
+  }
+}
+
+enum NullValue {
+  NULL_VALUE = 0;
+}
+
+message Decimal {
+  // Unscaled value, two's complement
+  oneof unscaled {
+    // when it fits in 64 bits
+    sint64 unscaled_long = 1;
+    // otherwise, big-endian, minimal length (BigInteger.toByteArray)
+    bytes unscaled_bytes = 2;
+  }
+  sint32 scale = 3;
+}
+
+message Time {
+  // picoseconds since midnight, in [0, 86400 * 10^12)
+  int64 picos = 1;
+  // declared precision, 0 to 12
+  int32 precision = 2;
+}
+
+message TimeWithTimeZone {
+  int64 picos = 1;
+  int32 precision = 2;
+  // offset from UTC in minutes, in [-14 * 60, 14 * 60]
+  sint32 offset_minutes = 3;
+}
+
+message Timestamp {
+  // microseconds since 1970-01-01 00:00:00
+  sint64 epoch_micros = 1;
+  // picoseconds within the microsecond, in [0, 10^6)
+  int32 picos_of_micro = 2;
+  // declared precision, 0 to 12
+  int32 precision = 3;
+}
+
+message TimestampWithTimeZone {
+  // milliseconds since 1970-01-01 00:00:00 UTC
+  sint64 epoch_millis = 1;
+  // picoseconds within the millisecond, in [0, 10^9)
+  int32 picos_of_milli = 2;
+  // declared precision, 0 to 12
+  int32 precision = 3;
+  // java.time zone id of the value's time zone, e.g. "UTC", "Europe/Warsaw", "+05:30"
+  string zone_id = 4;
+}
+
+message IntervalDayToSecond {
+  // signed microseconds
+  sint64 micros = 1;
+  // picoseconds within the microsecond, in [0, 10^6), always a positive increment
+  int32 picos_of_micro = 2;
+  // declared fractional seconds precision, 0 to 12
+  int32 fractional_precision = 3;
+}
+
+message NumberValue {
+  oneof value {
+    Decimal decimal = 1;
+    Special special = 2;
+  }
+
+  enum Special {
+    NOT_A_NUMBER = 0;
+    POSITIVE_INFINITY = 1;
+    NEGATIVE_INFINITY = 2;
+  }
+}
+
+message VariantValue {
+  oneof encoding {
+    // when the client supports binary variants
+    VariantBinary binary = 1;
+    // otherwise, the JSON text of the value
+    string json = 2;
+  }
+}
+
+message VariantBinary {
+  bytes metadata = 1;
+  bytes value = 2;
+}
+
+message ArrayValue {
+  repeated Value elements = 1;
+}
+
+message MapValue {
+  // keys[i] maps to values[i]; both lists have the same length
+  repeated Value keys = 1;
+  repeated Value values = 2;
+}
