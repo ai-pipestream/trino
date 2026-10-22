@@ -94,3 +94,25 @@ Throughput for the uncompressed encodings, from the averages above:
   lengths) would remove the 48 bytes of overhead per row and is expected to
   land well below JSON before compression. It is a different encoding and is
   left as follow-up work; see the open questions in the pull request draft.
+
+## Review notes
+
+Added by the cross-model review; the numbers above were not re-measured.
+
+- **Scope of the size result.** `lineitem` has no nulls, timestamps or
+  decimals, and its doubles have two fractional digits, which favors JSON on
+  size. Measure at least one type-rich table (decimals, timestamps with time
+  zone, nulls, arrays) before using these numbers to decide the client's
+  default order.
+- **Noise in the compressed timings.** With one fork on 4 shared vCPUs, the
+  99.9% intervals of `protobuf+zstd` and `json+zstd` encode overlap
+  (9,132 ± 2,660 ms against 12,102 ± 1,847 ms), so the encode speedup with
+  Zstandard is not established; decode is marginal. The uncompressed
+  results are clear. Use several forks on a quiet machine for the compressed
+  variants.
+- **Segment size.** The benchmark's segments (131,072 rows, about 19 MB of
+  JSON) are larger than the default `protocol.spooling.max-segment-size` of
+  16 MB; the comparison holds, but production segments are smaller.
+- **Streaming.** The compressed decoders read and decompress the whole
+  segment before decoding it (`CompressedQueryDataDecoder`), so row by row
+  streaming only applies to uncompressed `protobuf` segments.

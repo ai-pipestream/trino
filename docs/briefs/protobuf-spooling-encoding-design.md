@@ -85,7 +85,7 @@ the CLI, and every other consumer of `trino-client` work unchanged.
 | `TIME(p)` | `time` (14) | `Time{picos` since midnight (varint), `precision}` | `String` `HH:mm:ss[.f{p}]` |
 | `TIME(p) WITH TIME ZONE` | `time_with_time_zone` (15) | `TimeWithTimeZone{picos, precision, offset_minutes` (zig-zag)`}` | `String` `HH:mm:ss[.f{p}]±HH:mm` |
 | `TIMESTAMP(p)` | `timestamp` (16) | `Timestamp{epoch_micros` (zig-zag), `picos_of_micro, precision}` | `String` `uuuu-MM-dd HH:mm:ss[.f{p}]` |
-| `TIMESTAMP(p) WITH TIME ZONE` | `timestamp_with_time_zone` (17) | `TimestampWithTimeZone{epoch_millis` (zig-zag), `picos_of_milli, precision, zone_id}` | `String` `uuuu-MM-dd HH:mm:ss[.f{p}] <zone id>` |
+| `TIMESTAMP(p) WITH TIME ZONE` | `timestamp_with_time_zone` (17) | `TimestampWithTimeZone{epoch_millis` (zig-zag), `picos_of_milli, precision, zone_id, offset_seconds` (zig-zag, the zone's offset at that instant, resolved by the server)`}` | `String` `uuuu-MM-dd HH:mm:ss[.f{p}] <zone id>` |
 | `INTERVAL YEAR TO MONTH` | `interval_year_to_month` (18) | zig-zag varint, total months | `String` `Y-M` |
 | `INTERVAL DAY TO SECOND` | `interval_day_to_second` (19) | `IntervalDayToSecond{micros` (zig-zag), `picos_of_micro, fractional_precision}` | `String` `D HH:mm:ss[.f{p}]` |
 | `JSON` | `json` (20) | UTF-8 JSON text | `String` |
@@ -104,6 +104,13 @@ The last three rows are the only place where a value's representation is
 decided by the Java type of `Type.getObjectValue`, and the `json_object` field
 exists only for types the client has no representation for anyway; the `json`
 encoding sends the same JSON document for them.
+
+The server resolves the zone's offset at each instant and sends it with the
+zone id. The client renders `epoch_millis + offset_seconds`, so it shows the
+local date-time the `json` encoding shows (which the server formats with its
+own time zone rules) without a time zone database of its own: a client JVM
+with older tzdata, or without a zone the server knows (for example
+`America/Ciudad_Juarez` on an old JDK 11), still renders the right value.
 
 Map keys keep their type on the wire. The `json` encoding has to turn every key
 into a JSON object key, which loses the type of non-string keys; the client
@@ -133,12 +140,54 @@ The decoder checks every segment it reads and fails with
 - a `Row` with more values than columns, or fewer;
 - a map with a different number of keys and values;
 - a precision outside 0 to 12, a UUID or IP address that is not 16 bytes;
+- temporal fields outside their range: picoseconds of a day, of a
+  microsecond or of a millisecond, a time zone offset beyond ±14:00 for
+  `TIME WITH TIME ZONE` or ±18:00 for `TIMESTAMP WITH TIME ZONE`, a negative
+  decimal scale or empty unscaled bytes;
+- a segment field tag of field number 0 or wider than 32 bits;
 - malformed varints (more than 10 bytes, or a 32-bit field that does not fit),
   truncated messages, lengths that exceed the enclosing message, and the
   deprecated group wire types.
 
 Unknown fields in `Segment`, `Row` (other than `values`), and the nested
 messages are skipped, so the schema can grow without breaking older clients.
+
+The row buffer grows with the bytes actually read, so a corrupt row length
+cannot make the client allocate up to 2 GB before it notices the segment is
+truncated.
+
+### Server encoder
+
+One `QueryDataEncoder` writes the segments of every driver of a query
+(`OutputSpoolingOperatorFactory` shares it), so `encodeTo` runs concurrently.
+The protobuf encoder keeps no per call state: the row writer is created for
+each segment and the zone cache is a `ConcurrentHashMap`.
+
+### Differences from the json encoding
+
+The decoded values equal the `json` encoding's, with these exceptions, each
+pinned by a test in `TestProtobufEncodingUtils`:
+
+- **Variant as JSON text** (client without `VARIANT_BINARY`): the client's
+  json decoder copies the JSON value through a parser, which normalizes
+  numbers (`1.50` becomes `1.5`, a decimal beyond double precision is
+  rounded). The protobuf decoder returns the text the server wrote.
+- **Malformed UTF-8 in a varchar**: the client's json decoder fails, the
+  protobuf decoder replaces each malformed sequence with U+FFFD. Generated
+  proto3 parsers in other languages reject the segment, as the json decoder
+  does.
+- **Legacy day to second intervals at the ends of the range** (client without
+  `PARAMETRIC_INTERVAL`): the json encoding formats the value rounded to
+  milliseconds as text, which can exceed the microsecond range; the protobuf
+  encoding sends microseconds and fails with "Value out of range for an
+  interval after rounding" for values within half a millisecond of the ends.
+- **Types the client does not know**: the json decoder base64 decodes them,
+  which fails for a type whose value is text or a JSON document; the protobuf
+  decoder returns the text, bytes or parsed JSON document.
+
+Map keys of day to second intervals that collide once rounded to
+milliseconds for a legacy client fail with the json encoding's error, rather
+than one entry being dropped by the client.
 
 ## Files
 
@@ -166,7 +215,9 @@ messages are skipped, so the schema can grow without breaking older clients.
 - `TestProtobufEncodingUtils` (trino-main): every Trino type encoded from
   `Page`s with all three protobuf encodings and decoded by the client, compared
   with the `json` encoding of the same pages, with and without each client
-  capability.
+  capability; zone offsets across historical and daylight saving transitions;
+  segments encoded concurrently by one encoder; and the differences listed
+  above.
 - `TestJdbcSpooledEncodings` (trino-jdbc): end to end through the JDBC driver
   with `encoding=protobuf`, `protobuf+zstd` and `protobuf+lz4`, including a
   60,175 row result that spans several segments and the server's encoding

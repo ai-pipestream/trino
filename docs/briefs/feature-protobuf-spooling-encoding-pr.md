@@ -13,13 +13,13 @@ A protobuf segment is one `Segment` message holding a length-delimited `Row`
 message per result row and a typed `Value` per column, as defined in
 `client/trino-client/src/main/proto/trino_spooled_segment.proto`. Every Trino
 type maps to one field of the `Value` oneof (decimals as unscaled value and
-scale, timestamps as epoch micros, picos and precision, zone ids for
-`WITH TIME ZONE`, typed map keys, ...). Nothing is routed through JSON text,
+scale, timestamps as epoch micros, picos and precision, zone ids and the
+offset the server resolved for `WITH TIME ZONE`, typed map keys, ...). Nothing is routed through JSON text,
 and `NULL` is an explicit value.
 
 - Server: `ProtobufQueryDataEncoder` writes rows straight from `Page`s with
-  per-type encoders (`ProtobufEncodingUtils`), one row at a time through a
-  reusable buffer. The compressed variants reuse `CompressedQueryDataEncoder`.
+  per-type encoders (`ProtobufEncodingUtils`), one row at a time. The
+  encoder is shared by the drivers of a query and keeps no per call state. The compressed variants reuse `CompressedQueryDataEncoder`.
   The encodings are enabled by default and controlled by
   `protocol.spooling.encoding.protobuf.enabled`,
   `protocol.spooling.encoding.protobuf+zstd.enabled` and
