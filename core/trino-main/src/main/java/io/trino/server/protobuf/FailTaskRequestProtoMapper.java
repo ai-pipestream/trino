@@ -17,6 +17,7 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import io.trino.server.FailTaskRequest;
 import io.trino.spi.TrinoException;
 
+import static io.trino.server.protobuf.ExecutionFailureInfoProtoMapper.newCodedInputStream;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 
 public final class FailTaskRequestProtoMapper
@@ -43,7 +44,7 @@ public final class FailTaskRequestProtoMapper
     public static FailTaskRequest parseFrom(byte[] bytes)
     {
         try {
-            return fromProto(io.trino.server.protocol.v1.FailTaskRequest.parseFrom(bytes));
+            return fromProto(io.trino.server.protocol.v1.FailTaskRequest.parser().parseFrom(newCodedInputStream(bytes)));
         }
         catch (InvalidProtocolBufferException e) {
             throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to decode protobuf FailTaskRequest", e);

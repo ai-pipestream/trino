@@ -146,7 +146,7 @@ public class MemoryHandleCodecProvider
                 },
                 proto -> new MemoryInsertTableHandle(
                         proto.getTable(),
-                        insertMode(proto.getMode()),
+                        insertMode(proto),
                         proto.getActiveTableIdsList().stream().collect(toImmutableSet())),
                 io.trino.plugin.memory.protobuf.MemoryInsertTableHandle.parser()));
     }
@@ -160,10 +160,12 @@ public class MemoryHandleCodecProvider
                 io.trino.plugin.memory.protobuf.MemoryTransactionHandle.parser()));
     }
 
-    private static MemoryInsertTableHandle.InsertMode insertMode(InsertMode mode)
+    private static MemoryInsertTableHandle.InsertMode insertMode(io.trino.plugin.memory.protobuf.MemoryInsertTableHandle proto)
     {
+        InsertMode mode = proto.getMode();
+        // UNRECOGNIZED has no number, so report the raw wire value
         if (mode == InsertMode.INSERT_MODE_UNSPECIFIED || mode == InsertMode.UNRECOGNIZED) {
-            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Invalid insert mode in protobuf memory insert table handle: " + mode.getNumber());
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Invalid insert mode in protobuf memory insert table handle: " + proto.getModeValue());
         }
         return MemoryInsertTableHandle.InsertMode.valueOf(mode.name());
     }

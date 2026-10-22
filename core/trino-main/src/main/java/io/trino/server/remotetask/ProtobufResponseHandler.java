@@ -69,7 +69,10 @@ public class ProtobufResponseHandler<T>
             throw new UncheckedIOException(e);
         }
         int statusCode = response.getStatusCode();
-        if (statusCode != HttpStatus.OK.code() || body.length == 0) {
+        // An empty body is not "no value": it is the valid encoding of a message
+        // whose fields all have default values, such as the initial dynamic filter
+        // domains, so it is parsed like any other body
+        if (statusCode != HttpStatus.OK.code()) {
             return new ProtobufResponse<>(statusCode, null, null, new String(body, UTF_8), body.length);
         }
         Optional<String> contentType = response.getHeader(CONTENT_TYPE);

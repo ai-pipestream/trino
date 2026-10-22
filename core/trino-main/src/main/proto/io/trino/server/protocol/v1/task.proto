@@ -24,6 +24,8 @@ option java_multiple_files = true;
 // No JSON is ever carried inside these messages. Values that are already
 // binary (Trino blocks) travel as plain bytes fields.
 
+// Every io.trino.execution.TaskState value, including the transient
+// CANCELING, ABORTING and FAILING states a task reports while it terminates.
 enum TaskState {
   TASK_STATE_UNSPECIFIED = 0;
   PLANNED = 1;
@@ -33,6 +35,9 @@ enum TaskState {
   CANCELED = 5;
   ABORTED = 6;
   FAILED = 7;
+  CANCELING = 8;
+  ABORTING = 9;
+  FAILING = 10;
 }
 
 enum ErrorType {

@@ -17,7 +17,6 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.plugin.memory.MemoryInsertTableHandle.InsertMode;
 import io.trino.spi.HostAddress;
-import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorHandleCodec;
 import io.trino.spi.connector.ConnectorHandleCodecProvider;
@@ -41,8 +40,8 @@ import java.util.OptionalLong;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
+import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestMemoryHandleCodecProvider
 {
@@ -104,23 +103,26 @@ public class TestMemoryHandleCodecProvider
     }
 
     @Test
-    public void testInsertTableHandleRoundTripAppend()
+    public void testInsertTableHandleRoundTripEveryMode()
     {
-        MemoryInsertTableHandle original = new MemoryInsertTableHandle(3, InsertMode.APPEND, ImmutableSet.of());
         ConnectorHandleCodec<ConnectorInsertTableHandle> codec = provider.getInsertTableHandleCodec().orElseThrow();
-        assertThat(codec.deserialize(codec.serialize(original))).isEqualTo(original);
+        for (InsertMode mode : InsertMode.values()) {
+            MemoryInsertTableHandle original = new MemoryInsertTableHandle(3, mode, ImmutableSet.of());
+            assertThat(codec.deserialize(codec.serialize(original))).isEqualTo(original);
+        }
     }
 
     @Test
     public void testInsertTableHandleUnspecifiedModeIsRejected()
     {
-        byte[] unspecifiedMode = io.trino.plugin.memory.protobuf.MemoryInsertTableHandle.newBuilder()
-                .setTable(3)
-                .build()
-                .toByteArray();
-        assertThatThrownBy(() -> provider.getInsertTableHandleCodec().orElseThrow().deserialize(unspecifiedMode))
-                .isInstanceOf(TrinoException.class)
-                .hasMessageContaining("Invalid insert mode");
+        assertInvalidInsertModeIsRejected(0);
+    }
+
+    @Test
+    public void testInsertTableHandleUnrecognizedModeIsRejected()
+    {
+        // A value outside the enum decodes to UNRECOGNIZED, whose getNumber() throws
+        assertInvalidInsertModeIsRejected(99);
     }
 
     @Test
@@ -135,9 +137,20 @@ public class TestMemoryHandleCodecProvider
     public void testCorruptBytesFailWithCategorizedError()
     {
         byte[] truncated = {0x12, 0x05, 0x01};
-        assertThatThrownBy(() -> provider.getTableHandleCodec().orElseThrow().deserialize(truncated))
-                .isInstanceOf(TrinoException.class)
-                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()));
+        assertTrinoExceptionThrownBy(() -> provider.getTableHandleCodec().orElseThrow().deserialize(truncated))
+                .hasErrorCode(GENERIC_INTERNAL_ERROR);
+    }
+
+    private void assertInvalidInsertModeIsRejected(int mode)
+    {
+        byte[] invalidMode = io.trino.plugin.memory.protobuf.MemoryInsertTableHandle.newBuilder()
+                .setTable(3)
+                .setModeValue(mode)
+                .build()
+                .toByteArray();
+        assertTrinoExceptionThrownBy(() -> provider.getInsertTableHandleCodec().orElseThrow().deserialize(invalidMode))
+                .hasErrorCode(GENERIC_INTERNAL_ERROR)
+                .hasMessage("Invalid insert mode in protobuf memory insert table handle: " + mode);
     }
 
     @Test

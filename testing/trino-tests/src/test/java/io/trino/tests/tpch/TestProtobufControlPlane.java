@@ -13,7 +13,10 @@
  */
 package io.trino.tests.tpch;
 
+import com.google.inject.Key;
+import io.trino.server.ControlPlaneEncoding;
 import io.trino.server.DynamicFilterService.DynamicFiltersStats;
+import io.trino.server.InternalCommunicationConfig;
 import io.trino.spi.predicate.Domain;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
@@ -21,6 +24,7 @@ import io.trino.testing.QueryRunner.MaterializedResultWithPlan;
 import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
 
+import static io.trino.spi.StandardErrorCode.DIVISION_BY_ZERO;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -40,6 +44,17 @@ public class TestProtobufControlPlane
         return TpchQueryRunner.builder()
                 .addExtraProperty("internal-communication.control-plane.encoding", "PROTOBUF")
                 .build();
+    }
+
+    @Test
+    public void testEveryNodeUsesProtobuf()
+    {
+        // Without this the remaining tests would pass if the property were
+        // silently ignored and every node fell back to JSON
+        assertThat(getDistributedQueryRunner().getServers())
+                .hasSizeGreaterThan(1)
+                .allSatisfy(server -> assertThat(server.getInstance(Key.get(InternalCommunicationConfig.class)).getControlPlaneEncoding())
+                        .isEqualTo(ControlPlaneEncoding.PROTOBUF));
     }
 
     @Test
@@ -65,6 +80,17 @@ public class TestProtobufControlPlane
         assertThat(dynamicFiltersStats.getDynamicFiltersCompleted()).isGreaterThan(0);
         assertThat(dynamicFiltersStats.getDynamicFilterDomainStats())
                 .anySatisfy(domainStats -> assertThat(domainStats.getSimplifiedDomain()).isNotEqualTo(Domain.all(BIGINT).toString()));
+    }
+
+    @Test
+    public void testWorkerFailure()
+    {
+        // The failure is raised in a worker task and reaches the coordinator as
+        // an ExecutionFailureInfo in the protobuf TaskStatus, error code included
+        assertThat(query("SELECT count(*) FROM nation WHERE 1 / (nationkey - nationkey) > 0"))
+                .failure()
+                .hasErrorCode(DIVISION_BY_ZERO)
+                .hasMessage("Division by zero");
     }
 
     @Test

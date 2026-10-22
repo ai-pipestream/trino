@@ -135,8 +135,8 @@ public class DomainProtoMapper
 
     private static Range toRange(Type type, List<Object> bounds, DomainRange range)
     {
-        Object low = range.getLowPosition() < 0 ? null : bounds.get(range.getLowPosition());
-        Object high = range.getHighPosition() < 0 ? null : bounds.get(range.getHighPosition());
+        Object low = bound(bounds, range.getLowPosition());
+        Object high = bound(bounds, range.getHighPosition());
         if (low == null && high == null) {
             return Range.all(type);
         }
@@ -147,6 +147,17 @@ public class DomainProtoMapper
             return range.getHighInclusive() ? Range.lessThanOrEqual(type, high) : Range.lessThan(type, high);
         }
         return Range.range(type, low, range.getLowInclusive(), high, range.getHighInclusive());
+    }
+
+    private static Object bound(List<Object> bounds, int position)
+    {
+        if (position < 0) {
+            return null;
+        }
+        if (position >= bounds.size()) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Range bound position %s in protobuf domain is out of range for %s bounds".formatted(position, bounds.size()));
+        }
+        return bounds.get(position);
     }
 
     private ByteString serializeValues(Type type, List<?> values)

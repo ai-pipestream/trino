@@ -21,14 +21,13 @@ import io.trino.client.ErrorLocation;
 import io.trino.execution.DynamicFiltersCollector.VersionedDynamicFilterDomains;
 import io.trino.execution.ExecutionFailureInfo;
 import io.trino.execution.TaskId;
+import io.trino.execution.TaskState;
 import io.trino.execution.TaskStatus;
 import io.trino.execution.buffer.OutputBufferStatus;
 import io.trino.server.FailTaskRequest;
-import io.trino.server.protocol.v1.TaskState;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.ErrorType;
 import io.trino.spi.HostAddress;
-import io.trino.spi.TrinoException;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.ValueSet;
@@ -45,18 +44,19 @@ import java.util.stream.LongStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.block.BlockAssertions.createLongsBlock;
+import static io.trino.execution.DynamicFiltersCollector.INITIAL_DYNAMIC_FILTER_DOMAINS;
 import static io.trino.execution.TaskState.FAILED;
 import static io.trino.metadata.InternalBlockEncodingSerde.TESTING_BLOCK_ENCODING_SERDE;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.testing.assertions.TrinoExceptionAssert.assertTrinoExceptionThrownBy;
 import static io.trino.type.ColorType.COLOR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
 
 public class TestTaskProtoMappers
@@ -108,9 +108,78 @@ public class TestTaskProtoMappers
     }
 
     @Test
+    public void testTaskStatusRoundTripEveryTaskState()
+    {
+        TaskStatus initial = TaskStatus.initialTaskStatus(
+                TaskId.valueOf("20240101_000000_00000_xyz.0.0.0"),
+                URI.create("http://worker.example.com:8080/v1/task/20240101_000000_00000_xyz.0.0.0"),
+                "worker-0",
+                false);
+        for (TaskState state : TaskState.values()) {
+            TaskStatus original = new TaskStatus(
+                    initial.taskId(),
+                    initial.taskInstanceId(),
+                    initial.version(),
+                    state,
+                    initial.self(),
+                    initial.nodeId(),
+                    initial.speculative(),
+                    initial.failures(),
+                    initial.queuedPartitionedDrivers(),
+                    initial.runningPartitionedDrivers(),
+                    initial.outputBufferStatus(),
+                    initial.outputDataSize(),
+                    initial.writerInputDataSize(),
+                    initial.physicalWrittenDataSize(),
+                    initial.maxWriterCount(),
+                    initial.memoryReservation(),
+                    initial.peakMemoryReservation(),
+                    initial.revocableMemoryReservation(),
+                    initial.fullGcCount(),
+                    initial.fullGcTime(),
+                    initial.dynamicFiltersVersion(),
+                    initial.queuedPartitionedSplitsWeight(),
+                    initial.runningPartitionedSplitsWeight());
+            assertThat(TaskStatusProtoMapper.parseFrom(TaskStatusProtoMapper.toByteArray(original)).state()).isEqualTo(state);
+        }
+    }
+
+    @Test
+    public void testFailTaskRequestRoundTripEveryErrorType()
+    {
+        for (ErrorType errorType : ErrorType.values()) {
+            ExecutionFailureInfo failure = new ExecutionFailureInfo(
+                    "io.trino.spi.TrinoException",
+                    "failed",
+                    null,
+                    ImmutableList.of(),
+                    ImmutableList.of(),
+                    null,
+                    new ErrorCode(1, "TEST_ERROR", errorType, false),
+                    null);
+            FailTaskRequest decoded = FailTaskRequestProtoMapper.parseFrom(FailTaskRequestProtoMapper.toByteArray(new FailTaskRequest(failure)));
+            assertThat(decoded.getFailureInfo().errorCode().getType()).isEqualTo(errorType);
+        }
+    }
+
+    @Test
     public void testFailTaskRequestRoundTrip()
     {
         FailTaskRequest original = new FailTaskRequest(failureInfo());
+        FailTaskRequest decoded = FailTaskRequestProtoMapper.parseFrom(FailTaskRequestProtoMapper.toByteArray(original));
+        assertFailureInfoEquals(decoded.getFailureInfo(), original.getFailureInfo());
+    }
+
+    @Test
+    public void testFailTaskRequestRoundTripDeepCauseChain()
+    {
+        // Failures.toFailure does not bound the cause chain, and the JSON codec
+        // accepts a nesting depth well beyond protobuf's default limit of 100
+        ExecutionFailureInfo failure = failureInfo();
+        for (int depth = 0; depth < 500; depth++) {
+            failure = new ExecutionFailureInfo("java.lang.RuntimeException", "wrapped " + depth, failure, ImmutableList.of(), ImmutableList.of(), null, null, null);
+        }
+        FailTaskRequest original = new FailTaskRequest(failure);
         FailTaskRequest decoded = FailTaskRequestProtoMapper.parseFrom(FailTaskRequestProtoMapper.toByteArray(original));
         assertFailureInfoEquals(decoded.getFailureInfo(), original.getFailureInfo());
     }
@@ -162,44 +231,61 @@ public class TestTaskProtoMappers
     {
         // field 1, length-delimited, declared length 5 but only one byte follows
         byte[] truncated = {0x0A, 0x05, 0x01};
-        assertThatThrownBy(() -> TaskStatusProtoMapper.parseFrom(truncated))
-                .isInstanceOf(TrinoException.class)
-                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()));
-        assertThatThrownBy(() -> FailTaskRequestProtoMapper.parseFrom(truncated))
-                .isInstanceOf(TrinoException.class)
-                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()));
-        assertThatThrownBy(() -> dynamicFilterDomainsProtoMapper.parseFrom(truncated))
-                .isInstanceOf(TrinoException.class)
-                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()));
+        assertTrinoExceptionThrownBy(() -> TaskStatusProtoMapper.parseFrom(truncated))
+                .hasErrorCode(GENERIC_INTERNAL_ERROR);
+        assertTrinoExceptionThrownBy(() -> FailTaskRequestProtoMapper.parseFrom(truncated))
+                .hasErrorCode(GENERIC_INTERNAL_ERROR);
+        assertTrinoExceptionThrownBy(() -> dynamicFilterDomainsProtoMapper.parseFrom(truncated))
+                .hasErrorCode(GENERIC_INTERNAL_ERROR);
+    }
+
+    @Test
+    public void testInitialDynamicFilterDomainsEncodeToEmptyMessage()
+    {
+        // Every field has its default value, so the encoding is zero bytes
+        byte[] bytes = dynamicFilterDomainsProtoMapper.toByteArray(INITIAL_DYNAMIC_FILTER_DOMAINS);
+        assertThat(bytes).isEmpty();
+        VersionedDynamicFilterDomains decoded = dynamicFilterDomainsProtoMapper.parseFrom(bytes);
+        assertThat(decoded.getVersion()).isEqualTo(INITIAL_DYNAMIC_FILTER_DOMAINS.getVersion());
+        assertThat(decoded.getDynamicFilterDomains()).isEmpty();
+    }
+
+    @Test
+    public void testRangeBoundPositionOutOfRangeIsRejected()
+    {
+        io.trino.server.protocol.v1.Domain domain = dynamicFilterDomainsProtoMapper.toProto(new VersionedDynamicFilterDomains(
+                        1,
+                        ImmutableMap.of(new DynamicFilterId("df"), Domain.create(ValueSet.ofRanges(Range.range(BIGINT, 1L, true, 5L, true)), false))))
+                .getDynamicFilterDomainsOrThrow("df");
+        byte[] outOfRange = io.trino.server.protocol.v1.VersionedDynamicFilterDomains.newBuilder()
+                .setVersion(1)
+                .putDynamicFilterDomains("df", domain.toBuilder()
+                        .setRanges(domain.getRanges().toBuilder()
+                                .setRanges(0, domain.getRanges().getRanges(0).toBuilder().setHighPosition(2)))
+                        .build())
+                .build()
+                .toByteArray();
+        assertTrinoExceptionThrownBy(() -> dynamicFilterDomainsProtoMapper.parseFrom(outOfRange))
+                .hasErrorCode(GENERIC_INTERNAL_ERROR)
+                .hasMessageContaining("Range bound position 2");
     }
 
     @Test
     public void testUnspecifiedEnumValuesAreRejected()
     {
-        TaskStatus taskStatus = TaskStatus.initialTaskStatus(
-                TaskId.valueOf("20240101_000000_00000_xyz.0.0.0"),
-                URI.create("http://worker.example.com:8080/v1/task/20240101_000000_00000_xyz.0.0.0"),
-                "worker-0",
-                false);
-        byte[] unspecifiedState = TaskStatusProtoMapper.toProto(taskStatus).toBuilder()
-                .setState(TaskState.TASK_STATE_UNSPECIFIED)
-                .build()
-                .toByteArray();
-        assertThatThrownBy(() -> TaskStatusProtoMapper.parseFrom(unspecifiedState))
-                .isInstanceOf(TrinoException.class)
-                .hasMessageContaining("Invalid task state");
+        assertInvalidEnumValuesAreRejected(0);
+    }
 
-        io.trino.server.protocol.v1.FailTaskRequest failTaskRequest = FailTaskRequestProtoMapper.toProto(new FailTaskRequest(failureInfo()));
-        byte[] unspecifiedErrorType = failTaskRequest.toBuilder()
-                .setFailureInfo(failTaskRequest.getFailureInfo().toBuilder()
-                        .setErrorCode(failTaskRequest.getFailureInfo().getErrorCode().toBuilder()
-                                .setType(io.trino.server.protocol.v1.ErrorType.ERROR_TYPE_UNSPECIFIED)))
-                .build()
-                .toByteArray();
-        assertThatThrownBy(() -> FailTaskRequestProtoMapper.parseFrom(unspecifiedErrorType))
-                .isInstanceOf(TrinoException.class)
-                .hasMessageContaining("Invalid error type");
+    @Test
+    public void testUnrecognizedEnumValuesAreRejected()
+    {
+        // A value outside the enum decodes to UNRECOGNIZED, whose getNumber() throws
+        assertInvalidEnumValuesAreRejected(99);
+    }
 
+    @Test
+    public void testDomainWithoutValuesIsRejected()
+    {
         byte[] domainWithoutValues = io.trino.server.protocol.v1.VersionedDynamicFilterDomains.newBuilder()
                 .setVersion(1)
                 .putDynamicFilterDomains("df", io.trino.server.protocol.v1.Domain.newBuilder()
@@ -207,9 +293,36 @@ public class TestTaskProtoMappers
                         .build())
                 .build()
                 .toByteArray();
-        assertThatThrownBy(() -> dynamicFilterDomainsProtoMapper.parseFrom(domainWithoutValues))
-                .isInstanceOf(TrinoException.class)
+        assertTrinoExceptionThrownBy(() -> dynamicFilterDomainsProtoMapper.parseFrom(domainWithoutValues))
+                .hasErrorCode(GENERIC_INTERNAL_ERROR)
                 .hasMessageContaining("no values set");
+    }
+
+    private static void assertInvalidEnumValuesAreRejected(int value)
+    {
+        TaskStatus taskStatus = TaskStatus.initialTaskStatus(
+                TaskId.valueOf("20240101_000000_00000_xyz.0.0.0"),
+                URI.create("http://worker.example.com:8080/v1/task/20240101_000000_00000_xyz.0.0.0"),
+                "worker-0",
+                false);
+        byte[] invalidState = TaskStatusProtoMapper.toProto(taskStatus).toBuilder()
+                .setStateValue(value)
+                .build()
+                .toByteArray();
+        assertTrinoExceptionThrownBy(() -> TaskStatusProtoMapper.parseFrom(invalidState))
+                .hasErrorCode(GENERIC_INTERNAL_ERROR)
+                .hasMessage("Invalid task state in protobuf TaskStatus: " + value);
+
+        io.trino.server.protocol.v1.FailTaskRequest failTaskRequest = FailTaskRequestProtoMapper.toProto(new FailTaskRequest(failureInfo()));
+        byte[] invalidErrorType = failTaskRequest.toBuilder()
+                .setFailureInfo(failTaskRequest.getFailureInfo().toBuilder()
+                        .setErrorCode(failTaskRequest.getFailureInfo().getErrorCode().toBuilder()
+                                .setTypeValue(value)))
+                .build()
+                .toByteArray();
+        assertTrinoExceptionThrownBy(() -> FailTaskRequestProtoMapper.parseFrom(invalidErrorType))
+                .hasErrorCode(GENERIC_INTERNAL_ERROR)
+                .hasMessage("Invalid error type in protobuf ExecutionFailureInfo: " + value);
     }
 
     private static void assertTaskStatusEquals(TaskStatus actual, TaskStatus expected)
