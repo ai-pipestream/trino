@@ -13,6 +13,7 @@
  */
 package io.trino.decoder.protobuf;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
@@ -247,6 +248,37 @@ public class TestProtoFileDescriptorBuilder
         assertThat(holder.findNestedTypeByName("NotAnEntry").getOptions().getDeprecated()).isTrue();
         // explicit entry messages keep their position among the nested messages
         assertThat(holder.getNestedTypes()).extracting(Descriptor::getName).containsExactly("AttributesEntry", "ValuesEntry", "NotAnEntry", "Value");
+    }
+
+    @Test
+    public void testMalformedExplicitMapEntryIsRejected()
+    {
+        // decoding and encoding a map rely on the entry message having the shape protoc gives it
+        for (String entry : ImmutableList.of(
+                "string key = 1; string value = 2; string extra = 3;",
+                "string key = 1;",
+                "string name = 1; string value = 2;",
+                "string key = 2; string value = 1;",
+                "repeated string key = 1; string value = 2;",
+                "string key = 1; string value = 2; message Nested {}",
+                "string key = 1; string value = 2; enum Kind { UNKNOWN = 0; }",
+                "oneof variant { string key = 1; string value = 2; }")) {
+            assertThatThrownBy(() -> build("entries.proto",
+                    """
+                    syntax = "proto3";
+                    message Holder {
+                      repeated .Holder.AttributesEntry attributes = 1;
+                      message AttributesEntry {
+                        option map_entry = true;
+                        %s
+                      }
+                    }
+                    """.formatted(entry)))
+                    .as(entry)
+                    .isInstanceOf(TrinoException.class)
+                    .hasMessage("Message 'AttributesEntry' in protobuf schema 'entries.proto' is declared as a map entry but does not consist of the fields key = 1 and value = 2")
+                    .satisfies(e -> assertThat(((TrinoException) e).getErrorCode()).isEqualTo(INVALID_PROTO_FILE.toErrorCode()));
+        }
     }
 
     @Test
