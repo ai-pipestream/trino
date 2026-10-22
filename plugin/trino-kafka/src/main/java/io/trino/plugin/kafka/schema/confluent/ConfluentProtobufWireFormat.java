@@ -36,9 +36,15 @@ import static java.util.Objects.requireNonNull;
  * </pre>
  * The message indexes locate the message type within the schema's file: the index of the
  * top-level message, then one index per nesting step, each counted among the messages declared
- * at that level (enums and the synthetic entry messages of map fields do not count). The
- * indexes are written as a zigzag-encoded varint count followed by zigzag-encoded varint
- * indexes, except that the most common path, {@code [0]}, is written as a single zero byte.
+ * at that level of the schema text. Enums do not count, and neither do the entry messages that
+ * {@code map<K, V>} fields imply, but entry messages that the text declares explicitly with
+ * {@code option map_entry = true}, as schema text generated from a descriptor does, count like
+ * any other message. This is how the Confluent deserializer resolves the indexes. The indexes
+ * are written as a zigzag-encoded varint count followed by zigzag-encoded varint indexes,
+ * except that the most common path, {@code [0]}, is written as a single zero byte.
+ * <p>
+ * The descriptors built from schema text place the implied entry messages after all declared
+ * nested messages, so counting every nested message of a descriptor yields these indexes.
  */
 public final class ConfluentProtobufWireFormat
 {
@@ -111,7 +117,7 @@ public final class ConfluentProtobufWireFormat
     }
 
     /**
-     * Returns the message the index path points at within the file, if the path exists.
+     * Returns the message the index path points at within the file, if the path exists and does not point at a map entry.
      */
     public static Optional<Descriptor> findMessage(FileDescriptor file, List<Integer> messageIndexes)
     {
@@ -121,14 +127,14 @@ public final class ConfluentProtobufWireFormat
         List<Descriptor> candidates = file.getMessageTypes();
         Descriptor message = null;
         for (int index : messageIndexes) {
-            List<Descriptor> declared = candidates.stream()
-                    .filter(candidate -> !candidate.getOptions().getMapEntry())
-                    .toList();
-            if (index < 0 || index >= declared.size()) {
+            if (index < 0 || index >= candidates.size()) {
                 return Optional.empty();
             }
-            message = declared.get(index);
+            message = candidates.get(index);
             candidates = message.getNestedTypes();
+        }
+        if (message.getOptions().getMapEntry()) {
+            return Optional.empty();
         }
         return Optional.of(message);
     }
@@ -142,25 +148,11 @@ public final class ConfluentProtobufWireFormat
         Deque<Integer> indexes = new ArrayDeque<>();
         Descriptor current = message;
         while (current.getContainingType() != null) {
-            indexes.addFirst(indexAmongDeclared(current.getContainingType().getNestedTypes(), current));
+            indexes.addFirst(current.getIndex());
             current = current.getContainingType();
         }
-        indexes.addFirst(indexAmongDeclared(current.getFile().getMessageTypes(), current));
+        indexes.addFirst(current.getIndex());
         return ImmutableList.copyOf(indexes);
-    }
-
-    private static int indexAmongDeclared(List<Descriptor> messages, Descriptor message)
-    {
-        int index = 0;
-        for (Descriptor candidate : messages) {
-            if (candidate == message) {
-                return index;
-            }
-            if (!candidate.getOptions().getMapEntry()) {
-                index++;
-            }
-        }
-        throw new IllegalArgumentException(format("Message %s is not declared among %s", message.getFullName(), messages));
     }
 
     private static void writeVarint(ByteArrayOutputStream out, int value)
