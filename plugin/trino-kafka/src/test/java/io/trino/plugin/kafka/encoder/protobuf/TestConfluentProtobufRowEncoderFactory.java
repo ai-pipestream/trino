@@ -15,6 +15,7 @@ package io.trino.plugin.kafka.encoder.protobuf;
 
 import com.google.common.collect.ImmutableList;
 import com.google.protobuf.Descriptors.Descriptor;
+import com.google.protobuf.Descriptors.EnumValueDescriptor;
 import com.google.protobuf.DynamicMessage;
 import io.confluent.kafka.schemaregistry.avro.AvroSchema;
 import io.confluent.kafka.schemaregistry.avro.AvroSchemaProvider;
@@ -31,6 +32,11 @@ import io.trino.plugin.kafka.schema.confluent.ConfluentProtobufWireFormat.Frame;
 import io.trino.plugin.kafka.schema.confluent.ConfluentSchemaRegistryDynamicMessageProvider;
 import io.trino.spi.ErrorCodeSupplier;
 import io.trino.spi.TrinoException;
+import io.trino.spi.block.Block;
+import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.MapType;
+import io.trino.spi.type.TypeOperators;
 import io.trino.testing.TestingConnectorSession;
 import org.apache.avro.SchemaBuilder;
 import org.junit.jupiter.api.Test;
@@ -46,7 +52,9 @@ import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SCHEMA_REGISTRY_ERROR;
 import static io.trino.plugin.kafka.encoder.KafkaFieldType.KEY;
 import static io.trino.plugin.kafka.encoder.KafkaFieldType.MESSAGE;
 import static io.trino.plugin.kafka.schema.confluent.ConfluentProtobufWireFormat.readFrame;
+import static io.trino.spi.StandardErrorCode.CONSTRAINT_VIOLATION;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static io.trino.spi.block.MapValueBuilder.buildMapValue;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -181,6 +189,75 @@ public class TestConfluentProtobufRowEncoderFactory
     }
 
     @Test
+    public void testEncodeEnumsAndExplicitMapEntries()
+            throws Exception
+    {
+        // the form of schema text a Confluent serializer registers: explicit map entry messages and fully qualified type names
+        MockSchemaRegistryClient client = createClient();
+        client.register(TOPIC + "-value", schema(client,
+                """
+                syntax = "proto3";
+
+                message schema {
+                  repeated .schema.AttributesEntry attributes = 1;
+                  .schema.Color color = 2;
+                  repeated .schema.Color palette = 3;
+
+                  message AttributesEntry {
+                    option map_entry = true;
+
+                    string key = 1;
+                    string value = 2;
+                  }
+                  enum Color {
+                    RED = 0;
+                    GREEN = 1;
+                  }
+                }
+                """));
+        MapType mapType = new MapType(VARCHAR, VARCHAR, new TypeOperators());
+        ArrayType arrayType = new ArrayType(VARCHAR);
+        List<EncoderColumnHandle> columns = ImmutableList.of(
+                new KafkaColumnHandle("attributes", mapType, "attributes", null, null, false, false, false),
+                new KafkaColumnHandle("color", VARCHAR, "color", null, null, false, false, false),
+                new KafkaColumnHandle("palette", arrayType, "palette", null, null, false, false, false));
+
+        try (RowEncoder encoder = createEncoder(client, Optional.of(TOPIC + "-value"), columns)) {
+            encoder.appendColumnValue(writeNativeValue(mapType, buildMapValue(mapType, 1, (keyBuilder, valueBuilder) -> {
+                VARCHAR.writeSlice(keyBuilder, utf8Slice("size"));
+                VARCHAR.writeSlice(valueBuilder, utf8Slice("large"));
+            })), 0);
+            encoder.appendColumnValue(writeNativeValue(VARCHAR, utf8Slice("GREEN")), 0);
+            encoder.appendColumnValue(writeNativeValue(arrayType, varcharArray("GREEN", "RED")), 0);
+            DynamicMessage decoded = new ConfluentSchemaRegistryDynamicMessageProvider(client).parseDynamicMessage(encoder.toByteArray());
+
+            Descriptor descriptor = decoded.getDescriptorForType();
+            assertThat(descriptor.findFieldByName("attributes").isMapField()).isTrue();
+            DynamicMessage entry = (DynamicMessage) decoded.getRepeatedField(descriptor.findFieldByName("attributes"), 0);
+            assertThat(entry.getField(entry.getDescriptorForType().findFieldByName("key"))).isEqualTo("size");
+            assertThat(entry.getField(entry.getDescriptorForType().findFieldByName("value"))).isEqualTo("large");
+            assertThat(((EnumValueDescriptor) decoded.getField(descriptor.findFieldByName("color"))).getName()).isEqualTo("GREEN");
+            assertThat((List<?>) decoded.getField(descriptor.findFieldByName("palette")))
+                    .extracting(value -> ((EnumValueDescriptor) value).getName())
+                    .containsExactly("GREEN", "RED");
+        }
+
+        // a name that is not a member of the enum cannot be written
+        try (RowEncoder encoder = createEncoder(client, Optional.of(TOPIC + "-value"), columns.subList(1, 2))) {
+            assertTrinoException(
+                    () -> encoder.appendColumnValue(writeNativeValue(VARCHAR, utf8Slice("BLUE")), 0),
+                    CONSTRAINT_VIOLATION,
+                    "Value 'BLUE' is not a member of enum schema.Color of field schema.color");
+        }
+        try (RowEncoder encoder = createEncoder(client, Optional.of(TOPIC + "-value"), columns.subList(2, 3))) {
+            assertTrinoException(
+                    () -> encoder.appendColumnValue(writeNativeValue(arrayType, varcharArray("RED", "BLUE")), 0),
+                    CONSTRAINT_VIOLATION,
+                    "Value 'BLUE' is not a member of enum schema.Color of field schema.palette");
+        }
+    }
+
+    @Test
     public void testSubjectIsRequired()
     {
         MockSchemaRegistryClient client = createClient();
@@ -216,6 +293,15 @@ public class TestConfluentProtobufRowEncoderFactory
             }
         };
         assertTrinoException(() -> createEncoder(client, Optional.of(TOPIC + "-value"), ImmutableList.of(COL_1)), KAFKA_SCHEMA_REGISTRY_ERROR, "Failed to look up the latest schema of subject 'orders-value' in the schema registry: Connection refused");
+    }
+
+    private static Block varcharArray(String... values)
+    {
+        BlockBuilder builder = VARCHAR.createBlockBuilder(null, values.length);
+        for (String value : values) {
+            VARCHAR.writeSlice(builder, utf8Slice(value));
+        }
+        return builder.build();
     }
 
     private static RowEncoder createEncoder(MockSchemaRegistryClient client, Optional<String> subject, List<EncoderColumnHandle> columns)
