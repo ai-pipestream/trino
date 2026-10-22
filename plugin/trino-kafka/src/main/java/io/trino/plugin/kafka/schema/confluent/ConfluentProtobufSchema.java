@@ -14,6 +14,7 @@
 package io.trino.plugin.kafka.schema.confluent;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Descriptors.FileDescriptor;
 import io.confluent.kafka.schemaregistry.ParsedSchema;
@@ -55,6 +56,31 @@ public final class ConfluentProtobufSchema
     public static final String TYPE = "PROTOBUF";
 
     private static final String ROOT_FILE_NAME = "schema.proto";
+
+    // Confluent serializers do not register references for the files of Confluent's own types,
+    // so their imports resolve to these declarations unless the schema references a file of the
+    // same name. The option extensions of meta.proto are left out, as options do not affect decoding.
+    private static final Map<String, String> CONFLUENT_TYPES = ImmutableMap.of(
+            "confluent/meta.proto",
+            """
+            syntax = "proto3";
+            package confluent;
+            message Meta {
+              string doc = 1;
+              map<string, string> params = 2;
+              repeated string tags = 3;
+            }
+            """,
+            "confluent/type/decimal.proto",
+            """
+            syntax = "proto3";
+            package confluent.type;
+            message Decimal {
+              bytes value = 1;
+              uint32 precision = 2;
+              int32 scale = 3;
+            }
+            """);
 
     private final String schema;
     private final List<SchemaReference> references;
@@ -101,7 +127,11 @@ public final class ConfluentProtobufSchema
             while (referencedSources.containsKey(rootFileName)) {
                 rootFileName = "_" + rootFileName;
             }
-            fileDescriptor = ProtoFileDescriptorBuilder.buildFileDescriptor(rootFileName, schema, importPath -> Optional.ofNullable(referencedSources.get(importPath)));
+            fileDescriptor = ProtoFileDescriptorBuilder.buildFileDescriptor(
+                    rootFileName,
+                    schema,
+                    importPath -> Optional.ofNullable(referencedSources.get(importPath))
+                            .or(() -> Optional.ofNullable(CONFLUENT_TYPES.get(importPath))));
         }
         return fileDescriptor;
     }

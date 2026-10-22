@@ -16,6 +16,7 @@ package io.trino.plugin.kafka.schema.confluent;
 import com.google.common.collect.ImmutableList;
 import com.google.protobuf.Any;
 import com.google.protobuf.Descriptors.Descriptor;
+import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.Descriptors.FileDescriptor;
 import com.google.protobuf.Duration;
 import com.google.protobuf.StringValue;
@@ -41,6 +42,7 @@ import static io.trino.decoder.protobuf.ProtobufErrorCode.INVALID_PROTO_FILE;
 import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SCHEMA_ERROR;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 
 public class TestConfluentProtobufSchema
 {
@@ -156,6 +158,59 @@ public class TestConfluentProtobufSchema
         assertThat(event.findFieldByName("payload").getMessageType()).isSameAs(Struct.getDescriptor());
         assertThat(event.findFieldByName("detail").getMessageType()).isSameAs(Any.getDescriptor());
         assertThat(event.findFieldByName("label").getMessageType()).isSameAs(StringValue.getDescriptor());
+    }
+
+    @Test
+    public void testConfluentTypesNeedNoReferences()
+    {
+        ConfluentProtobufSchema schema = schema(
+                """
+                syntax = "proto3";
+                import "confluent/meta.proto";
+                import "confluent/type/decimal.proto";
+                message Payment {
+                    option (confluent.message_meta) = { doc: "A payment" };
+                    confluent.type.Decimal amount = 1 [(confluent.field_meta) = { params: [{ key: "precision", value: "10" }] }];
+                    confluent.Meta meta = 2;
+                }
+                """);
+        Descriptor payment = schema.getMessageDescriptor();
+        Descriptor decimal = payment.findFieldByName("amount").getMessageType();
+        assertThat(decimal.getFullName()).isEqualTo("confluent.type.Decimal");
+        assertThat(decimal.getFields()).extracting(FieldDescriptor::getName, FieldDescriptor::getNumber, FieldDescriptor::getType)
+                .containsExactly(
+                        tuple("value", 1, FieldDescriptor.Type.BYTES),
+                        tuple("precision", 2, FieldDescriptor.Type.UINT32),
+                        tuple("scale", 3, FieldDescriptor.Type.INT32));
+        Descriptor meta = payment.findFieldByName("meta").getMessageType();
+        assertThat(meta.getFullName()).isEqualTo("confluent.Meta");
+        assertThat(meta.findFieldByName("params").isMapField()).isTrue();
+    }
+
+    @Test
+    public void testReferenceTakesPrecedenceOverConfluentType()
+            throws Exception
+    {
+        MockSchemaRegistryClient client = createClient();
+        client.register("decimal-value", schema(client,
+                """
+                syntax = "proto3";
+                package confluent.type;
+                message Decimal {
+                    string text = 1;
+                }
+                """));
+        ConfluentProtobufSchema schema = schema(
+                client,
+                """
+                syntax = "proto3";
+                import "confluent/type/decimal.proto";
+                message Payment {
+                    confluent.type.Decimal amount = 1;
+                }
+                """,
+                new SchemaReference("confluent/type/decimal.proto", "decimal-value", 1));
+        assertThat(schema.getMessageDescriptor().findFieldByName("amount").getMessageType().findFieldByName("text")).isNotNull();
     }
 
     @Test
