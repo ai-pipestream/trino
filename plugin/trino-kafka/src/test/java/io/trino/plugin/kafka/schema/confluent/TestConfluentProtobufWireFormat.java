@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Descriptors.FileDescriptor;
 import io.confluent.kafka.schemaregistry.protobuf.MessageIndexes;
+import io.confluent.kafka.schemaregistry.protobuf.ProtobufSchema;
 import io.trino.plugin.kafka.schema.confluent.ConfluentProtobufWireFormat.Frame;
 import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
@@ -213,7 +214,7 @@ public class TestConfluentProtobufWireFormat
         Descriptor second = file.findMessageTypeByName("Second");
         Descriptor child = second.findNestedTypeByName("Child");
 
-        // map entry messages and enums do not count towards the indexes
+        // enums and the entry messages implied by map fields do not count towards the indexes
         assertThat(messageIndexes(first)).containsExactly(0);
         assertThat(messageIndexes(inner)).containsExactly(0, 0);
         assertThat(messageIndexes(innermost)).containsExactly(0, 0, 0);
@@ -231,6 +232,45 @@ public class TestConfluentProtobufWireFormat
         assertThat(findMessage(file, ImmutableList.of(0, 0, 0, 0))).isEmpty();
         assertThat(findMessage(file, ImmutableList.of(1, 1))).isEmpty();
         assertThat(findMessage(file, ImmutableList.of(-1))).isEmpty();
+    }
+
+    @Test
+    public void testExplicitMapEntryMessagesCountTowardsIndexes()
+    {
+        // the schema text a Confluent serializer registers for a protoc generated class declares
+        // map entry messages explicitly, in the position protoc gives them
+        String schema =
+                """
+                syntax = "proto3";
+
+                message Holder {
+                  repeated .Holder.AttributesEntry attributes = 1;
+                  .Holder.Inner inner = 2;
+
+                  message AttributesEntry {
+                    option map_entry = true;
+
+                    string key = 1;
+                    string value = 2;
+                  }
+                  message Inner {
+                    string value = 1;
+                  }
+                }
+                """;
+        FileDescriptor file = getFileDescriptor(schema);
+        Descriptor holder = file.findMessageTypeByName("Holder");
+        Descriptor inner = holder.findNestedTypeByName("Inner");
+        assertThat(holder.findFieldByName("attributes").isMapField()).isTrue();
+
+        ProtobufSchema confluentSchema = new ProtobufSchema(schema);
+        assertThat(messageIndexes(inner))
+                .containsExactly(0, 1)
+                .isEqualTo(confluentSchema.toMessageIndexes("Holder.Inner").indexes());
+        assertThat(confluentSchema.toMessageName(new MessageIndexes(ImmutableList.of(0, 1)))).isEqualTo("Holder.Inner");
+        assertThat(findMessage(file, ImmutableList.of(0, 1))).contains(inner);
+        // a record is never of a map entry type
+        assertThat(findMessage(file, ImmutableList.of(0, 0))).isEmpty();
     }
 
     @Test

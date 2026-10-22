@@ -16,7 +16,14 @@ package io.trino.plugin.kafka.schema.confluent;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.protobuf.DescriptorProtos.DescriptorProto;
+import com.google.protobuf.DescriptorProtos.FieldDescriptorProto;
+import com.google.protobuf.DescriptorProtos.FieldDescriptorProto.Label;
+import com.google.protobuf.DescriptorProtos.FieldDescriptorProto.Type;
+import com.google.protobuf.DescriptorProtos.FileDescriptorProto;
+import com.google.protobuf.DescriptorProtos.MessageOptions;
 import com.google.protobuf.Descriptors.Descriptor;
+import com.google.protobuf.Descriptors.FileDescriptor;
 import com.google.protobuf.DynamicMessage;
 import io.confluent.kafka.schemaregistry.ParsedSchema;
 import io.confluent.kafka.schemaregistry.avro.AvroSchema;
@@ -24,6 +31,8 @@ import io.confluent.kafka.schemaregistry.avro.AvroSchemaProvider;
 import io.confluent.kafka.schemaregistry.client.MockSchemaRegistryClient;
 import io.confluent.kafka.schemaregistry.client.rest.entities.SchemaReference;
 import io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException;
+import io.confluent.kafka.schemaregistry.protobuf.ProtobufSchemaProvider;
+import io.confluent.kafka.serializers.protobuf.KafkaProtobufSerializer;
 import io.trino.decoder.DecoderColumnHandle;
 import io.trino.decoder.FieldValueProvider;
 import io.trino.decoder.RowDecoder;
@@ -46,6 +55,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.confluent.kafka.serializers.AbstractKafkaSchemaSerDeConfig.SCHEMA_REGISTRY_URL_CONFIG;
 import static io.trino.decoder.protobuf.ProtobufErrorCode.INVALID_PROTOBUF_MESSAGE;
 import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SCHEMA_ERROR;
 import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SCHEMA_REGISTRY_ERROR;
@@ -128,6 +138,70 @@ public class TestConfluentSchemaRegistryDynamicMessageProvider
         DynamicMessage decodedOther = provider.parseDynamicMessage(frame(schemaId, ImmutableList.of(1), otherMessage.toByteArray()));
         assertThat(decodedOther.getDescriptorForType()).isSameAs(other);
         assertThat(decodedOther.getField(other.findFieldByName("name"))).isEqualTo("second");
+    }
+
+    @Test
+    public void testDecodeRecordOfConfluentSerializer()
+            throws Exception
+    {
+        // protoc places the entry message of a map field among the nested messages, where the field is
+        // declared; the serializer registers it as an explicit message, which counts towards the indexes
+        DescriptorProto row = DescriptorProto.newBuilder()
+                .setName("Row")
+                .addField(field("note", 1, Type.TYPE_STRING, Label.LABEL_OPTIONAL))
+                .build();
+        DescriptorProto message = DescriptorProto.newBuilder()
+                .setName("schema")
+                .addField(field("attributes", 1, Type.TYPE_MESSAGE, Label.LABEL_REPEATED).setTypeName(".test.schema.AttributesEntry"))
+                .addField(field("row", 2, Type.TYPE_MESSAGE, Label.LABEL_OPTIONAL).setTypeName(".test.schema.Row"))
+                .addNestedType(DescriptorProto.newBuilder()
+                        .setName("AttributesEntry")
+                        .setOptions(MessageOptions.newBuilder().setMapEntry(true))
+                        .addField(field("key", 1, Type.TYPE_STRING, Label.LABEL_OPTIONAL))
+                        .addField(field("value", 2, Type.TYPE_STRING, Label.LABEL_OPTIONAL)))
+                .addNestedType(row)
+                .build();
+        FileDescriptor protocFile = FileDescriptor.buildFrom(
+                FileDescriptorProto.newBuilder()
+                        .setName("test.proto")
+                        .setSyntax("proto3")
+                        .setPackage("test")
+                        .addMessageType(message)
+                        .build(),
+                new FileDescriptor[0]);
+        Descriptor protocRow = protocFile.findMessageTypeByName("schema").findNestedTypeByName("Row");
+        Descriptor protocMessage = protocFile.findMessageTypeByName("schema");
+
+        MockSchemaRegistryClient serializerClient = new MockSchemaRegistryClient(ImmutableList.of(new ProtobufSchemaProvider()));
+        byte[] rowRecord;
+        byte[] messageRecord;
+        try (KafkaProtobufSerializer<DynamicMessage> serializer = new KafkaProtobufSerializer<>(serializerClient)) {
+            serializer.configure(ImmutableMap.of(SCHEMA_REGISTRY_URL_CONFIG, "mock://registry"), false);
+            rowRecord = serializer.serialize("rows", DynamicMessage.newBuilder(protocRow).setField(protocRow.findFieldByName("note"), "nested").build());
+            messageRecord = serializer.serialize("messages", DynamicMessage.newBuilder(protocMessage)
+                    .addRepeatedField(protocMessage.findFieldByName("attributes"), DynamicMessage.newBuilder(protocMessage.findNestedTypeByName("AttributesEntry"))
+                            .setField(protocMessage.findNestedTypeByName("AttributesEntry").findFieldByName("key"), "size")
+                            .setField(protocMessage.findNestedTypeByName("AttributesEntry").findFieldByName("value"), "large")
+                            .build())
+                    .build());
+        }
+        assertThat(ConfluentProtobufWireFormat.readFrame(rowRecord).messageIndexes()).containsExactly(0, 1);
+
+        // register the text the serializer registered, under the same ids
+        MockSchemaRegistryClient client = createClient();
+        for (String subject : ImmutableList.of("rows-value", "messages-value")) {
+            int id = serializerClient.getLatestSchemaMetadata(subject).getId();
+            assertThat(client.register(subject, schema(client, serializerClient.getSchemaById(id).canonicalString()))).isEqualTo(id);
+        }
+        ConfluentSchemaRegistryDynamicMessageProvider provider = new ConfluentSchemaRegistryDynamicMessageProvider(client);
+
+        DynamicMessage decodedRow = provider.parseDynamicMessage(rowRecord);
+        assertThat(decodedRow.getDescriptorForType().getFullName()).isEqualTo("test.schema.Row");
+        assertThat(decodedRow.getField(decodedRow.getDescriptorForType().findFieldByName("note"))).isEqualTo("nested");
+
+        DynamicMessage decodedMessage = provider.parseDynamicMessage(messageRecord);
+        assertThat(decodedMessage.getDescriptorForType().findFieldByName("attributes").isMapField()).isTrue();
+        assertThat(decodedMessage.getRepeatedFieldCount(decodedMessage.getDescriptorForType().findFieldByName("attributes"))).isEqualTo(1);
     }
 
     @Test
@@ -366,6 +440,15 @@ public class TestConfluentSchemaRegistryDynamicMessageProvider
         provider.parseDynamicMessage(nestedRecord);
         provider.parseDynamicMessage(nestedRecord);
         assertThat(lookups.get()).isEqualTo(2);
+    }
+
+    private static FieldDescriptorProto.Builder field(String name, int number, Type type, Label label)
+    {
+        return FieldDescriptorProto.newBuilder()
+                .setName(name)
+                .setNumber(number)
+                .setType(type)
+                .setLabel(label);
     }
 
     private static MockSchemaRegistryClient createClient()

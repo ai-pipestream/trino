@@ -168,6 +168,56 @@ public class TestProtoFileDescriptorBuilder
     }
 
     @Test
+    public void testExplicitMapEntryMessages()
+    {
+        // the form of a map field in schema text generated from a descriptor: fully qualified type
+        // names and an explicit entry message, in the position protoc gives it
+        FileDescriptor file = build("generated.proto",
+                """
+                syntax = "proto3";
+                package test;
+
+                message Holder {
+                  repeated .test.Holder.AttributesEntry attributes = 1;
+                  repeated .test.Holder.ValuesEntry values = 2;
+                  repeated .test.Holder.NotAnEntry plain = 3;
+
+                  message AttributesEntry {
+                    option map_entry = true;
+
+                    string key = 1;
+                    string value = 2;
+                  }
+                  message ValuesEntry {
+                    option map_entry = true;
+
+                    int64 key = 1;
+                    .test.Holder.Value value = 2;
+                  }
+                  message NotAnEntry {
+                    option map_entry = false;
+                    option deprecated = true;
+
+                    string key = 1;
+                    string value = 2;
+                  }
+                  message Value {
+                    string text = 1;
+                  }
+                }
+                """);
+        Descriptor holder = file.findMessageTypeByName("Holder");
+        assertThat(holder.findFieldByName("attributes").isMapField()).isTrue();
+        FieldDescriptor values = holder.findFieldByName("values");
+        assertThat(values.isMapField()).isTrue();
+        assertThat(values.getMessageType().findFieldByName("value").getMessageType()).isSameAs(holder.findNestedTypeByName("Value"));
+        assertThat(holder.findFieldByName("plain").isMapField()).isFalse();
+        assertThat(holder.findNestedTypeByName("NotAnEntry").getOptions().getDeprecated()).isTrue();
+        // explicit entry messages keep their position among the nested messages
+        assertThat(holder.getNestedTypes()).extracting(Descriptor::getName).containsExactly("AttributesEntry", "ValuesEntry", "NotAnEntry", "Value");
+    }
+
+    @Test
     public void testImportsResolveThroughResolverAndAreBuiltOnce()
     {
         Map<String, String> files = ImmutableMap.of(

@@ -78,9 +78,9 @@ import static java.util.function.Function.identity;
  * with protobuf-java; every other import is fetched from the supplied {@link ImportResolver}.
  * <p>
  * Options other than those that affect validation or encoding ({@code allow_alias},
- * {@code packed}, {@code deprecated}, {@code json_name}, {@code default}) are not carried into
- * the descriptors, and {@code extend} declarations, extension ranges, groups and services are
- * skipped. None of them affect how a message decodes.
+ * {@code map_entry}, {@code packed}, {@code deprecated}, {@code json_name}, {@code default})
+ * are not carried into the descriptors, and {@code extend} declarations, extension ranges,
+ * groups and services are skipped. None of them affect how a message decodes.
  */
 public final class ProtoFileDescriptorBuilder
 {
@@ -240,6 +240,20 @@ public final class ProtoFileDescriptorBuilder
         }
         DescriptorProto.Builder builder = DescriptorProto.newBuilder()
                 .setName(message.getName());
+        for (OptionElement option : message.getOptions()) {
+            if (option.isParenthesized()) {
+                continue;
+            }
+            switch (option.getName()) {
+                // schema text generated from a descriptor, such as the text a schema registry
+                // serializer registers, declares map entry messages explicitly
+                case "map_entry" -> builder.getOptionsBuilder().setMapEntry(toBoolean(option));
+                case "deprecated" -> builder.getOptionsBuilder().setDeprecated(toBoolean(option));
+                default -> {
+                    // other options do not affect decoding
+                }
+            }
+        }
         List<DescriptorProto> mapEntries = new ArrayList<>();
         for (FieldElement field : message.getFields()) {
             builder.addField(toFieldDescriptorProto(field, proto3, OptionalInt.empty(), mapEntries));
