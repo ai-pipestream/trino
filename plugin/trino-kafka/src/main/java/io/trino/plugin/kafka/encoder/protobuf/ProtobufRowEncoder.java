@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Descriptors.Descriptor;
+import com.google.protobuf.Descriptors.EnumValueDescriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.Timestamp;
@@ -48,6 +49,7 @@ import static com.google.protobuf.Descriptors.FieldDescriptor.JavaType.ENUM;
 import static com.google.protobuf.Descriptors.FieldDescriptor.JavaType.MESSAGE;
 import static com.google.protobuf.util.Timestamps.checkValid;
 import static io.trino.decoder.protobuf.ProtobufErrorCode.INVALID_TIMESTAMP;
+import static io.trino.spi.StandardErrorCode.CONSTRAINT_VIOLATION;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
@@ -345,8 +347,24 @@ public class ProtobufRowEncoder
     private void setField(FieldDescriptor fieldDescriptor, DynamicMessage.Builder builder, Object value)
     {
         if (fieldDescriptor.getJavaType() == ENUM) {
-            value = fieldDescriptor.getEnumType().findValueByName((String) value);
+            if (value instanceof List<?> values) {
+                value = values.stream()
+                        .map(element -> toEnumValue(fieldDescriptor, element))
+                        .collect(toImmutableList());
+            }
+            else {
+                value = toEnumValue(fieldDescriptor, value);
+            }
         }
         builder.setField(fieldDescriptor, value);
+    }
+
+    private static EnumValueDescriptor toEnumValue(FieldDescriptor fieldDescriptor, Object value)
+    {
+        EnumValueDescriptor enumValue = fieldDescriptor.getEnumType().findValueByName((String) value);
+        if (enumValue == null) {
+            throw new TrinoException(CONSTRAINT_VIOLATION, format("Value '%s' is not a member of enum %s of field %s", value, fieldDescriptor.getEnumType().getFullName(), fieldDescriptor.getFullName()));
+        }
+        return enumValue;
     }
 }
