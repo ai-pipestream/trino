@@ -72,6 +72,30 @@ segments.
 Activate support for using JSON encoding with LZ4 compression for spooled
 segments.
 
+### `protocol.spooling.encoding.protobuf.enabled`
+
+- **Type:** [](prop-type-boolean)
+- **Default value:** `true`
+
+Activate support for using uncompressed Protocol Buffers encoding for spooled
+segments.
+
+### `protocol.spooling.encoding.protobuf+zstd.enabled`
+
+- **Type:** [](prop-type-boolean)
+- **Default value:** `true`
+
+Activate support for using Protocol Buffers encoding with Zstandard compression
+for spooled segments.
+
+### `protocol.spooling.encoding.protobuf+lz4.enabled`
+
+- **Type:** [](prop-type-boolean)
+- **Default value:** `true`
+
+Activate support for using Protocol Buffers encoding with LZ4 compression for
+spooled segments.
+
 ### `protocol.spooling.encoding.compression.threshold`
 
 - **Type:** [](prop-type-data-size)

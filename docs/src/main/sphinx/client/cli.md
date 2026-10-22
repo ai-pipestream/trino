@@ -675,8 +675,10 @@ for client interactions with higher data transfer demands, if the
 
 Optionally use the `--encoding` option to configure a different desired
 encoding, compared to the default on the cluster. The available values are
-`json+zstd` (recommended) for JSON with Zstandard compression, and `json+lz4`
-for JSON with LZ4 compression, and `json` for uncompressed JSON. 
+`json+zstd` (recommended) for JSON with Zstandard compression, `json+lz4`
+for JSON with LZ4 compression, `json` for uncompressed JSON, `protobuf+zstd`
+for Protocol Buffers with Zstandard compression, `protobuf+lz4` for Protocol
+Buffers with LZ4 compression, and `protobuf` for uncompressed Protocol Buffers.
 
 The CLI process must have network access to the spooling object storage.
 

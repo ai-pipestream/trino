@@ -77,7 +77,7 @@ the initial `POST` to `/v1/statement`, with a comma-separated list of the
 encodings it supports, in order of preference, for example:
 
 ```
-X-Trino-Query-Data-Encoding: json+zstd,json+lz4,json
+X-Trino-Query-Data-Encoding: json+zstd,json+lz4,json,protobuf+zstd,protobuf+lz4,protobuf
 ```
 
 If the server has spooling enabled and supports one of the listed encodings, it
@@ -154,6 +154,24 @@ segments in order, using the negotiated encoding, to reconstruct the result rows
 Early pages of a large result are often returned as `inline` segments even when
 spooling is requested, because small results do not benefit from spooling. The
 server controls this with `protocol.spooling.inlining.enabled`, which defaults to `true`.
+
+### Segment encodings
+
+The negotiated encoding determines the byte layout of every segment of a query:
+
+- `json` — a JSON array of rows, where each row is an array of values in the
+  same representation the direct protocol uses in the `data` field.
+- `protobuf` — a `Segment` message in the Protocol Buffers wire format as
+  defined by `trino_spooled_segment.proto` in the `trino-client` module. The
+  message is a sequence of length-delimited `Row` messages, each with one typed
+  `Value` per column. A value carries the Trino type family in a `oneof`, for
+  example a decimal as unscaled value and scale, a timestamp as epoch
+  microseconds, picoseconds, and precision, and a `NullValue` for SQL `NULL`.
+  Clients can decode a segment row by row without loading the whole segment.
+- `json+zstd`, `json+lz4`, `protobuf+zstd`, `protobuf+lz4` — the `json` or
+  `protobuf` segment compressed with Zstandard or LZ4. A segment smaller than
+  `protocol.spooling.encoding.compression.threshold` is stored uncompressed and
+  has no `uncompressedSize` attribute.
 
 ### Retrieving a spooled segment
 

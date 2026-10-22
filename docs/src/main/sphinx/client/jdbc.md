@@ -296,8 +296,11 @@ may not be specified using both methods.
 * - `encoding`
   - Set the encoding when using the [spooling protocol](jdbc-spooling-protocol).
     Valid values are JSON with Zstandard compression, `json+zstd` (recommended),
-    JSON with LZ4 compression `json+lz4`, and uncompressed JSON `json`. By
-    default, the default encoding configured on the cluster is used.
+    JSON with LZ4 compression `json+lz4`, uncompressed JSON `json`, Protocol
+    Buffers with Zstandard compression `protobuf+zstd`, Protocol Buffers with
+    LZ4 compression `protobuf+lz4`, and uncompressed Protocol Buffers
+    `protobuf`. A comma-separated list of values sets the order of preference.
+    By default, the default encoding configured on the cluster is used.
 * - `validateConnection`
   - Defaults to `false`. If set to `true`, connectivity and credentials are validated 
     when the connection is created, and when `java.sql.Connection.isValid(int)` is called.
