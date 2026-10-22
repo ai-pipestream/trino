@@ -18,6 +18,7 @@ import com.google.inject.Scopes;
 import com.google.inject.multibindings.Multibinder;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
 import io.trino.server.protocol.spooling.encoding.JsonQueryDataEncoder;
+import io.trino.server.protocol.spooling.encoding.ProtobufQueryDataEncoder;
 
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 
@@ -39,6 +40,17 @@ public class QueryDataEncodingModule
         }
         if (config.isJsonLz4Enabled()) {
             encoderFactories.addBinding().to(JsonQueryDataEncoder.Lz4Factory.class).in(Scopes.SINGLETON);
+        }
+
+        // protobuf + compressed variants
+        if (config.isProtobufEnabled()) {
+            encoderFactories.addBinding().to(ProtobufQueryDataEncoder.Factory.class).in(Scopes.SINGLETON);
+        }
+        if (config.isProtobufZstdEnabled()) {
+            encoderFactories.addBinding().to(ProtobufQueryDataEncoder.ZstdFactory.class).in(Scopes.SINGLETON);
+        }
+        if (config.isProtobufLz4Enabled()) {
+            encoderFactories.addBinding().to(ProtobufQueryDataEncoder.Lz4Factory.class).in(Scopes.SINGLETON);
         }
         binder.bind(QueryDataEncoders.class).in(Scopes.SINGLETON);
     }

@@ -26,6 +26,9 @@ public class QueryDataEncodingConfig
     private boolean jsonEnabled = true;
     private boolean jsonZstdEnabled = true;
     private boolean jsonLz4Enabled = true;
+    private boolean protobufEnabled = true;
+    private boolean protobufZstdEnabled = true;
+    private boolean protobufLz4Enabled = true;
     private DataSize compressionThreshold = DataSize.of(8, KILOBYTE);
 
     public boolean isJsonEnabled()
@@ -64,6 +67,45 @@ public class QueryDataEncodingConfig
     public QueryDataEncodingConfig setJsonLz4Enabled(boolean jsonLz4Enabled)
     {
         this.jsonLz4Enabled = jsonLz4Enabled;
+        return this;
+    }
+
+    public boolean isProtobufEnabled()
+    {
+        return protobufEnabled;
+    }
+
+    @Config("protocol.spooling.encoding.protobuf.enabled")
+    @ConfigDescription("Enable uncompressed protobuf spooled encoding")
+    public QueryDataEncodingConfig setProtobufEnabled(boolean protobufEnabled)
+    {
+        this.protobufEnabled = protobufEnabled;
+        return this;
+    }
+
+    public boolean isProtobufZstdEnabled()
+    {
+        return protobufZstdEnabled;
+    }
+
+    @Config("protocol.spooling.encoding.protobuf+zstd.enabled")
+    @ConfigDescription("Enable Zstd compressed protobuf spooled encoding")
+    public QueryDataEncodingConfig setProtobufZstdEnabled(boolean protobufZstdEnabled)
+    {
+        this.protobufZstdEnabled = protobufZstdEnabled;
+        return this;
+    }
+
+    public boolean isProtobufLz4Enabled()
+    {
+        return protobufLz4Enabled;
+    }
+
+    @Config("protocol.spooling.encoding.protobuf+lz4.enabled")
+    @ConfigDescription("Enable LZ4 compressed protobuf spooled encoding")
+    public QueryDataEncodingConfig setProtobufLz4Enabled(boolean protobufLz4Enabled)
+    {
+        this.protobufLz4Enabled = protobufLz4Enabled;
         return this;
     }
 

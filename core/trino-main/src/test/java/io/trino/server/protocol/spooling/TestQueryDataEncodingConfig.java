@@ -34,6 +34,9 @@ class TestQueryDataEncodingConfig
                 .setJsonEnabled(true)
                 .setJsonLz4Enabled(true)
                 .setJsonZstdEnabled(true)
+                .setProtobufEnabled(true)
+                .setProtobufLz4Enabled(true)
+                .setProtobufZstdEnabled(true)
                 .setCompressionThreshold(DataSize.of(8, KILOBYTE)));
     }
 
@@ -44,6 +47,9 @@ class TestQueryDataEncodingConfig
                 .put("protocol.spooling.encoding.json.enabled", "false")
                 .put("protocol.spooling.encoding.json+lz4.enabled", "false")
                 .put("protocol.spooling.encoding.json+zstd.enabled", "false")
+                .put("protocol.spooling.encoding.protobuf.enabled", "false")
+                .put("protocol.spooling.encoding.protobuf+lz4.enabled", "false")
+                .put("protocol.spooling.encoding.protobuf+zstd.enabled", "false")
                 .put("protocol.spooling.encoding.compression.threshold", "1MB")
                 .buildOrThrow();
 
@@ -51,6 +57,9 @@ class TestQueryDataEncodingConfig
                 .setJsonEnabled(false)
                 .setJsonLz4Enabled(false)
                 .setJsonZstdEnabled(false)
+                .setProtobufEnabled(false)
+                .setProtobufLz4Enabled(false)
+                .setProtobufZstdEnabled(false)
                 .setCompressionThreshold(DataSize.of(1, MEGABYTE));
 
         assertFullMapping(properties, expected);
