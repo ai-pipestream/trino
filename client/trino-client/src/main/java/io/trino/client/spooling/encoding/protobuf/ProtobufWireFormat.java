@@ -91,6 +91,7 @@ public final class ProtobufWireFormat
     public static final int TIMESTAMP_WITH_TIME_ZONE_PICOS_OF_MILLI = 2;
     public static final int TIMESTAMP_WITH_TIME_ZONE_PRECISION = 3;
     public static final int TIMESTAMP_WITH_TIME_ZONE_ZONE_ID = 4;
+    public static final int TIMESTAMP_WITH_TIME_ZONE_OFFSET_SECONDS = 5;
 
     // IntervalDayToSecond
     public static final int INTERVAL_DAY_TO_SECOND_MICROS = 1;

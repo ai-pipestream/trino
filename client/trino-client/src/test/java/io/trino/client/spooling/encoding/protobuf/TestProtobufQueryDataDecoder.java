@@ -257,16 +257,28 @@ public class TestProtobufQueryDataDecoder
         Column timestampWithTimeZone = column(TIMESTAMP_WITH_TIME_ZONE);
         long epochMillis = 1_600_000_000_123L;
         assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(epochMillis).setPrecision(3).setZoneId("UTC")), "2020-09-13 12:26:40.123 UTC");
-        assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(epochMillis).setPrecision(3).setZoneId("Europe/Warsaw")), "2020-09-13 14:26:40.123 Europe/Warsaw");
-        assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(epochMillis).setPrecision(3).setZoneId("+05:30")), "2020-09-13 17:56:40.123 +05:30");
-        assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(epochMillis).setPrecision(3).setZoneId("America/Los_Angeles")), "2020-09-13 05:26:40.123 America/Los_Angeles");
+        assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(epochMillis).setPrecision(3).setZoneId("Europe/Warsaw").setOffsetSeconds(2 * 3600)), "2020-09-13 14:26:40.123 Europe/Warsaw");
+        assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(epochMillis).setPrecision(3).setZoneId("+05:30").setOffsetSeconds(5 * 3600 + 30 * 60)), "2020-09-13 17:56:40.123 +05:30");
+        assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(epochMillis).setPrecision(3).setZoneId("America/Los_Angeles").setOffsetSeconds(-7 * 3600)), "2020-09-13 05:26:40.123 America/Los_Angeles");
         assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(epochMillis).setPicosOfMilli(456_789_012).setPrecision(12).setZoneId("UTC")), "2020-09-13 12:26:40.123456789012 UTC");
         assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(1_600_000_000_000L).setPrecision(0).setZoneId("UTC")), "2020-09-13 12:26:40 UTC");
         assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(-1).setPrecision(3).setZoneId("UTC")), "1969-12-31 23:59:59.999 UTC");
 
+        // The local date-time comes from the offset the server resolved, not from the client's time zone rules:
+        // a zone the client does not know, and a historical offset with seconds (local mean time of Warsaw in 1880)
+        assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(epochMillis).setPrecision(3).setZoneId("Mars/Olympus_Mons").setOffsetSeconds(3600)), "2020-09-13 13:26:40.123 Mars/Olympus_Mons");
+        assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(-2_840_145_840_000L).setPrecision(0).setZoneId("Europe/Warsaw").setOffsetSeconds(5040)), "1880-01-01 00:00:00 Europe/Warsaw");
+        assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(-1).setPicosOfMilli(999_999_999).setPrecision(12).setZoneId("-18:00").setOffsetSeconds(-18 * 3600)), "1969-12-31 05:59:59.999999999999 -18:00");
+
         assertThatThrownBy(() -> decode(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(0).setPrecision(3))))
                 .isInstanceOf(ProtobufFormatException.class)
                 .hasMessage("Timestamp with time zone has no zone id");
+        assertThatThrownBy(() -> decode(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(0).setPrecision(3).setZoneId("UTC").setOffsetSeconds(18 * 3600 + 1))))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessage("Invalid offset seconds: 64801");
+        assertThatThrownBy(() -> decode(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(0).setPicosOfMilli(1_000_000_000).setPrecision(12).setZoneId("UTC"))))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessage("Invalid picos of milli: 1000000000");
     }
 
     @Test

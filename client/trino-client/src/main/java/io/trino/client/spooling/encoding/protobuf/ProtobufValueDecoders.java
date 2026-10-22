@@ -30,10 +30,8 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -90,6 +88,7 @@ import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.TIME
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.TIMESTAMP_PICOS_OF_MICRO;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.TIMESTAMP_PRECISION;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.TIMESTAMP_WITH_TIME_ZONE_EPOCH_MILLIS;
+import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.TIMESTAMP_WITH_TIME_ZONE_OFFSET_SECONDS;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.TIMESTAMP_WITH_TIME_ZONE_PICOS_OF_MILLI;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.TIMESTAMP_WITH_TIME_ZONE_PRECISION;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.TIMESTAMP_WITH_TIME_ZONE_ZONE_ID;
@@ -160,6 +159,8 @@ public final class ProtobufValueDecoders
     private static final long PICOSECONDS_PER_MINUTE = 60 * PICOSECONDS_PER_SECOND;
     private static final long PICOSECONDS_PER_HOUR = 60 * PICOSECONDS_PER_MINUTE;
     private static final int MAX_PRECISION = 12;
+    // java.time limit of zone offsets
+    private static final int MAX_OFFSET_SECONDS = 18 * 60 * 60;
     private static final DateTimeFormatter TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss");
     private static final long[] POWERS_OF_TEN = {
             1L,
@@ -192,6 +193,7 @@ public final class ProtobufValueDecoders
     private static final ValueDecoder TIME_DECODER = new TimeDecoder();
     private static final ValueDecoder TIME_WITH_TIME_ZONE_DECODER = new TimeWithTimeZoneDecoder();
     private static final ValueDecoder TIMESTAMP_DECODER = new TimestampDecoder();
+    private static final ValueDecoder TIMESTAMP_WITH_TIME_ZONE_DECODER = new TimestampWithTimeZoneDecoder();
     private static final ValueDecoder INTERVAL_YEAR_TO_MONTH_DECODER = new IntervalYearToMonthDecoder();
     private static final ValueDecoder INTERVAL_DAY_TO_SECOND_DECODER = new IntervalDayToSecondDecoder();
     private static final ValueDecoder UUID_DECODER = new UuidDecoder();
@@ -257,7 +259,7 @@ public final class ProtobufValueDecoders
             case TIMESTAMP:
                 return TIMESTAMP_DECODER;
             case TIMESTAMP_WITH_TIME_ZONE:
-                return new TimestampWithTimeZoneDecoder();
+                return TIMESTAMP_WITH_TIME_ZONE_DECODER;
             case INTERVAL_YEAR_TO_MONTH:
                 return INTERVAL_YEAR_TO_MONTH_DECODER;
             case INTERVAL_DAY_TO_SECOND:
@@ -799,9 +801,6 @@ public final class ProtobufValueDecoders
     private static class TimestampWithTimeZoneDecoder
             extends MessageDecoder
     {
-        // Zone ids repeat across the values of a column, so parse each one once per decoder
-        private final Map<String, ZoneId> zones = new HashMap<>();
-
         TimestampWithTimeZoneDecoder()
         {
             super(VALUE_TIMESTAMP_WITH_TIME_ZONE);
@@ -814,6 +813,7 @@ public final class ProtobufValueDecoders
             int picosOfMilli = 0;
             int precision = 0;
             String zoneId = null;
+            int offsetSeconds = 0;
             while (reader.hasRemaining()) {
                 int tag = reader.readTag();
                 switch (fieldNumber(tag)) {
@@ -833,6 +833,10 @@ public final class ProtobufValueDecoders
                         expectWireType(tag, WIRETYPE_LENGTH_DELIMITED);
                         zoneId = reader.readString(reader.readLength());
                         break;
+                    case TIMESTAMP_WITH_TIME_ZONE_OFFSET_SECONDS:
+                        expectWireType(tag, WIRETYPE_VARINT);
+                        offsetSeconds = reader.readSint32();
+                        break;
                     default:
                         reader.skipField(tag);
                 }
@@ -840,12 +844,11 @@ public final class ProtobufValueDecoders
             if (zoneId == null) {
                 throw new ProtobufFormatException("Timestamp with time zone has no zone id");
             }
-            ZoneId zone = zones.get(zoneId);
-            if (zone == null) {
-                zone = ZoneId.of(zoneId);
-                zones.put(zoneId, zone);
-            }
-            return formatTimestampWithTimeZone(checkPrecision(precision), epochMillis, picosOfMilli, zone, zoneId);
+            checkRange("picos of milli", picosOfMilli, 0, PICOSECONDS_PER_MILLISECOND - 1);
+            checkRange("offset seconds", offsetSeconds, -MAX_OFFSET_SECONDS, MAX_OFFSET_SECONDS);
+            // The server resolves the offset with its own time zone rules, so the client renders the
+            // local date-time the json encoding would have, even for a zone the client does not know
+            return formatTimestampWithTimeZone(checkPrecision(precision), epochMillis, picosOfMilli, ZoneOffset.ofTotalSeconds(offsetSeconds), zoneId);
         }
     }
 
@@ -1154,6 +1157,13 @@ public final class ProtobufValueDecoders
         }
     }
 
+    private static void checkRange(String name, long value, long min, long max)
+    {
+        if (value < min || value > max) {
+            throw new ProtobufFormatException(format("Invalid %s: %s", name, value));
+        }
+    }
+
     private static int checkPrecision(int precision)
     {
         if (precision < 0 || precision > MAX_PRECISION) {
@@ -1211,9 +1221,9 @@ public final class ProtobufValueDecoders
         return builder.toString();
     }
 
-    static String formatTimestampWithTimeZone(int precision, long epochMillis, int picosOfMilli, ZoneId zone, String zoneId)
+    static String formatTimestampWithTimeZone(int precision, long epochMillis, int picosOfMilli, ZoneOffset offset, String zoneId)
     {
-        LocalDateTime dateTime = LocalDateTime.ofInstant(Instant.ofEpochMilli(epochMillis), zone);
+        LocalDateTime dateTime = LocalDateTime.ofEpochSecond(floorDiv(epochMillis, MILLISECONDS_PER_SECOND), 0, offset);
         long picoFraction = floorMod(epochMillis, MILLISECONDS_PER_SECOND) * PICOSECONDS_PER_MILLISECOND + picosOfMilli;
         StringBuilder builder = new StringBuilder(20 + (precision == 0 ? 0 : precision + 1) + zoneId.length());
         formatTimestamp(precision, dateTime, picoFraction, builder);

@@ -923,6 +923,31 @@ public class TestProtobufEncodingUtils
         }
     }
 
+    @Test
+    public void testTimestampWithTimeZoneOffsets()
+            throws IOException
+    {
+        // Historical local mean time offsets have seconds, and daylight saving transitions have gaps and overlaps;
+        // the client renders the offset the server resolved, so the local date-time matches the json encoding's
+        TimestampWithTimeZoneType type = createTimestampWithTimeZoneType(3);
+        List<TimeZoneKey> zones = ImmutableList.of(getTimeZoneKey("Europe/Warsaw"), getTimeZoneKey("America/New_York"), getTimeZoneKey("Asia/Kathmandu"), getTimeZoneKey("Australia/Lord_Howe"), getTimeZoneKey("-14:00"), getTimeZoneKey("+14:00"));
+        long[] instants = {
+                -2_840_145_840_000L, // 1880, local mean time
+                -1_640_995_200_000L, // 1918
+                1_615_705_199_999L, // 2021-03-14 06:59:59.999 UTC, before the New York gap
+                1_615_705_200_000L,
+                1_636_264_799_999L, // 2021-11-07 05:59:59.999 UTC, before the New York overlap
+                1_636_264_800_000L,
+        };
+        assertRoundTrip(type, builder -> {
+            for (TimeZoneKey zone : zones) {
+                for (long instant : instants) {
+                    type.writeLong(builder, packDateTimeWithZone(instant, zone));
+                }
+            }
+        });
+    }
+
     private void assertRoundTrip(Type type, Consumer<BlockBuilder> values)
             throws IOException
     {

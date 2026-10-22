@@ -75,6 +75,8 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.time.Instant;
+import java.time.zone.ZoneRules;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -102,6 +104,7 @@ import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.TIME
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.TIMESTAMP_PICOS_OF_MICRO;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.TIMESTAMP_PRECISION;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.TIMESTAMP_WITH_TIME_ZONE_EPOCH_MILLIS;
+import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.TIMESTAMP_WITH_TIME_ZONE_OFFSET_SECONDS;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.TIMESTAMP_WITH_TIME_ZONE_PICOS_OF_MILLI;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.TIMESTAMP_WITH_TIME_ZONE_PRECISION;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.TIMESTAMP_WITH_TIME_ZONE_ZONE_ID;
@@ -614,7 +617,7 @@ public final class ProtobufEncodingUtils
             implements TypeEncoder
     {
         private final TimestampWithTimeZoneType type;
-        private final ZoneIds zoneIds = new ZoneIds();
+        private final Zones zones = new Zones();
 
         private TimestampWithTimeZoneEncoder(TimestampWithTimeZoneType type)
         {
@@ -626,30 +629,32 @@ public final class ProtobufEncodingUtils
         {
             if (type.isShort()) {
                 long packed = type.getLong(block, position);
-                writeTimestampWithTimeZone(writer, unpackMillisUtc(packed), 0, type.getPrecision(), zoneIds.get(unpackZoneKey(packed)));
+                writeTimestampWithTimeZone(writer, unpackMillisUtc(packed), 0, type.getPrecision(), zones.get(unpackZoneKey(packed)));
             }
             else {
                 LongTimestampWithTimeZone value = (LongTimestampWithTimeZone) type.getObject(block, position);
-                writeTimestampWithTimeZone(writer, value.getEpochMillis(), value.getPicosOfMilli(), type.getPrecision(), zoneIds.get(TimeZoneKey.getTimeZoneKey(value.getTimeZoneKey())));
+                writeTimestampWithTimeZone(writer, value.getEpochMillis(), value.getPicosOfMilli(), type.getPrecision(), zones.get(TimeZoneKey.getTimeZoneKey(value.getTimeZoneKey())));
             }
         }
     }
 
     /**
-     * The UTF-8 zone ids of the keys seen by one encoder; a column usually has only a few. Encoders are
-     * shared by the drivers writing a query's segments, so the cache is concurrent.
+     * The zones of the keys seen by one encoder; a column usually has only a few. Encoders are shared
+     * by the drivers writing a query's segments, so the cache is concurrent.
      */
-    private static final class ZoneIds
+    private static final class Zones
     {
-        private final Map<TimeZoneKey, byte[]> zoneIds = new ConcurrentHashMap<>();
+        private final Map<TimeZoneKey, Zone> zones = new ConcurrentHashMap<>();
 
-        public byte[] get(TimeZoneKey key)
+        public Zone get(TimeZoneKey key)
         {
-            return zoneIds.computeIfAbsent(key, _ -> key.getZoneId().getId().getBytes(UTF_8));
+            return zones.computeIfAbsent(key, _ -> new Zone(key.getZoneId().getId().getBytes(UTF_8), key.getZoneId().getRules()));
         }
     }
 
-    private static void writeTimestampWithTimeZone(ProtobufWireWriter writer, long epochMillis, int picosOfMilli, int precision, byte[] zoneId)
+    private record Zone(byte[] id, ZoneRules rules) {}
+
+    private static void writeTimestampWithTimeZone(ProtobufWireWriter writer, long epochMillis, int picosOfMilli, int precision, Zone zone)
     {
         ProtobufWireWriter timestamp = writer.child();
         timestamp.writeSint64(TIMESTAMP_WITH_TIME_ZONE_EPOCH_MILLIS, epochMillis);
@@ -657,7 +662,13 @@ public final class ProtobufEncodingUtils
             timestamp.writeInt32(TIMESTAMP_WITH_TIME_ZONE_PICOS_OF_MILLI, picosOfMilli);
         }
         timestamp.writeInt32(TIMESTAMP_WITH_TIME_ZONE_PRECISION, precision);
-        timestamp.writeBytes(TIMESTAMP_WITH_TIME_ZONE_ZONE_ID, zoneId);
+        timestamp.writeBytes(TIMESTAMP_WITH_TIME_ZONE_ZONE_ID, zone.id());
+        // The offset is resolved here, with the rules the json encoding formats the value with, so a client
+        // renders the same local date-time without a time zone database of its own
+        int offsetSeconds = zone.rules().getOffset(Instant.ofEpochMilli(epochMillis)).getTotalSeconds();
+        if (offsetSeconds != 0) {
+            timestamp.writeSint32(TIMESTAMP_WITH_TIME_ZONE_OFFSET_SECONDS, offsetSeconds);
+        }
         writer.writeMessage(VALUE_TIMESTAMP_WITH_TIME_ZONE, timestamp);
     }
 
@@ -870,7 +881,7 @@ public final class ProtobufEncodingUtils
 
         private final Type type;
         private final Capabilities capabilities;
-        private final ZoneIds zoneIds = new ZoneIds();
+        private final Zones zones = new Zones();
 
         private TypeObjectValueEncoder(Type type, Capabilities capabilities)
         {
@@ -889,7 +900,7 @@ public final class ProtobufEncodingUtils
                 }
                 case SqlTimestampWithTimeZone timestamp -> {
                     SqlTimestampWithTimeZone rounded = capabilities.supportsParametricDateTime() ? timestamp : timestamp.roundTo(LEGACY_PRECISION);
-                    writeTimestampWithTimeZone(writer, rounded.getEpochMillis(), rounded.getPicosOfMilli(), rounded.getPrecision(), zoneIds.get(rounded.getTimeZoneKey()));
+                    writeTimestampWithTimeZone(writer, rounded.getEpochMillis(), rounded.getPicosOfMilli(), rounded.getPrecision(), zones.get(rounded.getTimeZoneKey()));
                 }
                 // Time and interval types have dedicated encoders when the client supports parametric values,
                 // so these values only reach this encoder in the legacy, millisecond precision form

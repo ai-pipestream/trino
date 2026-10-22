@@ -153,6 +153,12 @@ message TimestampWithTimeZone {
   int32 precision = 3;
   // java.time zone id of the value's time zone, e.g. "UTC", "Europe/Warsaw", "+05:30"
   string zone_id = 4;
+  // offset from UTC of `zone_id` at this instant, in seconds, as resolved by
+  // the server's time zone rules: the local date-time of the value is
+  // epoch_millis + offset_seconds, so a reader needs no time zone database
+  // and renders the same local date-time as the server, whatever its own
+  // time zone rules are
+  sint32 offset_seconds = 5;
 }
 
 message IntervalDayToSecond {
