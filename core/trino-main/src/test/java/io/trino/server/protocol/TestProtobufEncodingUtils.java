@@ -881,7 +881,7 @@ public class TestProtobufEncodingUtils
                             int value = i;
                             ((ArrayBlockBuilder) builder).buildEntry(elements -> {
                                 for (int j = 0; j < value % 5; j++) {
-                                    decimal.writeObject(elements, Int128.valueOf(seed * 1_000_000_000_000_000_000L + value * j));
+                                    decimal.writeObject(elements, Int128.valueOf(seed * 1_000_000_000_000_000_000L + value * (long) j));
                                 }
                             });
                         }
