@@ -36,6 +36,23 @@ import com.google.protobuf.StructProto;
 import com.google.protobuf.TimestampProto;
 import com.google.protobuf.TypeProto;
 import com.google.protobuf.WrappersProto;
+import com.google.type.CalendarPeriodProto;
+import com.google.type.ColorProto;
+import com.google.type.DateProto;
+import com.google.type.DateTimeProto;
+import com.google.type.DayOfWeekProto;
+import com.google.type.DecimalProto;
+import com.google.type.ExprProto;
+import com.google.type.FractionProto;
+import com.google.type.IntervalProto;
+import com.google.type.LatLngProto;
+import com.google.type.LocalizedTextProto;
+import com.google.type.MoneyProto;
+import com.google.type.MonthProto;
+import com.google.type.PhoneNumberProto;
+import com.google.type.PostalAddressProto;
+import com.google.type.QuaternionProto;
+import com.google.type.TimeOfDayProto;
 import com.squareup.wire.Syntax;
 import com.squareup.wire.schema.Field;
 import com.squareup.wire.schema.Location;
@@ -74,8 +91,9 @@ import static java.util.function.Function.identity;
  * Type references are left to protobuf-java to resolve: a named field type is emitted as
  * {@code type_name} without a {@code type}, so {@code FileDescriptor.buildFrom} decides whether
  * it is a message or an enum using the same scoping rules as {@code protoc}. Imports of the
- * well-known {@code google/protobuf/*.proto} files are linked against the descriptors bundled
- * with protobuf-java; every other import is fetched from the supplied {@link ImportResolver}.
+ * well-known {@code google/protobuf/*.proto} files and of the Google common types in
+ * {@code google/type/*.proto} are linked against the descriptors bundled with protobuf-java and
+ * the Google common protos; every other import is fetched from the supplied {@link ImportResolver}.
  * <p>
  * Options other than those that affect validation or encoding ({@code allow_alias},
  * {@code map_entry}, {@code packed}, {@code deprecated}, {@code json_name}, {@code default})
@@ -104,7 +122,25 @@ public final class ProtoFileDescriptorBuilder
                     StructProto.getDescriptor(),
                     TimestampProto.getDescriptor(),
                     TypeProto.getDescriptor(),
-                    WrappersProto.getDescriptor())
+                    WrappersProto.getDescriptor(),
+                    // the Google common types, which schema registry serializers do not register as references either
+                    CalendarPeriodProto.getDescriptor(),
+                    ColorProto.getDescriptor(),
+                    DateProto.getDescriptor(),
+                    DateTimeProto.getDescriptor(),
+                    DayOfWeekProto.getDescriptor(),
+                    DecimalProto.getDescriptor(),
+                    ExprProto.getDescriptor(),
+                    FractionProto.getDescriptor(),
+                    IntervalProto.getDescriptor(),
+                    LatLngProto.getDescriptor(),
+                    LocalizedTextProto.getDescriptor(),
+                    MoneyProto.getDescriptor(),
+                    MonthProto.getDescriptor(),
+                    PhoneNumberProto.getDescriptor(),
+                    PostalAddressProto.getDescriptor(),
+                    QuaternionProto.getDescriptor(),
+                    TimeOfDayProto.getDescriptor())
             .collect(toImmutableMap(FileDescriptor::getName, identity()));
 
     private static final Map<String, Type> SCALAR_TYPES = ImmutableMap.<String, Type>builder()
