@@ -166,7 +166,7 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
         assertCount(topic, MESSAGE_COUNT * 2 + 1);
         assertQuery(format("SELECT key, col_1, col_2, col_3 FROM %s WHERE key = 1000", toDoubleQuoted(topic)), "VALUES (1000, 'Trino', 14, 1.4)");
 
-        // a column that the schema does not define cannot be written
+        // NULL values cannot be written
         assertQueryFails(format("INSERT INTO %s (key, col_1, col_2, col_3) VALUES (1001, NULL, 1, 1.0)", toDoubleQuoted(topic)), ".*Protobuf doesn't support serializing null values.*");
     }
 
@@ -183,7 +183,7 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
                 ImmutableMap.<String, String>builder()
                         .putAll(producerProperties())
                         .put(KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName())
-                        .buildOrThrow());
+                        .buildKeepingLast());
         waitUntilTableExists(topic);
         assertQuery(format("SELECT col_1, col_2 FROM %s", toDoubleQuoted(topic)), "VALUES ('string-0', 0)");
 
