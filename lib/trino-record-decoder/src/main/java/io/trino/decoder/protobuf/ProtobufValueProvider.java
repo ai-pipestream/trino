@@ -304,8 +304,8 @@ public class ProtobufValueProvider
             Field field = fields.get(i);
             checkState(field.getName().isPresent(), "field name not found");
             FieldDescriptor fieldDescriptor = getFieldDescriptor(record, field.getName().get());
-            if (fieldDescriptor == null) {
-                // the record was written with a schema that predates this field
+            if (fieldDescriptor == null || isUnsetProto3Optional(record, fieldDescriptor)) {
+                // the record was written with a schema that predates this field, or the field is not set
                 fieldBuilders.get(i).appendNull();
                 continue;
             }
@@ -347,5 +347,16 @@ public class ProtobufValueProvider
     private static FieldDescriptor getFieldDescriptor(DynamicMessage message, int index)
     {
         return message.getDescriptorForType().findFieldByNumber(index);
+    }
+
+    /**
+     * A proto3 field declared {@code optional} tracks whether it is set, so an unset field is {@code NULL}
+     * rather than the default value of its type.
+     */
+    static boolean isUnsetProto3Optional(DynamicMessage message, FieldDescriptor fieldDescriptor)
+    {
+        return fieldDescriptor.getContainingOneof() != null
+                && fieldDescriptor.getRealContainingOneof() == null
+                && !message.hasField(fieldDescriptor);
     }
 }
