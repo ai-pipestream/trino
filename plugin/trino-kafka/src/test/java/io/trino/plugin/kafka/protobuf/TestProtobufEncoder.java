@@ -515,7 +515,7 @@ public class TestProtobufEncoder
     private RowEncoder createRowEncoder(String fileName, List<EncoderColumnHandle> columns)
             throws Exception
     {
-        return ENCODER_FACTORY.create(TestingConnectorSession.SESSION, new RowEncoderSpec(ProtobufRowEncoder.NAME, Optional.of(getProtoFile("decoder/protobuf/" + fileName)), columns, "ignored", MESSAGE));
+        return ENCODER_FACTORY.create(TestingConnectorSession.SESSION, new RowEncoderSpec(ProtobufRowEncoder.NAME, Optional.of(getProtoFile("decoder/protobuf/" + fileName)), Optional.empty(), columns, "ignored", MESSAGE));
     }
 
     private Descriptor getDescriptor(String fileName)
