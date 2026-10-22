@@ -15,36 +15,44 @@ package io.trino.plugin.kafka.schema.confluent;
 
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
+import com.google.common.collect.ImmutableList;
+import com.google.common.util.concurrent.UncheckedExecutionException;
 import com.google.inject.Inject;
+import com.google.protobuf.ByteString;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.DynamicMessage;
+import com.google.protobuf.InvalidProtocolBufferException;
 import io.confluent.kafka.schemaregistry.ParsedSchema;
 import io.confluent.kafka.schemaregistry.client.SchemaRegistryClient;
 import io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException;
-import io.confluent.kafka.schemaregistry.protobuf.MessageIndexes;
-import io.confluent.kafka.schemaregistry.protobuf.ProtobufSchema;
 import io.trino.cache.NonEvictableLoadingCache;
 import io.trino.decoder.protobuf.DynamicMessageProvider;
+import io.trino.plugin.kafka.schema.confluent.ConfluentProtobufWireFormat.Frame;
 import io.trino.spi.TrinoException;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.Optional;
 
-import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Throwables.throwIfInstanceOf;
 import static io.trino.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.decoder.protobuf.ProtobufErrorCode.INVALID_PROTOBUF_MESSAGE;
-import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
+import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SCHEMA_ERROR;
+import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SCHEMA_REGISTRY_ERROR;
 import static java.lang.String.format;
+import static java.net.HttpURLConnection.HTTP_NOT_FOUND;
 import static java.util.Objects.requireNonNull;
 
+/**
+ * Decodes records in the Confluent wire format with the schema they were written with: the
+ * schema id and message indexes in the frame select the message type, which is fetched from
+ * the schema registry and cached. Ids are immutable in the registry, so the cache has no TTL.
+ */
 public class ConfluentSchemaRegistryDynamicMessageProvider
         implements DynamicMessageProvider
 {
-    private static final int MAGIC_BYTE = 0;
     private final SchemaRegistryClient schemaRegistryClient;
-    private final NonEvictableLoadingCache<Integer, Descriptor> descriptorCache;
+    private final NonEvictableLoadingCache<MessageKey, Descriptor> descriptorCache;
 
     public ConfluentSchemaRegistryDynamicMessageProvider(SchemaRegistryClient schemaRegistryClient)
     {
@@ -57,31 +65,54 @@ public class ConfluentSchemaRegistryDynamicMessageProvider
     @Override
     public DynamicMessage parseDynamicMessage(byte[] data)
     {
-        ByteBuffer buffer = ByteBuffer.wrap(data);
-        byte magicByte = buffer.get();
-        checkArgument(magicByte == MAGIC_BYTE, "Invalid MagicByte");
-        int schemaId = buffer.getInt();
-        MessageIndexes.readFrom(buffer);
-        ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(buffer.array(), buffer.arrayOffset() + buffer.position(), buffer.remaining());
+        Frame frame = ConfluentProtobufWireFormat.readFrame(data);
+        Descriptor descriptor = getDescriptor(new MessageKey(frame.schemaId(), frame.messageIndexes()));
         try {
-            return DynamicMessage.parseFrom(
-                    descriptorCache.getUnchecked(schemaId),
-                    byteArrayInputStream);
+            return DynamicMessage.parseFrom(descriptor, ByteString.copyFrom(data, frame.payloadOffset(), data.length - frame.payloadOffset()));
         }
-        catch (IOException e) {
+        catch (InvalidProtocolBufferException e) {
             throw new TrinoException(INVALID_PROTOBUF_MESSAGE, "Decoding Protobuf record failed.", e);
         }
     }
 
-    private Descriptor lookupDescriptor(int schemaId)
+    private Descriptor getDescriptor(MessageKey key)
     {
         try {
-            ParsedSchema schema = schemaRegistryClient.getSchemaById(schemaId);
-            checkArgument(schema instanceof ProtobufSchema, "schema should be an instance of ProtobufSchema");
-            return ((ProtobufSchema) schema).toDescriptor();
+            return descriptorCache.getUnchecked(key);
         }
-        catch (IOException | RestClientException e) {
-            throw new TrinoException(GENERIC_INTERNAL_ERROR, format("Looking up schemaId '%s' from confluent schema registry failed", schemaId), e);
+        catch (UncheckedExecutionException e) {
+            throwIfInstanceOf(e.getCause(), TrinoException.class);
+            throw e;
+        }
+    }
+
+    private Descriptor lookupDescriptor(MessageKey key)
+    {
+        ParsedSchema schema;
+        try {
+            schema = schemaRegistryClient.getSchemaById(key.schemaId());
+        }
+        catch (RestClientException e) {
+            if (e.getStatus() == HTTP_NOT_FOUND) {
+                throw new TrinoException(KAFKA_SCHEMA_ERROR, format("Schema id %s does not exist in the schema registry", key.schemaId()), e);
+            }
+            throw new TrinoException(KAFKA_SCHEMA_REGISTRY_ERROR, format("Failed to look up schema id %s in the schema registry: %s", key.schemaId(), e.getMessage()), e);
+        }
+        catch (IOException e) {
+            throw new TrinoException(KAFKA_SCHEMA_REGISTRY_ERROR, format("Failed to look up schema id %s in the schema registry: %s", key.schemaId(), e.getMessage()), e);
+        }
+        if (!(schema instanceof ConfluentProtobufSchema protobufSchema)) {
+            throw new TrinoException(KAFKA_SCHEMA_ERROR, format("Schema id %s is a %s schema, not a PROTOBUF schema", key.schemaId(), schema.schemaType()));
+        }
+        return ConfluentProtobufWireFormat.findMessage(protobufSchema.getFileDescriptor(), key.messageIndexes())
+                .orElseThrow(() -> new TrinoException(INVALID_PROTOBUF_MESSAGE, format("Message indexes %s do not exist in schema id %s", key.messageIndexes(), key.schemaId())));
+    }
+
+    private record MessageKey(int schemaId, List<Integer> messageIndexes)
+    {
+        private MessageKey
+        {
+            messageIndexes = ImmutableList.copyOf(requireNonNull(messageIndexes, "messageIndexes is null"));
         }
     }
 
