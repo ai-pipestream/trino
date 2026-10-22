@@ -382,17 +382,21 @@ table description supplier are:
 - Protobuf records are decoded with the schema they were written with, so a
   topic can hold records written with different versions of its schema. Columns
   that a record's schema does not define are `NULL`.
-- Protobuf schemas that reference other subjects, including the Google
-  well-known types, are resolved through the schema registry. No additional
-  JAR files are required.
+- Protobuf schemas that reference other subjects are resolved through the
+  schema registry. Imports of the Google well-known types
+  (`google/protobuf/*.proto`), the Google common types (`google/type/*.proto`)
+  and the Confluent types (`confluent/meta.proto` and
+  `confluent/type/decimal.proto`) need no reference. No additional JAR files
+  are required.
 
 Set `kafka.table-description-supplier` to `CONFLUENT` to use the
 schema registry. You must also configure the additional properties in the following table:
 
 :::{note}
 The supported data formats are AVRO and PROTOBUF. Inserts are supported only for
-PROTOBUF tables: rows are encoded with the latest schema registered for the
-subject and written in the Confluent wire format.
+PROTOBUF tables with a value subject: rows are encoded with the latest schema
+registered for the subject and written in the Confluent wire format. Records of
+a table without a key subject are written with a `null` key.
 :::
 
 :::{list-table} Confluent table description supplier properties
@@ -486,6 +490,12 @@ In the above example, if the Protobuf message has the
 `test_oneof_column` containing `string_column` set to a value `Trino`
 then the corresponding Trino row includes a column named
 `test_oneof_column` with the value `JSON '{"string_column": "Trino"}'`.
+
+##### optional
+
+A proto3 field declared with the `optional` keyword is mapped to a column of
+the field's type, like other fields. The column is `NULL` when the field is not
+set, while fields without the `optional` keyword have their default value.
 
 (kafka-sql-inserts)=
 ## Kafka inserts
