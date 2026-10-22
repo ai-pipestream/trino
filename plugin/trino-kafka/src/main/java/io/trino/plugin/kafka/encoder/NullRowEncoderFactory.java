@@ -13,13 +13,17 @@
  */
 package io.trino.plugin.kafka.encoder;
 
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.connector.ConnectorSession;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static io.trino.plugin.kafka.encoder.KafkaFieldType.MESSAGE;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static java.lang.String.format;
 
 /**
- * Encodes the absent key or message of a table that defines no columns for it as a {@code null} Kafka key or value.
+ * Encodes the absent key of a table that defines no key columns as a {@code null} Kafka key.
  */
 public class NullRowEncoderFactory
         implements RowEncoderFactory
@@ -46,6 +50,10 @@ public class NullRowEncoderFactory
     public RowEncoder create(ConnectorSession session, RowEncoderSpec rowEncoderSpec)
     {
         checkArgument(rowEncoderSpec.columnHandles().isEmpty(), "No columns are expected for the %s of topic '%s'", rowEncoderSpec.kafkaFieldType(), rowEncoderSpec.topic());
+        if (rowEncoderSpec.kafkaFieldType() == MESSAGE) {
+            // a null message is a tombstone, which deletes the key from a compacted topic
+            throw new TrinoException(NOT_SUPPORTED, format("Inserting into the message of table '%s' requires a schema registry subject", rowEncoderSpec.topic()));
+        }
         return NULL_ROW_ENCODER;
     }
 }
