@@ -111,8 +111,8 @@ public class KafkaPageSinkProvider
     private static RowEncoderSpec toRowEncoderSpec(KafkaTableHandle handle, List<EncoderColumnHandle> columns, KafkaFieldType kafkaFieldType)
     {
         return switch (kafkaFieldType) {
-            case KEY -> new RowEncoderSpec(handle.keyDataFormat(), getDataSchema(handle.keyDataSchemaLocation()), columns, handle.topicName(), kafkaFieldType);
-            case MESSAGE -> new RowEncoderSpec(handle.messageDataFormat(), getDataSchema(handle.messageDataSchemaLocation()), columns, handle.topicName(), kafkaFieldType);
+            case KEY -> new RowEncoderSpec(handle.keyDataFormat(), getDataSchema(handle.keyDataSchemaLocation()), handle.keySubject(), columns, handle.topicName(), kafkaFieldType);
+            case MESSAGE -> new RowEncoderSpec(handle.messageDataFormat(), getDataSchema(handle.messageDataSchemaLocation()), handle.messageSubject(), columns, handle.topicName(), kafkaFieldType);
         };
     }
 

@@ -40,8 +40,10 @@ import io.trino.decoder.protobuf.ProtobufRowDecoder;
 import io.trino.decoder.protobuf.ProtobufRowDecoderFactory;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.plugin.kafka.encoder.DispatchingRowEncoderFactory;
+import io.trino.plugin.kafka.encoder.NullRowEncoderFactory;
 import io.trino.plugin.kafka.encoder.RowEncoderFactory;
 import io.trino.plugin.kafka.encoder.avro.AvroRowEncoder;
+import io.trino.plugin.kafka.encoder.protobuf.ConfluentProtobufRowEncoderFactory;
 import io.trino.plugin.kafka.encoder.protobuf.ProtobufRowEncoder;
 import io.trino.plugin.kafka.encoder.protobuf.ProtobufSchemaParser;
 import io.trino.plugin.kafka.schema.ContentSchemaProvider;
@@ -155,9 +157,9 @@ public class ConfluentModule
             encoderFactoriesByName.addBinding(AvroRowEncoder.NAME).toInstance((_, _) -> {
                 throw new TrinoException(NOT_SUPPORTED, "Insert not supported");
             });
-            encoderFactoriesByName.addBinding(ProtobufRowEncoder.NAME).toInstance((_, _) -> {
-                throw new TrinoException(NOT_SUPPORTED, "Insert is not supported for schema registry based tables");
-            });
+            encoderFactoriesByName.addBinding(ProtobufRowEncoder.NAME).to(ConfluentProtobufRowEncoderFactory.class).in(SINGLETON);
+            // a table whose topic has no key subject has no key columns, and its records are written without a key
+            encoderFactoriesByName.addBinding(DummyRowDecoder.NAME).to(NullRowEncoderFactory.class).in(SINGLETON);
             binder.bind(DispatchingRowEncoderFactory.class).in(SINGLETON);
         }
     }

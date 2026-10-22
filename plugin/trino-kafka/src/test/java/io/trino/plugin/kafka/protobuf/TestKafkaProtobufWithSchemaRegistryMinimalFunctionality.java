@@ -34,6 +34,7 @@ import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.kafka.TestingKafka;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Execution;
 
@@ -44,12 +45,15 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Optional;
+import java.util.stream.Stream;
 
 import static com.google.common.io.Resources.getResource;
 import static com.google.protobuf.Descriptors.FieldDescriptor.JavaType.ENUM;
 import static com.google.protobuf.Descriptors.FieldDescriptor.JavaType.STRING;
 import static io.confluent.kafka.serializers.AbstractKafkaSchemaSerDeConfig.SCHEMA_REGISTRY_URL_CONFIG;
 import static io.confluent.kafka.serializers.AbstractKafkaSchemaSerDeConfig.VALUE_SUBJECT_NAME_STRATEGY;
+import static io.trino.decoder.protobuf.ProtoFileDescriptorBuilder.buildFileDescriptor;
 import static io.trino.decoder.protobuf.ProtobufRowDecoderFactory.DEFAULT_MESSAGE;
 import static io.trino.decoder.protobuf.ProtobufUtils.getFileDescriptor;
 import static io.trino.decoder.protobuf.ProtobufUtils.getProtoFile;
@@ -156,9 +160,138 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
                 format("SELECT col_1, col_2, col_3 FROM %s", toDoubleQuoted(topic)),
                 false,
                 producerProperties());
-        assertQueryFails(
-                format("INSERT INTO %s (col_1, col_2, col_3) VALUES ('Trino', 14, 1.4)", toDoubleQuoted(topic)),
-                "Insert is not supported for schema registry based tables");
+
+        // rows are written with the latest schema of the key and value subjects
+        assertUpdate(format("INSERT INTO %s (key, col_1, col_2, col_3) VALUES (1000, 'Trino', 14, 1.4)", toDoubleQuoted(topic)), 1);
+        assertCount(topic, MESSAGE_COUNT * 2 + 1);
+        assertQuery(format("SELECT key, col_1, col_2, col_3 FROM %s WHERE key = 1000", toDoubleQuoted(topic)), "VALUES (1000, 'Trino', 14, 1.4)");
+
+        // a column that the schema does not define cannot be written
+        assertQueryFails(format("INSERT INTO %s (key, col_1, col_2, col_3) VALUES (1001, NULL, 1, 1.0)", toDoubleQuoted(topic)), ".*Protobuf doesn't support serializing null values.*");
+    }
+
+    @Test
+    public void testInsertWithoutKeySubject()
+            throws Exception
+    {
+        String topic = "topic-inserts-without-key";
+        assertNotExists(topic);
+
+        List<ProducerRecord<byte[], DynamicMessage>> messages = ImmutableList.of(new ProducerRecord<>(topic, null, createRecordWithInitialSchema(0, getInitialSchema())));
+        testingKafka.sendMessages(
+                messages.stream(),
+                ImmutableMap.<String, String>builder()
+                        .putAll(producerProperties())
+                        .put(KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName())
+                        .buildOrThrow());
+        waitUntilTableExists(topic);
+        assertQuery(format("SELECT col_1, col_2 FROM %s", toDoubleQuoted(topic)), "VALUES ('string-0', 0)");
+
+        // the records of a table without a key subject are written with a null key
+        assertUpdate(format("INSERT INTO %s (col_1, col_2) VALUES ('Trino', 14)", toDoubleQuoted(topic)), 1);
+        assertQuery(format("SELECT col_1, col_2 FROM %s", toDoubleQuoted(topic)), "VALUES ('string-0', 0), ('Trino', 14)");
+    }
+
+    @Test
+    public void testSchemaWithReferences()
+            throws Exception
+    {
+        String topic = "topic-schema-with-references";
+        assertNotExists(topic);
+
+        Map<String, String> imports = ImmutableMap.of("address.proto",
+                """
+                syntax = "proto3";
+                package common;
+                message Address {
+                  string city = 1;
+                }
+                """);
+        Descriptor descriptor = buildFileDescriptor(
+                "order.proto",
+                """
+                syntax = "proto3";
+                import "address.proto";
+                message schema {
+                  string col_1 = 1;
+                  common.Address address = 2;
+                }
+                """,
+                importPath -> Optional.ofNullable(imports.get(importPath)))
+                .findMessageTypeByName(DEFAULT_MESSAGE);
+        Descriptor addressDescriptor = descriptor.findFieldByName("address").getMessageType();
+        DynamicMessage message = DynamicMessage.newBuilder(descriptor)
+                .setField(descriptor.findFieldByName("col_1"), "Trino")
+                .setField(descriptor.findFieldByName("address"), DynamicMessage.newBuilder(addressDescriptor).setField(addressDescriptor.findFieldByName("city"), "Boston").build())
+                .build();
+
+        // the serializer registers the imported file as its own subject and references it from the topic's subject
+        testingKafka.sendMessages(Stream.of(new ProducerRecord<>(topic, createKeySchema(0, getKeySchema()), message)), producerProperties());
+        waitUntilTableExists(topic);
+
+        assertQuery(format("SELECT col_1, address.city FROM %s", toDoubleQuoted(topic)), "VALUES ('Trino', 'Boston')");
+
+        assertUpdate(format("INSERT INTO %s (key, col_1, address) VALUES (1, 'Inserted', ROW('Berlin'))", toDoubleQuoted(topic)), 1);
+        assertQuery(format("SELECT key, col_1, address.city FROM %s", toDoubleQuoted(topic)), "VALUES (0, 'Trino', 'Boston'), (1, 'Inserted', 'Berlin')");
+    }
+
+    @Test
+    public void testNestedSchemaEvolution()
+            throws Exception
+    {
+        String topic = "topic-nested-schema-evolution";
+        assertNotExists(topic);
+
+        Descriptor initial = getFileDescriptor(
+                """
+                syntax = "proto3";
+                message schema {
+                  string col_1 = 1;
+                  message Detail {
+                    string note = 1;
+                  }
+                  Detail detail = 2;
+                }
+                """).findMessageTypeByName(DEFAULT_MESSAGE);
+        Descriptor initialDetail = initial.findFieldByName("detail").getMessageType();
+        DynamicMessage initialMessage = DynamicMessage.newBuilder(initial)
+                .setField(initial.findFieldByName("col_1"), "first")
+                .setField(initial.findFieldByName("detail"), DynamicMessage.newBuilder(initialDetail).setField(initialDetail.findFieldByName("note"), "old").build())
+                .build();
+        testingKafka.sendMessages(Stream.of(new ProducerRecord<>(topic, createKeySchema(0, getKeySchema()), initialMessage)), producerProperties());
+        waitUntilTableExists(topic);
+        assertQuery(format("SELECT col_1, detail.note FROM %s", toDoubleQuoted(topic)), "VALUES ('first', 'old')");
+
+        Descriptor evolved = getFileDescriptor(
+                """
+                syntax = "proto3";
+                message schema {
+                  string col_1 = 1;
+                  message Detail {
+                    string note = 1;
+                    int64 weight = 2;
+                  }
+                  Detail detail = 2;
+                  string col_2 = 3;
+                }
+                """).findMessageTypeByName(DEFAULT_MESSAGE);
+        Descriptor evolvedDetail = evolved.findFieldByName("detail").getMessageType();
+        DynamicMessage evolvedMessage = DynamicMessage.newBuilder(evolved)
+                .setField(evolved.findFieldByName("col_1"), "second")
+                .setField(evolved.findFieldByName("detail"), DynamicMessage.newBuilder(evolvedDetail)
+                        .setField(evolvedDetail.findFieldByName("note"), "new")
+                        .setField(evolvedDetail.findFieldByName("weight"), 7L)
+                        .build())
+                .setField(evolved.findFieldByName("col_2"), "added")
+                .build();
+        testingKafka.sendMessages(Stream.of(new ProducerRecord<>(topic, createKeySchema(1, getKeySchema()), evolvedMessage)), producerProperties());
+
+        // records written with the previous schema decode with it: the fields it lacks are NULL, at the top level and within rows
+        assertQueryEventually(
+                getSession(),
+                format("SELECT key, col_1, col_2, detail.note, detail.weight FROM %s", toDoubleQuoted(topic)),
+                "VALUES (0, 'first', NULL, 'old', NULL), (1, 'second', 'added', 'new', 7)",
+                io.airlift.units.Duration.valueOf("5s"));
     }
 
     @Test

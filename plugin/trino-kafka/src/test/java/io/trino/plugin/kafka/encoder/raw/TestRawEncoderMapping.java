@@ -51,7 +51,7 @@ public class TestRawEncoderMapping
         EncoderColumnHandle col6 = new KafkaColumnHandle("test6", createVarcharType(6), "36:42", "BYTE", null, false, false, false);
         EncoderColumnHandle col7 = new KafkaColumnHandle("test7", createVarcharType(6), "42:48", "BYTE", null, false, false, false);
 
-        RowEncoder rowEncoder = ENCODER_FACTORY.create(TestingConnectorSession.SESSION, new RowEncoderSpec(RawRowEncoder.NAME, Optional.empty(), ImmutableList.of(col1, col2, col3, col4, col5, col6, col7), TOPIC, MESSAGE));
+        RowEncoder rowEncoder = ENCODER_FACTORY.create(TestingConnectorSession.SESSION, new RowEncoderSpec(RawRowEncoder.NAME, Optional.empty(), Optional.empty(), ImmutableList.of(col1, col2, col3, col4, col5, col6, col7), TOPIC, MESSAGE));
 
         ByteBuffer buf = ByteBuffer.allocate(48);
         buf.putLong(123456789); // 0-8
