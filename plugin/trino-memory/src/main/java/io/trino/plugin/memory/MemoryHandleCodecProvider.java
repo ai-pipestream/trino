@@ -16,6 +16,7 @@ package io.trino.plugin.memory;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 import com.google.protobuf.Parser;
+import io.trino.plugin.memory.protobuf.InsertMode;
 import io.trino.spi.HostAddress;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
@@ -139,7 +140,7 @@ public class MemoryHandleCodecProvider
                     MemoryInsertTableHandle insertTableHandle = (MemoryInsertTableHandle) handle;
                     return io.trino.plugin.memory.protobuf.MemoryInsertTableHandle.newBuilder()
                             .setTable(insertTableHandle.table())
-                            .setMode(io.trino.plugin.memory.protobuf.InsertMode.valueOf(insertTableHandle.mode().name()))
+                            .setMode(InsertMode.valueOf(insertTableHandle.mode().name()))
                             .addAllActiveTableIds(insertTableHandle.activeTableIds())
                             .build();
                 },
@@ -159,9 +160,9 @@ public class MemoryHandleCodecProvider
                 io.trino.plugin.memory.protobuf.MemoryTransactionHandle.parser()));
     }
 
-    private static MemoryInsertTableHandle.InsertMode insertMode(io.trino.plugin.memory.protobuf.InsertMode mode)
+    private static MemoryInsertTableHandle.InsertMode insertMode(InsertMode mode)
     {
-        if (mode == io.trino.plugin.memory.protobuf.InsertMode.INSERT_MODE_UNSPECIFIED || mode == io.trino.plugin.memory.protobuf.InsertMode.UNRECOGNIZED) {
+        if (mode == InsertMode.INSERT_MODE_UNSPECIFIED || mode == InsertMode.UNRECOGNIZED) {
             throw new TrinoException(GENERIC_INTERNAL_ERROR, "Invalid insert mode in protobuf memory insert table handle: " + mode.getNumber());
         }
         return MemoryInsertTableHandle.InsertMode.valueOf(mode.name());

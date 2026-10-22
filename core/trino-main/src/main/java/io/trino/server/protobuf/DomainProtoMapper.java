@@ -19,6 +19,10 @@ import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceOutput;
 import io.airlift.slice.Slices;
+import io.trino.server.protocol.v1.DiscreteValues;
+import io.trino.server.protocol.v1.DomainRange;
+import io.trino.server.protocol.v1.DomainValues;
+import io.trino.server.protocol.v1.RangeValues;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
@@ -68,23 +72,23 @@ public class DomainProtoMapper
         domain.getValues().getValuesProcessor().consume(
                 ranges -> {
                     List<Object> bounds = new ArrayList<>();
-                    io.trino.server.protocol.v1.RangeValues.Builder rangeValues = io.trino.server.protocol.v1.RangeValues.newBuilder();
+                    RangeValues.Builder rangeValues = RangeValues.newBuilder();
                     for (Range range : ranges.getOrderedRanges()) {
-                        rangeValues.addRanges(io.trino.server.protocol.v1.DomainRange.newBuilder()
+                        rangeValues.addRanges(DomainRange.newBuilder()
                                 .setLowInclusive(range.isLowInclusive())
                                 .setLowPosition(positionOf(bounds, range.getLowValue().orElse(null)))
                                 .setHighInclusive(range.isHighInclusive())
                                 .setHighPosition(positionOf(bounds, range.getHighValue().orElse(null)))
                                 .build());
                     }
-                    rangeValues.setBounds(io.trino.server.protocol.v1.DomainValues.newBuilder()
+                    rangeValues.setBounds(DomainValues.newBuilder()
                             .setBlock(serializeValues(type, bounds))
                             .build());
                     builder.setRanges(rangeValues.build());
                 },
-                discreteValues -> builder.setDiscrete(io.trino.server.protocol.v1.DiscreteValues.newBuilder()
+                discreteValues -> builder.setDiscrete(DiscreteValues.newBuilder()
                         .setInclusive(discreteValues.isInclusive())
-                        .setValues(io.trino.server.protocol.v1.DomainValues.newBuilder()
+                        .setValues(DomainValues.newBuilder()
                                 .setBlock(serializeValues(type, List.copyOf(discreteValues.getValues())))
                                 .build())
                         .build()),
@@ -113,14 +117,14 @@ public class DomainProtoMapper
         return bounds.size() - 1;
     }
 
-    private ValueSet discreteFromProto(Type type, io.trino.server.protocol.v1.DiscreteValues discrete)
+    private ValueSet discreteFromProto(Type type, DiscreteValues discrete)
     {
         List<Object> values = deserializeValues(type, discrete.getValues().getBlock());
         ValueSet valueSet = values.isEmpty() ? ValueSet.none(type) : ValueSet.copyOf(type, values);
         return discrete.getInclusive() ? valueSet : valueSet.complement();
     }
 
-    private ValueSet rangesFromProto(Type type, io.trino.server.protocol.v1.RangeValues rangeValues)
+    private ValueSet rangesFromProto(Type type, RangeValues rangeValues)
     {
         List<Object> bounds = deserializeValues(type, rangeValues.getBounds().getBlock());
         List<Range> ranges = rangeValues.getRangesList().stream()
@@ -129,7 +133,7 @@ public class DomainProtoMapper
         return ranges.isEmpty() ? ValueSet.none(type) : ValueSet.ofRanges(ranges);
     }
 
-    private static Range toRange(Type type, List<Object> bounds, io.trino.server.protocol.v1.DomainRange range)
+    private static Range toRange(Type type, List<Object> bounds, DomainRange range)
     {
         Object low = range.getLowPosition() < 0 ? null : bounds.get(range.getLowPosition());
         Object high = range.getHighPosition() < 0 ? null : bounds.get(range.getHighPosition());

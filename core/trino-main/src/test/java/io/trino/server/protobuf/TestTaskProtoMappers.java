@@ -24,6 +24,7 @@ import io.trino.execution.TaskId;
 import io.trino.execution.TaskStatus;
 import io.trino.execution.buffer.OutputBufferStatus;
 import io.trino.server.FailTaskRequest;
+import io.trino.server.protocol.v1.TaskState;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.ErrorType;
 import io.trino.spi.HostAddress;
@@ -50,8 +51,8 @@ import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
-import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static io.trino.type.ColorType.COLOR;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -181,7 +182,7 @@ public class TestTaskProtoMappers
                 "worker-0",
                 false);
         byte[] unspecifiedState = TaskStatusProtoMapper.toProto(taskStatus).toBuilder()
-                .setState(io.trino.server.protocol.v1.TaskState.TASK_STATE_UNSPECIFIED)
+                .setState(TaskState.TASK_STATE_UNSPECIFIED)
                 .build()
                 .toByteArray();
         assertThatThrownBy(() -> TaskStatusProtoMapper.parseFrom(unspecifiedState))

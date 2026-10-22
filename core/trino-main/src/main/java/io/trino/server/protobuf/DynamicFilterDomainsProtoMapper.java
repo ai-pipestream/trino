@@ -17,6 +17,7 @@ import com.google.inject.Inject;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.trino.execution.DynamicFiltersCollector.VersionedDynamicFilterDomains;
 import io.trino.spi.TrinoException;
+import io.trino.spi.predicate.Domain;
 import io.trino.sql.planner.plan.DynamicFilterId;
 
 import java.util.Map;
@@ -46,7 +47,7 @@ public class DynamicFilterDomainsProtoMapper
 
     public VersionedDynamicFilterDomains fromProto(io.trino.server.protocol.v1.VersionedDynamicFilterDomains proto)
     {
-        Map<DynamicFilterId, io.trino.spi.predicate.Domain> domains = proto.getDynamicFilterDomainsMap().entrySet().stream()
+        Map<DynamicFilterId, Domain> domains = proto.getDynamicFilterDomainsMap().entrySet().stream()
                 .collect(toImmutableMap(entry -> new DynamicFilterId(entry.getKey()), entry -> domainProtoMapper.fromProto(entry.getValue())));
         return new VersionedDynamicFilterDomains(proto.getVersion(), domains);
     }
