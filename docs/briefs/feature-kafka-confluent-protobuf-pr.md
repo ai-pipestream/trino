@@ -27,10 +27,19 @@ using only Apache-licensed dependencies:
   different schema versions and with message types other than the first one
   in the file. Fields that an older writer schema lacks decode as `NULL`,
   at the top level and within `ROW` columns (fixes trinodb/trino#20204).
+  The message index path is resolved the way Confluent's deserializer does,
+  counting the map entry messages that registered schema text declares
+  explicitly, and such explicit entries are read as maps.
+* Imports that Confluent serializers do not register as references resolve
+  without one: the Google well-known types and common types (`google/type`,
+  from the Apache licensed `proto-google-common-protos`), and
+  `confluent/meta.proto` and `confluent/type/decimal.proto`, whose messages
+  Trino declares with the same names and field numbers.
 * `INSERT` into Confluent protobuf tables is supported: rows are encoded with
   the latest schema of the key and message subjects and framed in the
   Confluent wire format. Tables whose topic has no key subject write records
-  with a null key.
+  with a null key; tables without a value subject reject `INSERT`, since a
+  null value would be a tombstone.
 * The Confluent protobuf libraries remain test dependencies only;
   `TestNoConfluentProtobufDependency` scans the connector's classes to make
   sure nothing references them.
@@ -39,9 +48,9 @@ using only Apache-licensed dependencies:
 
 Behavior changes worth calling out for reviewers:
 
-* Fields declared with the proto3 `optional` keyword are now regular columns.
-  The Confluent provider exposed them as `JSON` oneof columns through their
-  synthetic oneof.
+* Fields declared with the proto3 `optional` keyword are now regular columns,
+  which are `NULL` when the field is not set. The Confluent provider exposed
+  them as `JSON` oneof columns through their synthetic oneof.
 * The descriptors follow protoc presence semantics for proto3 fields, so a
   proto3 scalar set to its default value is not serialized by the encoder
   (the Confluent provider's descriptors serialized it).
@@ -67,6 +76,10 @@ Commits (each builds on its own):
 5. Drop Confluent protobuf provider from Kafka
 6. Support INSERT into Confluent protobuf tables
 7. Document protobuf support without extra JARs
+
+The review commits on top of these (map entries, known imports, proto3
+optional presence, enum and key-only INSERT fixes, docs) are to be folded
+into the commits above before the PR is opened.
 
 Tests:
 
@@ -100,4 +113,7 @@ Tests:
   including schema references, schema evolution and `INSERT`. ({issue}`23736`)
 * Fix query failure when a protobuf record was written with a schema that
   lacks a field of a `ROW` column. ({issue}`20204`)
+* {{breaking}} Map protobuf fields declared `optional` in proto3 schemas of the
+  Confluent table description supplier to columns of the field's type, instead
+  of `JSON` columns named after their synthetic oneof.
 ```
