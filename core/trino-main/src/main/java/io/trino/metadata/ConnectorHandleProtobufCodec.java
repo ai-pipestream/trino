@@ -16,6 +16,7 @@ package io.trino.metadata;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.trino.connector.CatalogHandle;
+import io.trino.server.protocol.v1.ConnectorHandle;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ConnectorHandleCodec;
 import io.trino.spi.connector.ConnectorHandleCodecProvider;
@@ -52,7 +53,7 @@ public class ConnectorHandleProtobufCodec
             Function<ConnectorHandleCodecProvider, Optional<ConnectorHandleCodec<T>>> codecLookup)
     {
         ConnectorHandleCodec<T> codec = resolveCodec(catalogHandle, handle.getClass(), handleFamily, codecLookup);
-        return io.trino.server.protocol.v1.ConnectorHandle.newBuilder()
+        return ConnectorHandle.newBuilder()
                 .setCatalogHandle(catalogHandle.getId())
                 .setPayload(ByteString.copyFrom(codec.serialize(handle)))
                 .build()
@@ -65,9 +66,9 @@ public class ConnectorHandleProtobufCodec
             String handleFamily,
             Function<ConnectorHandleCodecProvider, Optional<ConnectorHandleCodec<T>>> codecLookup)
     {
-        io.trino.server.protocol.v1.ConnectorHandle proto;
+        ConnectorHandle proto;
         try {
-            proto = io.trino.server.protocol.v1.ConnectorHandle.parseFrom(bytes);
+            proto = ConnectorHandle.parseFrom(bytes);
         }
         catch (InvalidProtocolBufferException e) {
             throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to decode protobuf connector handle", e);

@@ -20,6 +20,13 @@ import com.google.protobuf.Message;
 import com.google.protobuf.Parser;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
+import io.trino.plugin.tpch.protobuf.DomainDiscreteValues;
+import io.trino.plugin.tpch.protobuf.DomainRange;
+import io.trino.plugin.tpch.protobuf.DomainRanges;
+import io.trino.plugin.tpch.protobuf.Int128Value;
+import io.trino.plugin.tpch.protobuf.ScalarValue;
+import io.trino.plugin.tpch.protobuf.TupleDomainEntry;
+import io.trino.plugin.tpch.protobuf.TupleDomainKind;
 import io.trino.spi.HostAddress;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
@@ -151,17 +158,17 @@ public class TpchHandleCodecProvider
     {
         if (tupleDomain.isAll()) {
             return io.trino.plugin.tpch.protobuf.TupleDomain.newBuilder()
-                    .setKind(io.trino.plugin.tpch.protobuf.TupleDomainKind.ALL)
+                    .setKind(TupleDomainKind.ALL)
                     .build();
         }
         if (tupleDomain.isNone()) {
             return io.trino.plugin.tpch.protobuf.TupleDomain.newBuilder()
-                    .setKind(io.trino.plugin.tpch.protobuf.TupleDomainKind.NONE)
+                    .setKind(TupleDomainKind.NONE)
                     .build();
         }
         io.trino.plugin.tpch.protobuf.TupleDomain.Builder builder = io.trino.plugin.tpch.protobuf.TupleDomain.newBuilder()
-                .setKind(io.trino.plugin.tpch.protobuf.TupleDomainKind.ENTRIES);
-        tupleDomain.getDomains().orElseThrow().forEach((column, domain) -> builder.addEntries(io.trino.plugin.tpch.protobuf.TupleDomainEntry.newBuilder()
+                .setKind(TupleDomainKind.ENTRIES);
+        tupleDomain.getDomains().orElseThrow().forEach((column, domain) -> builder.addEntries(TupleDomainEntry.newBuilder()
                 .setColumn(toProto((TpchColumnHandle) column))
                 .setDomain(toProto(domain))
                 .build()));
@@ -189,9 +196,9 @@ public class TpchHandleCodecProvider
                 .setNullAllowed(domain.isNullAllowed());
         domain.getValues().getValuesProcessor().consume(
                 ranges -> {
-                    io.trino.plugin.tpch.protobuf.DomainRanges.Builder rangesBuilder = io.trino.plugin.tpch.protobuf.DomainRanges.newBuilder();
+                    DomainRanges.Builder rangesBuilder = DomainRanges.newBuilder();
                     for (Range range : ranges.getOrderedRanges()) {
-                        io.trino.plugin.tpch.protobuf.DomainRange.Builder rangeBuilder = io.trino.plugin.tpch.protobuf.DomainRange.newBuilder()
+                        DomainRange.Builder rangeBuilder = DomainRange.newBuilder()
                                 .setLowInclusive(range.isLowInclusive())
                                 .setHighInclusive(range.isHighInclusive());
                         range.getLowValue().ifPresent(low -> rangeBuilder.setLow(toScalarProto(domain.getType(), low)));
@@ -201,7 +208,7 @@ public class TpchHandleCodecProvider
                     builder.setRanges(rangesBuilder.build());
                 },
                 discreteValues -> {
-                    io.trino.plugin.tpch.protobuf.DomainDiscreteValues.Builder discreteBuilder = io.trino.plugin.tpch.protobuf.DomainDiscreteValues.newBuilder()
+                    DomainDiscreteValues.Builder discreteBuilder = DomainDiscreteValues.newBuilder()
                             .setInclusive(discreteValues.isInclusive());
                     discreteValues.getValues().forEach(value -> discreteBuilder.addValues(toScalarProto(domain.getType(), value)));
                     builder.setDiscrete(discreteBuilder.build());
@@ -233,7 +240,7 @@ public class TpchHandleCodecProvider
         return Domain.create(values, proto.getNullAllowed());
     }
 
-    private static Range toRange(Type type, io.trino.plugin.tpch.protobuf.DomainRange range)
+    private static Range toRange(Type type, DomainRange range)
     {
         Object low = range.hasLow() ? fromScalarProto(range.getLow()) : null;
         Object high = range.hasHigh() ? fromScalarProto(range.getHigh()) : null;
@@ -249,16 +256,16 @@ public class TpchHandleCodecProvider
         return Range.range(type, low, range.getLowInclusive(), high, range.getHighInclusive());
     }
 
-    private static io.trino.plugin.tpch.protobuf.ScalarValue toScalarProto(Type type, Object value)
+    private static ScalarValue toScalarProto(Type type, Object value)
     {
-        io.trino.plugin.tpch.protobuf.ScalarValue.Builder builder = io.trino.plugin.tpch.protobuf.ScalarValue.newBuilder();
+        ScalarValue.Builder builder = ScalarValue.newBuilder();
         switch (value) {
             case Long longValue -> builder.setLongValue(longValue);
             case Integer intValue -> builder.setLongValue(intValue.longValue());
             case Double doubleValue -> builder.setDoubleValue(doubleValue);
             case Boolean boolValue -> builder.setBoolValue(boolValue);
             case Slice sliceValue -> builder.setSliceValue(ByteString.copyFrom(sliceValue.byteArray(), sliceValue.byteArrayOffset(), sliceValue.length()));
-            case Int128 int128Value -> builder.setInt128Value(io.trino.plugin.tpch.protobuf.Int128Value.newBuilder()
+            case Int128 int128Value -> builder.setInt128Value(Int128Value.newBuilder()
                     .setHigh(int128Value.getHigh())
                     .setLow(int128Value.getLow())
                     .build());
@@ -269,7 +276,7 @@ public class TpchHandleCodecProvider
         return builder.build();
     }
 
-    private static Object fromScalarProto(io.trino.plugin.tpch.protobuf.ScalarValue proto)
+    private static Object fromScalarProto(ScalarValue proto)
     {
         return switch (proto.getValueCase()) {
             case LONG_VALUE -> proto.getLongValue();
