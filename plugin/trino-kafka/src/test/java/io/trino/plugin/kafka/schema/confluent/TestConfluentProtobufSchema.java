@@ -30,6 +30,7 @@ import io.confluent.kafka.schemaregistry.client.rest.entities.Metadata;
 import io.confluent.kafka.schemaregistry.client.rest.entities.RuleSet;
 import io.confluent.kafka.schemaregistry.client.rest.entities.Schema;
 import io.confluent.kafka.schemaregistry.client.rest.entities.SchemaReference;
+import io.confluent.kafka.schemaregistry.protobuf.ProtobufSchema;
 import io.trino.spi.ErrorCodeSupplier;
 import io.trino.spi.TrinoException;
 import org.apache.avro.SchemaBuilder;
@@ -185,6 +186,33 @@ public class TestConfluentProtobufSchema
         Descriptor meta = payment.findFieldByName("meta").getMessageType();
         assertThat(meta.getFullName()).isEqualTo("confluent.Meta");
         assertThat(meta.findFieldByName("params").isMapField()).isTrue();
+    }
+
+    @Test
+    public void testKnownTypesOfConfluentSerializersNeedNoReferences()
+    {
+        // Confluent serializers register schemas without references for their known types, so every
+        // one of them must resolve without a reference ...
+        for (String knownType : ProtobufSchema.knownTypes()) {
+            FileDescriptor file = schema(
+                    """
+                    syntax = "proto3";
+                    import "%s";
+                    message Event {}
+                    """.formatted(knownType)).getFileDescriptor();
+            assertThat(file.getDependencies()).as(knownType).extracting(FileDescriptor::getName).containsExactly(knownType);
+        }
+
+        // ... and nothing else does: the serializers register references for every other import
+        ConfluentProtobufSchema schema = schema(
+                """
+                syntax = "proto3";
+                import "google/type/localized_text.proto";
+                message Event {
+                    google.type.LocalizedText title = 1;
+                }
+                """);
+        assertTrinoException(schema::getFileDescriptor, INVALID_PROTO_FILE, "Import 'google/type/localized_text.proto' of protobuf schema 'schema.proto' could not be resolved");
     }
 
     @Test
