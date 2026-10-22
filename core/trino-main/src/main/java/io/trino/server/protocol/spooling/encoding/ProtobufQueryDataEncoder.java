@@ -17,7 +17,6 @@ import com.google.common.io.CountingOutputStream;
 import com.google.inject.Inject;
 import io.trino.Session;
 import io.trino.client.spooling.DataAttributes;
-import io.trino.client.spooling.encoding.protobuf.ProtobufWireWriter;
 import io.trino.server.protocol.OutputColumn;
 import io.trino.server.protocol.ProtobufEncodingUtils.TypeEncoder;
 import io.trino.server.protocol.spooling.QueryDataEncoder;
@@ -50,7 +49,6 @@ public class ProtobufQueryDataEncoder
     private boolean closed;
     private TypeEncoder[] typeEncoders;
     private int[] sourcePageChannels;
-    private ProtobufWireWriter rowWriter = new ProtobufWireWriter();
 
     public ProtobufQueryDataEncoder(Session session, List<OutputColumn> columns)
     {
@@ -70,7 +68,7 @@ public class ProtobufQueryDataEncoder
         verify(!closed, "ProtobufQueryDataEncoder is already closed");
         try {
             CountingOutputStream wrapper = new CountingOutputStream(output);
-            writePages(wrapper, rowWriter, typeEncoders, sourcePageChannels, pages);
+            writePages(wrapper, typeEncoders, sourcePageChannels, pages);
             wrapper.flush();
             return DataAttributes.builder()
                     .set(SEGMENT_SIZE, toIntExact(wrapper.getCount()))
@@ -91,7 +89,6 @@ public class ProtobufQueryDataEncoder
         }
         typeEncoders = null;
         sourcePageChannels = null;
-        rowWriter = null;
         closed = true;
     }
 

@@ -65,10 +65,14 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.function.Consumer;
 
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
@@ -115,6 +119,7 @@ import static io.trino.util.StructuralTestUtil.mapType;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Collections.singletonList;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.Executors.newFixedThreadPool;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -837,6 +842,85 @@ public class TestProtobufEncodingUtils
                 .hasMessageContaining("Expected value field 10 but got 6");
         assertThatThrownBy(() -> decode(TEST_SESSION, ImmutableList.of(typed("a", BIGINT), typed("b", BIGINT)), "protobuf", encoded))
                 .hasMessageContaining("Row has 1 values but 2 columns were expected");
+    }
+
+    @Test
+    public void testConcurrentEncoding()
+            throws Exception
+    {
+        // One encoder writes the segments of every driver of a query (see OutputSpoolingOperatorFactory),
+        // so segments encoded at the same time must not share state
+        TimestampWithTimeZoneType timestampWithTimeZone = createTimestampWithTimeZoneType(3);
+        List<TypedColumn> columns = ImmutableList.of(typed("a", BIGINT), typed("b", VARCHAR), typed("c", timestampWithTimeZone), typed("d", new ArrayType(createDecimalType(30, 2))));
+        List<TimeZoneKey> zones = ImmutableList.of(UTC_KEY, getTimeZoneKey("Europe/Warsaw"), getTimeZoneKey("America/Los_Angeles"), getTimeZoneKey("Asia/Kathmandu"));
+        DecimalType decimal = createDecimalType(30, 2);
+        int rows = 2_000;
+        List<Page> pages = new ArrayList<>();
+        for (int segment = 0; segment < 8; segment++) {
+            int seed = segment;
+            pages.add(page(
+                    block(BIGINT, builder -> {
+                        for (int i = 0; i < rows; i++) {
+                            BIGINT.writeLong(builder, seed * 1_000_000L + i);
+                        }
+                    }),
+                    block(VARCHAR, builder -> {
+                        for (int i = 0; i < rows; i++) {
+                            VARCHAR.writeSlice(builder, utf8Slice("segment " + seed + " row " + i + "x".repeat(i % 50)));
+                        }
+                    }),
+                    block(timestampWithTimeZone, builder -> {
+                        for (int i = 0; i < rows; i++) {
+                            timestampWithTimeZone.writeLong(builder, packDateTimeWithZone(i * 1_000_003L, zones.get((i + seed) % zones.size())));
+                        }
+                    }),
+                    block(new ArrayType(decimal), builder -> {
+                        for (int i = 0; i < rows; i++) {
+                            int value = i;
+                            ((ArrayBlockBuilder) builder).buildEntry(elements -> {
+                                for (int j = 0; j < value % 5; j++) {
+                                    decimal.writeObject(elements, Int128.valueOf(seed * 1_000_000_000_000_000_000L + value * j));
+                                }
+                            });
+                        }
+                    })));
+        }
+        List<List<List<Object>>> expected = new ArrayList<>();
+        for (Page page : pages) {
+            expected.add(decode(TEST_SESSION, columns, "json", ImmutableList.of(page)));
+        }
+
+        ImmutableList.Builder<OutputColumn> outputColumns = ImmutableList.builderWithExpectedSize(columns.size());
+        for (int i = 0; i < columns.size(); i++) {
+            outputColumns.add(new OutputColumn(i, columns.get(i).name(), columns.get(i).type()));
+        }
+        ExecutorService executor = newFixedThreadPool(pages.size());
+        try {
+            for (String encoding : PROTOBUF_ENCODINGS) {
+                QueryDataEncoder encoder = createEncoder(encoding).create(TEST_SESSION, outputColumns.build());
+                for (int round = 0; round < 5; round++) {
+                    CyclicBarrier barrier = new CyclicBarrier(pages.size());
+                    List<Future<Encoded>> futures = new ArrayList<>();
+                    for (Page page : pages) {
+                        futures.add(executor.submit(() -> {
+                            barrier.await();
+                            ByteArrayOutputStream output = new ByteArrayOutputStream();
+                            DataAttributes attributes = encoder.encodeTo(output, ImmutableList.of(page));
+                            return new Encoded(output.toByteArray(), attributes);
+                        }));
+                    }
+                    for (int i = 0; i < pages.size(); i++) {
+                        assertThat(decode(TEST_SESSION, columns, encoding, futures.get(i).get()))
+                                .as("encoding %s, segment %s", encoding, i)
+                                .isEqualTo(expected.get(i));
+                    }
+                }
+                encoder.close();
+            }
+        }
+        finally {
+            executor.shutdownNow();
+        }
     }
 
     private void assertRoundTrip(Type type, Consumer<BlockBuilder> values)

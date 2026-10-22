@@ -75,10 +75,10 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static com.google.common.base.Verify.verify;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.ARRAY_ELEMENTS;
@@ -265,11 +265,15 @@ public final class ProtobufEncodingUtils
     /**
      * Writes the rows of the pages as the {@code rows} of one {@code Segment} message. Each row goes to
      * the output as soon as it is complete, so the writer only ever holds one row.
+     * <p>
+     * The encoders are shared by every driver writing the query's segments, so they must not keep
+     * per call state; the writer is local to this call.
      */
-    public static void writePages(OutputStream output, ProtobufWireWriter rowWriter, TypeEncoder[] typeEncoders, int[] sourcePageChannels, List<Page> pages)
+    public static void writePages(OutputStream output, TypeEncoder[] typeEncoders, int[] sourcePageChannels, List<Page> pages)
             throws IOException
     {
         verify(typeEncoders.length == sourcePageChannels.length, "Source page channels and type encoders must have the same length");
+        ProtobufWireWriter rowWriter = new ProtobufWireWriter();
         Block[] blocks = new Block[sourcePageChannels.length];
         for (Page page : pages) {
             for (int i = 0; i < sourcePageChannels.length; i++) {
@@ -632,20 +636,16 @@ public final class ProtobufEncodingUtils
     }
 
     /**
-     * The UTF-8 zone ids of the keys seen by one encoder; a column usually has only a few.
+     * The UTF-8 zone ids of the keys seen by one encoder; a column usually has only a few. Encoders are
+     * shared by the drivers writing a query's segments, so the cache is concurrent.
      */
     private static final class ZoneIds
     {
-        private final Map<TimeZoneKey, byte[]> zoneIds = new HashMap<>();
+        private final Map<TimeZoneKey, byte[]> zoneIds = new ConcurrentHashMap<>();
 
         public byte[] get(TimeZoneKey key)
         {
-            byte[] zoneId = zoneIds.get(key);
-            if (zoneId == null) {
-                zoneId = key.getZoneId().getId().getBytes(UTF_8);
-                zoneIds.put(key, zoneId);
-            }
-            return zoneId;
+            return zoneIds.computeIfAbsent(key, _ -> key.getZoneId().getId().getBytes(UTF_8));
         }
     }
 
