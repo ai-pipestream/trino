@@ -74,7 +74,6 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.IntStream.range;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestProtobufDecoder
 {
@@ -555,8 +554,10 @@ public class TestProtobufDecoder
                 .decodeRow(messageBuilder.build().toByteArray())
                 .orElseThrow(AssertionError::new);
 
-        assertThatThrownBy(() -> decodedRow.get(rowColumn).getObject())
-                .hasMessageMatching("Unknown Field unknown_mapping");
+        // a field the writer's schema does not have decodes as NULL, as for top-level columns
+        SqlRow row = (SqlRow) decodedRow.get(rowColumn).getObject();
+        assertThat(row.getFieldCount()).isEqualTo(1);
+        assertThat(row.getRawFieldBlock(0).isNull(row.getRawIndex())).isTrue();
     }
 
     @Test
