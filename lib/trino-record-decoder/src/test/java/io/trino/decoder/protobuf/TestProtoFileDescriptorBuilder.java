@@ -21,6 +21,8 @@ import com.google.protobuf.Descriptors.FileDescriptor;
 import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.TimestampProto;
+import com.google.type.Date;
+import com.google.type.Money;
 import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
 
@@ -165,6 +167,36 @@ public class TestProtoFileDescriptorBuilder
         Descriptor event = file.findMessageTypeByName("Event");
         assertThat(event.findFieldByName("at").getMessageType()).isSameAs(Timestamp.getDescriptor());
         assertThat(file.getDependencies()).contains(TimestampProto.getDescriptor());
+    }
+
+    @Test
+    public void testGoogleCommonTypesLinkAgainstBundledDescriptors()
+    {
+        // schema registry serializers register these imports without references, so they must never reach the resolver
+        FileDescriptor file = build(
+                "common.proto",
+                """
+                syntax = "proto3";
+                import "google/type/date.proto";
+                import "google/type/money.proto";
+                import "google/type/decimal.proto";
+                import "google/type/color.proto";
+                message Invoice {
+                  google.type.Date due = 1;
+                  google.type.Money total = 2;
+                  google.type.Decimal rate = 3;
+                  google.type.Color accent = 4;
+                }
+                """,
+                importPath -> {
+                    throw new AssertionError("Unexpected import resolution: " + importPath);
+                });
+        Descriptor invoice = file.findMessageTypeByName("Invoice");
+        assertThat(invoice.findFieldByName("due").getMessageType()).isSameAs(Date.getDescriptor());
+        assertThat(invoice.findFieldByName("total").getMessageType()).isSameAs(Money.getDescriptor());
+        assertThat(invoice.findFieldByName("rate").getMessageType().getFullName()).isEqualTo("google.type.Decimal");
+        // color.proto itself imports google/protobuf/wrappers.proto
+        assertThat(invoice.findFieldByName("accent").getMessageType().findFieldByName("alpha").getMessageType().getFullName()).isEqualTo("google.protobuf.FloatValue");
     }
 
     @Test
