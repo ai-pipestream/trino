@@ -27,6 +27,7 @@ import io.trino.server.FailTaskRequest;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.ErrorType;
 import io.trino.spi.HostAddress;
+import io.trino.spi.TrinoException;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.ValueSet;
@@ -39,17 +40,23 @@ import java.net.URI;
 import java.util.List;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
+import java.util.stream.LongStream;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.block.BlockAssertions.createLongsBlock;
 import static io.trino.execution.TaskState.FAILED;
 import static io.trino.metadata.InternalBlockEncodingSerde.TESTING_BLOCK_ENCODING_SERDE;
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
+import static io.trino.type.ColorType.COLOR;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.within;
 
 public class TestTaskProtoMappers
 {
@@ -79,7 +86,7 @@ public class TestTaskProtoMappers
                 DataSize.ofBytes(16384),
                 DataSize.ofBytes(32768),
                 2,
-                new Duration(123, MILLISECONDS),
+                new Duration(123.456789, MILLISECONDS),
                 13,
                 17,
                 19);
@@ -129,6 +136,81 @@ public class TestTaskProtoMappers
         assertThat(decoded.getDynamicFilterDomains()).isEqualTo(original.getDynamicFilterDomains());
     }
 
+    @Test
+    public void testDynamicFilterDomainsRoundTripEquatableAndUnboundedValues()
+    {
+        // COLOR is comparable but not orderable, so these domains are backed by EquatableValueSet
+        VersionedDynamicFilterDomains original = new VersionedDynamicFilterDomains(
+                5,
+                ImmutableMap.<DynamicFilterId, Domain>builder()
+                        .put(new DynamicFilterId("df_equatable"), Domain.multipleValues(COLOR, List.of(1L, 2L, 3L)))
+                        .put(new DynamicFilterId("df_equatable_complement"), Domain.create(ValueSet.of(COLOR, 4L).complement(), true))
+                        .put(new DynamicFilterId("df_equatable_none"), Domain.create(ValueSet.none(COLOR), false))
+                        .put(new DynamicFilterId("df_range_all"), Domain.create(ValueSet.ofRanges(Range.all(BIGINT)), false))
+                        .put(new DynamicFilterId("df_range_unbounded_low"), Domain.create(ValueSet.ofRanges(Range.lessThan(BIGINT, 7L)), false))
+                        .put(new DynamicFilterId("df_not_null"), Domain.notNull(VARCHAR))
+                        .put(new DynamicFilterId("df_large"), Domain.multipleValues(BIGINT, LongStream.range(0, 10_000).boxed().toList()))
+                        .buildOrThrow());
+        VersionedDynamicFilterDomains decoded = dynamicFilterDomainsProtoMapper.parseFrom(dynamicFilterDomainsProtoMapper.toByteArray(original));
+        assertThat(decoded.getVersion()).isEqualTo(original.getVersion());
+        assertThat(decoded.getDynamicFilterDomains()).isEqualTo(original.getDynamicFilterDomains());
+    }
+
+    @Test
+    public void testCorruptBytesFailWithCategorizedError()
+    {
+        // field 1, length-delimited, declared length 5 but only one byte follows
+        byte[] truncated = {0x0A, 0x05, 0x01};
+        assertThatThrownBy(() -> TaskStatusProtoMapper.parseFrom(truncated))
+                .isInstanceOf(TrinoException.class)
+                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()));
+        assertThatThrownBy(() -> FailTaskRequestProtoMapper.parseFrom(truncated))
+                .isInstanceOf(TrinoException.class)
+                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()));
+        assertThatThrownBy(() -> dynamicFilterDomainsProtoMapper.parseFrom(truncated))
+                .isInstanceOf(TrinoException.class)
+                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()));
+    }
+
+    @Test
+    public void testUnspecifiedEnumValuesAreRejected()
+    {
+        TaskStatus taskStatus = TaskStatus.initialTaskStatus(
+                TaskId.valueOf("20240101_000000_00000_xyz.0.0.0"),
+                URI.create("http://worker.example.com:8080/v1/task/20240101_000000_00000_xyz.0.0.0"),
+                "worker-0",
+                false);
+        byte[] unspecifiedState = TaskStatusProtoMapper.toProto(taskStatus).toBuilder()
+                .setState(io.trino.server.protocol.v1.TaskState.TASK_STATE_UNSPECIFIED)
+                .build()
+                .toByteArray();
+        assertThatThrownBy(() -> TaskStatusProtoMapper.parseFrom(unspecifiedState))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("Invalid task state");
+
+        io.trino.server.protocol.v1.FailTaskRequest failTaskRequest = FailTaskRequestProtoMapper.toProto(new FailTaskRequest(failureInfo()));
+        byte[] unspecifiedErrorType = failTaskRequest.toBuilder()
+                .setFailureInfo(failTaskRequest.getFailureInfo().toBuilder()
+                        .setErrorCode(failTaskRequest.getFailureInfo().getErrorCode().toBuilder()
+                                .setType(io.trino.server.protocol.v1.ErrorType.ERROR_TYPE_UNSPECIFIED)))
+                .build()
+                .toByteArray();
+        assertThatThrownBy(() -> FailTaskRequestProtoMapper.parseFrom(unspecifiedErrorType))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("Invalid error type");
+
+        byte[] domainWithoutValues = io.trino.server.protocol.v1.VersionedDynamicFilterDomains.newBuilder()
+                .setVersion(1)
+                .putDynamicFilterDomains("df", io.trino.server.protocol.v1.Domain.newBuilder()
+                        .setTypeId(BIGINT.getTypeId().getId())
+                        .build())
+                .build()
+                .toByteArray();
+        assertThatThrownBy(() -> dynamicFilterDomainsProtoMapper.parseFrom(domainWithoutValues))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("no values set");
+    }
+
     private static void assertTaskStatusEquals(TaskStatus actual, TaskStatus expected)
     {
         assertThat(actual.taskId()).isEqualTo(expected.taskId());
@@ -153,7 +235,7 @@ public class TestTaskProtoMappers
         assertThat(actual.peakMemoryReservation()).isEqualTo(expected.peakMemoryReservation());
         assertThat(actual.revocableMemoryReservation()).isEqualTo(expected.revocableMemoryReservation());
         assertThat(actual.fullGcCount()).isEqualTo(expected.fullGcCount());
-        assertThat(actual.fullGcTime().toMillis()).isEqualTo(expected.fullGcTime().toMillis());
+        assertThat(actual.fullGcTime().getValue(NANOSECONDS)).isCloseTo(expected.fullGcTime().getValue(NANOSECONDS), within(1.0));
         assertThat(actual.dynamicFiltersVersion()).isEqualTo(expected.dynamicFiltersVersion());
         assertThat(actual.queuedPartitionedSplitsWeight()).isEqualTo(expected.queuedPartitionedSplitsWeight());
         assertThat(actual.runningPartitionedSplitsWeight()).isEqualTo(expected.runningPartitionedSplitsWeight());

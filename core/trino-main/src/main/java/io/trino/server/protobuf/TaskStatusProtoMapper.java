@@ -75,7 +75,7 @@ public final class TaskStatusProtoMapper
                 TaskId.valueOf(proto.getTaskId()),
                 proto.getTaskInstanceId(),
                 proto.getVersion(),
-                TaskState.valueOf(proto.getState().name()),
+                taskState(proto.getState()),
                 URI.create(proto.getSelf()),
                 proto.getNodeId(),
                 proto.getSpeculative(),
@@ -100,6 +100,14 @@ public final class TaskStatusProtoMapper
                 proto.getDynamicFiltersVersion(),
                 proto.getQueuedPartitionedSplitsWeight(),
                 proto.getRunningPartitionedSplitsWeight());
+    }
+
+    private static TaskState taskState(io.trino.server.protocol.v1.TaskState state)
+    {
+        if (state == io.trino.server.protocol.v1.TaskState.TASK_STATE_UNSPECIFIED || state == io.trino.server.protocol.v1.TaskState.UNRECOGNIZED) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Invalid task state in protobuf TaskStatus: " + state.getNumber());
+        }
+        return TaskState.valueOf(state.name());
     }
 
     public static byte[] toByteArray(TaskStatus taskStatus)

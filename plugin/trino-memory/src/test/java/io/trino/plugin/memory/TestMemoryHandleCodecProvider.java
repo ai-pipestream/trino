@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.plugin.memory.MemoryInsertTableHandle.InsertMode;
 import io.trino.spi.HostAddress;
+import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorHandleCodec;
 import io.trino.spi.connector.ConnectorHandleCodecProvider;
@@ -37,9 +38,11 @@ import java.util.Map;
 import java.util.OptionalDouble;
 import java.util.OptionalLong;
 
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestMemoryHandleCodecProvider
 {
@@ -98,6 +101,43 @@ public class TestMemoryHandleCodecProvider
         MemoryInsertTableHandle original = new MemoryInsertTableHandle(9, InsertMode.OVERWRITE, ImmutableSet.of(9L));
         ConnectorHandleCodec<ConnectorInsertTableHandle> codec = provider.getInsertTableHandleCodec().orElseThrow();
         assertThat(codec.deserialize(codec.serialize(original))).isEqualTo(original);
+    }
+
+    @Test
+    public void testInsertTableHandleRoundTripAppend()
+    {
+        MemoryInsertTableHandle original = new MemoryInsertTableHandle(3, InsertMode.APPEND, ImmutableSet.of());
+        ConnectorHandleCodec<ConnectorInsertTableHandle> codec = provider.getInsertTableHandleCodec().orElseThrow();
+        assertThat(codec.deserialize(codec.serialize(original))).isEqualTo(original);
+    }
+
+    @Test
+    public void testInsertTableHandleUnspecifiedModeIsRejected()
+    {
+        byte[] unspecifiedMode = io.trino.plugin.memory.protobuf.MemoryInsertTableHandle.newBuilder()
+                .setTable(3)
+                .build()
+                .toByteArray();
+        assertThatThrownBy(() -> provider.getInsertTableHandleCodec().orElseThrow().deserialize(unspecifiedMode))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("Invalid insert mode");
+    }
+
+    @Test
+    public void testSplitRoundTripWithoutLimit()
+    {
+        MemorySplit original = new MemorySplit(5, 0, 1, HostAddress.fromString("worker:8080"), 0, OptionalLong.empty());
+        ConnectorHandleCodec<ConnectorSplit> codec = provider.getSplitCodec().orElseThrow();
+        assertThat(codec.deserialize(codec.serialize(original))).isEqualTo(original);
+    }
+
+    @Test
+    public void testCorruptBytesFailWithCategorizedError()
+    {
+        byte[] truncated = {0x12, 0x05, 0x01};
+        assertThatThrownBy(() -> provider.getTableHandleCodec().orElseThrow().deserialize(truncated))
+                .isInstanceOf(TrinoException.class)
+                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()));
     }
 
     @Test

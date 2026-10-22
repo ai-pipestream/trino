@@ -23,6 +23,7 @@ import io.airlift.http.client.Response;
 import io.trino.execution.TaskId;
 import io.trino.execution.TaskStatus;
 import io.trino.server.protobuf.TaskStatusProtoMapper;
+import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
@@ -43,16 +44,12 @@ public class TestProtobufResponseHandler
     @Test
     public void testProtobufResponseIsDecoded()
     {
-        TaskStatus taskStatus = TaskStatus.initialTaskStatus(
-                TaskId.valueOf("20240101_000000_00000_xyz.0.0.0"),
-                URI.create("http://worker.example.com:8080/v1/task/20240101_000000_00000_xyz.0.0.0"),
-                "worker-0",
-                false);
+        TaskStatus taskStatus = initialTaskStatus();
         byte[] body = TaskStatusProtoMapper.toByteArray(taskStatus);
         assertThat(body[0]).isNotEqualTo((byte) '{');
 
         ProtobufResponseHandler.ProtobufResponse<TaskStatus> response = createProtobufResponseHandler(TaskStatusProtoMapper::parseFrom)
-                .handle(request(), new TestResponse(APPLICATION_X_PROTOBUF, body));
+                .handle(request(), new TestResponse(HttpStatus.OK, ImmutableListMultimap.of(CONTENT_TYPE, APPLICATION_X_PROTOBUF), body));
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK.code());
         assertThat(response.hasValue()).isTrue();
         assertThat(response.getValue().taskId()).isEqualTo(taskStatus.taskId());
@@ -64,10 +61,62 @@ public class TestProtobufResponseHandler
     {
         byte[] jsonBody = "{\"taskId\":\"20240101_000000_00000_xyz.0.0.0\"}".getBytes(UTF_8);
         ProtobufResponseHandler.ProtobufResponse<TaskStatus> response = createProtobufResponseHandler(TaskStatusProtoMapper::parseFrom)
-                .handle(request(), new TestResponse("application/json", jsonBody));
+                .handle(request(), new TestResponse(HttpStatus.OK, ImmutableListMultimap.of(CONTENT_TYPE, "application/json"), jsonBody));
         assertThat(response.hasValue()).isFalse();
         assertThat(response.getException()).isNotNull();
         assertThat(response.getException().getMessage()).contains(APPLICATION_X_PROTOBUF);
+    }
+
+    @Test
+    public void testMissingContentTypeIsRejected()
+    {
+        byte[] body = TaskStatusProtoMapper.toByteArray(initialTaskStatus());
+        ProtobufResponseHandler.ProtobufResponse<TaskStatus> response = createProtobufResponseHandler(TaskStatusProtoMapper::parseFrom)
+                .handle(request(), new TestResponse(HttpStatus.OK, ImmutableListMultimap.of(), body));
+        assertThat(response.hasValue()).isFalse();
+        assertThat(response.getException()).isNotNull();
+        assertThat(response.getException().getMessage()).contains("no content type");
+    }
+
+    @Test
+    public void testNonOkStatusHasNoValueAndNoException()
+    {
+        ProtobufResponseHandler.ProtobufResponse<TaskStatus> response = createProtobufResponseHandler(TaskStatusProtoMapper::parseFrom)
+                .handle(request(), new TestResponse(HttpStatus.SERVICE_UNAVAILABLE, ImmutableListMultimap.of(CONTENT_TYPE, "text/plain"), "busy".getBytes(UTF_8)));
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE.code());
+        assertThat(response.hasValue()).isFalse();
+        assertThat(response.getException()).isNull();
+        assertThat(response.getResponseBody()).isEqualTo("busy");
+        assertThat(response.getResponseSize()).isEqualTo(4);
+    }
+
+    @Test
+    public void testEmptyOkBodyHasNoValue()
+    {
+        ProtobufResponseHandler.ProtobufResponse<TaskStatus> response = createProtobufResponseHandler(TaskStatusProtoMapper::parseFrom)
+                .handle(request(), new TestResponse(HttpStatus.OK, ImmutableListMultimap.of(CONTENT_TYPE, APPLICATION_X_PROTOBUF), new byte[0]));
+        assertThat(response.hasValue()).isFalse();
+        assertThat(response.getException()).isNull();
+    }
+
+    @Test
+    public void testCorruptBodyIsCapturedAsException()
+    {
+        byte[] truncated = {0x0A, 0x05, 0x01};
+        ProtobufResponseHandler.ProtobufResponse<TaskStatus> response = createProtobufResponseHandler(TaskStatusProtoMapper::parseFrom)
+                .handle(request(), new TestResponse(HttpStatus.OK, ImmutableListMultimap.of(CONTENT_TYPE, APPLICATION_X_PROTOBUF), truncated));
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK.code());
+        assertThat(response.hasValue()).isFalse();
+        assertThat(response.getException()).isInstanceOf(TrinoException.class);
+    }
+
+    private static TaskStatus initialTaskStatus()
+    {
+        return TaskStatus.initialTaskStatus(
+                TaskId.valueOf("20240101_000000_00000_xyz.0.0.0"),
+                URI.create("http://worker.example.com:8080/v1/task/20240101_000000_00000_xyz.0.0.0"),
+                "worker-0",
+                false);
     }
 
     private static Request request()
@@ -75,7 +124,7 @@ public class TestProtobufResponseHandler
         return prepareGet().setUri(TASK_URI).build();
     }
 
-    private record TestResponse(String contentType, byte[] body)
+    private record TestResponse(HttpStatus status, ListMultimap<HeaderName, String> headers, byte[] body)
             implements Response
     {
         @Override
@@ -87,13 +136,13 @@ public class TestProtobufResponseHandler
         @Override
         public int getStatusCode()
         {
-            return HttpStatus.OK.code();
+            return status.code();
         }
 
         @Override
         public ListMultimap<HeaderName, String> getHeaders()
         {
-            return ImmutableListMultimap.of(CONTENT_TYPE, contentType);
+            return headers;
         }
 
         @Override
