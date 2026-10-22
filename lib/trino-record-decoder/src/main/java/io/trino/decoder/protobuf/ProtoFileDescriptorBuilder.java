@@ -322,7 +322,26 @@ public final class ProtoFileDescriptorBuilder
         // map entry types go last, so the position of a declared nested message among the
         // nested types matches its position in the source
         mapEntries.forEach(builder::addNestedType);
+        if (builder.getOptions().getMapEntry() && !isMapEntryShape(builder)) {
+            throw new TrinoException(INVALID_PROTO_FILE, format("Message '%s' in protobuf schema '%s' is declared as a map entry but does not consist of the fields key = 1 and value = 2", message.getName(), fileName));
+        }
         return builder.build();
+    }
+
+    /**
+     * The shape protoc gives the entry message of a map field, which is what decoding and encoding a map rely on.
+     */
+    private static boolean isMapEntryShape(DescriptorProto.Builder message)
+    {
+        if (message.getFieldCount() != 2 || message.getNestedTypeCount() != 0 || message.getEnumTypeCount() != 0 || message.getOneofDeclCount() != 0) {
+            return false;
+        }
+        return isMapEntryField(message.getField(0), "key", 1) && isMapEntryField(message.getField(1), "value", 2);
+    }
+
+    private static boolean isMapEntryField(FieldDescriptorProto field, String name, int number)
+    {
+        return field.getName().equals(name) && field.getNumber() == number && field.getLabel() == Label.LABEL_OPTIONAL;
     }
 
     private static FieldDescriptorProto toFieldDescriptorProto(FieldElement field, boolean proto3, OptionalInt oneofIndex, List<DescriptorProto> mapEntries)
