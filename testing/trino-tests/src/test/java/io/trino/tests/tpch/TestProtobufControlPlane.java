@@ -13,9 +13,16 @@
  */
 package io.trino.tests.tpch;
 
+import io.trino.server.DynamicFilterService.DynamicFiltersStats;
+import io.trino.spi.predicate.Domain;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.QueryRunner;
+import io.trino.testing.QueryRunner.MaterializedResultWithPlan;
+import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
+
+import static io.trino.spi.type.BigintType.BIGINT;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Runs distributed queries with the task control plane switched to protobuf
@@ -46,10 +53,18 @@ public class TestProtobufControlPlane
     {
         // Exercises dynamic filter collection: build-side domains are fetched
         // from workers over GET /{taskId}/dynamicfilters.
-        assertQuery("" +
-                "SELECT count(*) " +
+        @Language("SQL") String sql = "SELECT count(*) " +
                 "FROM orders o JOIN customer c ON o.custkey = c.custkey " +
-                "WHERE c.name LIKE 'Customer#0000001%'");
+                "WHERE c.name LIKE 'Customer#0000001%'";
+        assertQuery(sql);
+        MaterializedResultWithPlan result = getDistributedQueryRunner().executeWithPlan(getSession(), sql);
+
+        // The collected domain can only have reached the coordinator through the
+        // dynamic filter fetch, which is protobuf-only under this switch.
+        DynamicFiltersStats dynamicFiltersStats = getDynamicFilteringStats(result.queryId());
+        assertThat(dynamicFiltersStats.getDynamicFiltersCompleted()).isGreaterThan(0);
+        assertThat(dynamicFiltersStats.getDynamicFilterDomainStats())
+                .anySatisfy(domainStats -> assertThat(domainStats.getSimplifiedDomain()).isNotEqualTo(Domain.all(BIGINT).toString()));
     }
 
     @Test

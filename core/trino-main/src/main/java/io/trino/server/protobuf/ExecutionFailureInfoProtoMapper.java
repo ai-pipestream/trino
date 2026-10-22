@@ -17,8 +17,10 @@ import io.trino.client.ErrorLocation;
 import io.trino.execution.ExecutionFailureInfo;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.HostAddress;
+import io.trino.spi.TrinoException;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 
 public final class ExecutionFailureInfoProtoMapper
 {
@@ -74,9 +76,17 @@ public final class ExecutionFailureInfoProtoMapper
                         ? new ErrorCode(
                         proto.getErrorCode().getCode(),
                         proto.getErrorCode().getName(),
-                        io.trino.spi.ErrorType.valueOf(proto.getErrorCode().getType().name()),
+                        errorType(proto.getErrorCode().getType()),
                         proto.getErrorCode().getFatal())
                         : null,
                 proto.hasRemoteHost() ? HostAddress.fromString(proto.getRemoteHost()) : null);
+    }
+
+    private static io.trino.spi.ErrorType errorType(io.trino.server.protocol.v1.ErrorType errorType)
+    {
+        if (errorType == io.trino.server.protocol.v1.ErrorType.ERROR_TYPE_UNSPECIFIED || errorType == io.trino.server.protocol.v1.ErrorType.UNRECOGNIZED) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Invalid error type in protobuf ExecutionFailureInfo: " + errorType.getNumber());
+        }
+        return io.trino.spi.ErrorType.valueOf(errorType.name());
     }
 }

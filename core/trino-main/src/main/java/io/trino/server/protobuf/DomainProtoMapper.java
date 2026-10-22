@@ -19,6 +19,7 @@ import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceOutput;
 import io.airlift.slice.Slices;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.BlockEncodingSerde;
@@ -35,6 +36,7 @@ import java.util.List;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.block.BlockSerdeUtil.readBlock;
 import static io.trino.block.BlockSerdeUtil.writeBlock;
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.type.TypeUtils.readNativeValue;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static java.lang.Math.toIntExact;
@@ -97,7 +99,7 @@ public class DomainProtoMapper
             case ALL -> proto.getAll() ? ValueSet.all(type) : ValueSet.none(type);
             case DISCRETE -> discreteFromProto(type, proto.getDiscrete());
             case RANGES -> rangesFromProto(type, proto.getRanges());
-            case VALUES_NOT_SET -> throw new IllegalArgumentException("Domain proto has no values set");
+            case VALUES_NOT_SET -> throw new TrinoException(GENERIC_INTERNAL_ERROR, "Domain in protobuf dynamic filter domains has no values set");
         };
         return Domain.create(values, proto.getNullAllowed());
     }

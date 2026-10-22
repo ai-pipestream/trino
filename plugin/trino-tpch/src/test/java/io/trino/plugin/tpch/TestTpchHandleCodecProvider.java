@@ -16,6 +16,8 @@ package io.trino.plugin.tpch;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.spi.HostAddress;
+import io.trino.spi.TrinoException;
+import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorHandleCodec;
 import io.trino.spi.connector.ConnectorHandleCodecProvider;
@@ -27,6 +29,7 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
+import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeDescriptor;
 import io.trino.spi.type.TypeId;
@@ -37,11 +40,14 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
+import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.createVarcharType;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestTpchHandleCodecProvider
 {
@@ -69,6 +75,64 @@ public class TestTpchHandleCodecProvider
 
         ConnectorHandleCodec<ConnectorTableHandle> codec = provider.getTableHandleCodec().orElseThrow();
         assertThat(codec.deserialize(codec.serialize(original))).isEqualTo(original);
+    }
+
+    @Test
+    public void testTableHandleRoundTripRangesAndNulls()
+    {
+        TpchColumnHandle orderKey = new TpchColumnHandle("orderkey", BIGINT);
+        TpchColumnHandle discount = new TpchColumnHandle("discount", DOUBLE);
+        TpchColumnHandle comment = new TpchColumnHandle("comment", VARCHAR_25);
+        TupleDomain<ColumnHandle> constraint = TupleDomain.withColumnDomains(ImmutableMap.of(
+                orderKey, Domain.create(ValueSet.ofRanges(
+                        Range.lessThan(BIGINT, 10L),
+                        Range.range(BIGINT, 20L, true, 30L, false),
+                        Range.greaterThanOrEqual(BIGINT, 100L)), true),
+                discount, Domain.create(ValueSet.ofRanges(Range.all(DOUBLE)), false),
+                comment, Domain.onlyNull(VARCHAR_25)));
+        TpchTableHandle original = new TpchTableHandle("sf1", "orders", 1.0, constraint);
+
+        ConnectorHandleCodec<ConnectorTableHandle> codec = provider.getTableHandleCodec().orElseThrow();
+        assertThat(codec.deserialize(codec.serialize(original))).isEqualTo(original);
+    }
+
+    @Test
+    public void testTableHandleRoundTripNoneConstraint()
+    {
+        TpchTableHandle original = new TpchTableHandle("sf1", "orders", 1.0, TupleDomain.none());
+        ConnectorHandleCodec<ConnectorTableHandle> codec = provider.getTableHandleCodec().orElseThrow();
+        assertThat(codec.deserialize(codec.serialize(original))).isEqualTo(original);
+    }
+
+    @Test
+    public void testNonScalarDomainValueIsRejected()
+    {
+        ArrayType arrayType = new ArrayType(BIGINT);
+        BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, 1);
+        BIGINT.writeLong(blockBuilder, 1);
+        TpchTableHandle handle = new TpchTableHandle(
+                "sf1",
+                "orders",
+                1.0,
+                TupleDomain.withColumnDomains(ImmutableMap.of(new TpchColumnHandle("c", arrayType), Domain.singleValue(arrayType, blockBuilder.build()))));
+
+        ConnectorHandleCodec<ConnectorTableHandle> codec = provider.getTableHandleCodec().orElseThrow();
+        assertThatThrownBy(() -> codec.serialize(handle))
+                .isInstanceOf(TrinoException.class)
+                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
+                .hasMessageContaining("non-scalar");
+    }
+
+    @Test
+    public void testCorruptBytesFailWithCategorizedError()
+    {
+        byte[] truncated = {0x0A, 0x05, 0x01};
+        assertThatThrownBy(() -> provider.getTableHandleCodec().orElseThrow().deserialize(truncated))
+                .isInstanceOf(TrinoException.class)
+                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()));
+        assertThatThrownBy(() -> provider.getSplitCodec().orElseThrow().deserialize(truncated))
+                .isInstanceOf(TrinoException.class)
+                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()));
     }
 
     @Test

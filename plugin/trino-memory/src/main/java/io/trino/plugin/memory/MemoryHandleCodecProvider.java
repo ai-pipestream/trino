@@ -145,7 +145,7 @@ public class MemoryHandleCodecProvider
                 },
                 proto -> new MemoryInsertTableHandle(
                         proto.getTable(),
-                        MemoryInsertTableHandle.InsertMode.valueOf(proto.getMode().name()),
+                        insertMode(proto.getMode()),
                         proto.getActiveTableIdsList().stream().collect(toImmutableSet())),
                 io.trino.plugin.memory.protobuf.MemoryInsertTableHandle.parser()));
     }
@@ -157,6 +157,14 @@ public class MemoryHandleCodecProvider
                 _ -> io.trino.plugin.memory.protobuf.MemoryTransactionHandle.getDefaultInstance(),
                 _ -> MemoryTransactionHandle.INSTANCE,
                 io.trino.plugin.memory.protobuf.MemoryTransactionHandle.parser()));
+    }
+
+    private static MemoryInsertTableHandle.InsertMode insertMode(io.trino.plugin.memory.protobuf.InsertMode mode)
+    {
+        if (mode == io.trino.plugin.memory.protobuf.InsertMode.INSERT_MODE_UNSPECIFIED || mode == io.trino.plugin.memory.protobuf.InsertMode.UNRECOGNIZED) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Invalid insert mode in protobuf memory insert table handle: " + mode.getNumber());
+        }
+        return MemoryInsertTableHandle.InsertMode.valueOf(mode.name());
     }
 
     private static <H, P extends Message> ConnectorHandleCodec<H> codec(Function<H, P> toProto, Function<P, H> fromProto, Parser<P> parser)

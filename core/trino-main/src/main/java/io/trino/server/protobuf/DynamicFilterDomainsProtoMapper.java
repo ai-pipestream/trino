@@ -21,9 +21,9 @@ import io.trino.sql.planner.plan.DynamicFilterId;
 
 import java.util.Map;
 
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.toMap;
 
 public class DynamicFilterDomainsProtoMapper
 {
@@ -47,7 +47,7 @@ public class DynamicFilterDomainsProtoMapper
     public VersionedDynamicFilterDomains fromProto(io.trino.server.protocol.v1.VersionedDynamicFilterDomains proto)
     {
         Map<DynamicFilterId, io.trino.spi.predicate.Domain> domains = proto.getDynamicFilterDomainsMap().entrySet().stream()
-                .collect(toMap(entry -> new DynamicFilterId(entry.getKey()), entry -> domainProtoMapper.fromProto(entry.getValue())));
+                .collect(toImmutableMap(entry -> new DynamicFilterId(entry.getKey()), entry -> domainProtoMapper.fromProto(entry.getValue())));
         return new VersionedDynamicFilterDomains(proto.getVersion(), domains);
     }
 

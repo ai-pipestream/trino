@@ -73,11 +73,11 @@ public class ProtobufResponseHandler<T>
             return new ProtobufResponse<>(statusCode, null, null, new String(body, UTF_8), body.length);
         }
         Optional<String> contentType = response.getHeader(CONTENT_TYPE);
-        if (contentType.isPresent() && !contentType.get().startsWith(APPLICATION_X_PROTOBUF)) {
+        if (contentType.isEmpty() || !contentType.get().startsWith(APPLICATION_X_PROTOBUF)) {
             return new ProtobufResponse<>(
                     statusCode,
                     null,
-                    new IllegalStateException("Expected " + APPLICATION_X_PROTOBUF + " response from " + request.getUri() + " but got " + contentType.get()),
+                    new IllegalStateException("Expected " + APPLICATION_X_PROTOBUF + " response from " + request.getUri() + " but got " + contentType.orElse("no content type")),
                     new String(body, UTF_8),
                     body.length);
         }
