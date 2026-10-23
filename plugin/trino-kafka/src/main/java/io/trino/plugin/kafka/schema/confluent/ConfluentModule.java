@@ -74,12 +74,17 @@ public class ConfluentModule
     protected void setup(Binder binder)
     {
         configBinder(binder).bindConfig(ConfluentSchemaRegistryConfig.class);
+        configBinder(binder).bindConfig(ConfluentSchemaRegistrySecurityConfig.class);
         install(new ConfluentDecoderModule());
         install(new ConfluentEncoderModule());
         binder.bind(ContentSchemaProvider.class).to(ConfluentContentSchemaProvider.class).in(Scopes.SINGLETON);
         newSetBinder(binder, SchemaRegistryClientPropertiesProvider.class)
                 .addBinding()
                 .to(SchemaRegistryClientTtlProvider.class)
+                .in(SINGLETON);
+        newSetBinder(binder, SchemaRegistryClientPropertiesProvider.class)
+                .addBinding()
+                .to(SchemaRegistryClientSecurityProvider.class)
                 .in(SINGLETON);
         newSetBinder(binder, SchemaProvider.class).addBinding().to(AvroSchemaProvider.class).in(Scopes.SINGLETON);
         // Each SchemaRegistry object should have a new instance of SchemaProvider
