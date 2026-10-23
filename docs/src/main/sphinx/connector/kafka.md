@@ -461,6 +461,15 @@ used to resolve the subject name via the topic name. Note that a
 case-insensitive match must be done, as identifiers cannot contain upper case
 characters.
 
+A Protobuf schema can define more than one message. Each record is decoded
+with the message that the producer wrote, as identified by the message index
+in the record. The table columns are taken from the message whose fully
+qualified name is the subject name, as with the `RecordNameStrategy`, or
+follows `<topic name>-` in the subject name, as with the
+`TopicRecordNameStrategy`. For any other subject, such as one created with the
+`TopicNameStrategy`, the table columns are taken from the first message in the
+schema. Use a record name strategy if producers write any other message.
+
 #### Protobuf-specific type handling in Confluent table description supplier
 
 When using the Confluent table description supplier, the following Protobuf
