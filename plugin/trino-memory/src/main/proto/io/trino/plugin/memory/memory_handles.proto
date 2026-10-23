@@ -1,0 +1,66 @@
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
+syntax = "proto3";
+
+package io.trino.plugin.memory;
+
+option java_package = "io.trino.plugin.memory.protobuf";
+option java_multiple_files = true;
+
+// Connector-owned handle payloads for protobuf control-plane encoding.
+// The engine wraps these bytes in its ConnectorHandle message.
+
+message MemoryTableHandle {
+  int64 id = 1;
+  string schema_name = 2;
+  string table_name = 3;
+  optional int64 limit = 4;
+  optional double sample_ratio = 5;
+}
+
+message MemoryColumnHandle {
+  int32 column_index = 1;
+  string name = 2;
+  string type_id = 3;
+}
+
+message MemorySplit {
+  int64 table = 1;
+  int32 part_number = 2;
+  int32 total_parts_per_worker = 3;
+  string address = 4;
+  int64 expected_rows = 5;
+  optional int64 limit = 6;
+}
+
+message MemoryOutputTableHandle {
+  int64 table = 1;
+  repeated int64 active_table_ids = 2;
+}
+
+enum InsertMode {
+  INSERT_MODE_UNSPECIFIED = 0;
+  APPEND = 1;
+  OVERWRITE = 2;
+}
+
+message MemoryInsertTableHandle {
+  int64 table = 1;
+  InsertMode mode = 2;
+  repeated int64 active_table_ids = 3;
+}
+
+message MemoryTransactionHandle {
+}
