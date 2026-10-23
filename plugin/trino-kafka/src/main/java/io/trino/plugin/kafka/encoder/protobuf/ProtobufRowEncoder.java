@@ -124,7 +124,35 @@ public class ProtobufRowEncoder
     @Override
     protected void appendNullValue()
     {
-        throw new TrinoException(GENERIC_INTERNAL_ERROR, "Protobuf doesn't support serializing null values");
+        // a field that tracks presence is left unset, which decodes as NULL; the others have no value for NULL
+        checkNullAllowed(findField(columnHandles.get(currentColumnIndex).getMapping()));
+    }
+
+    private FieldDescriptor findField(String columnMapping)
+    {
+        List<String> columnPath = Splitter.on("/")
+                .omitEmptyStrings()
+                .limit(2)
+                .splitToList(columnMapping);
+        FieldDescriptor fieldDescriptor = descriptor.findFieldByName(columnPath.get(0));
+        checkState(fieldDescriptor != null, "Unknown Field %s", columnPath.get(0));
+        if (columnPath.size() == 2) {
+            checkState(fieldDescriptor.getJavaType() == MESSAGE, "Expected MESSAGE type, but got: %s", fieldDescriptor.getJavaType());
+            fieldDescriptor = fieldDescriptor.getMessageType().findFieldByName(columnPath.get(1));
+            checkState(fieldDescriptor != null, "Unknown Field %s", columnPath.get(1));
+        }
+        return fieldDescriptor;
+    }
+
+    private static void checkNullAllowed(FieldDescriptor fieldDescriptor)
+    {
+        if (fieldDescriptor.hasPresence()) {
+            return;
+        }
+        if (fieldDescriptor.isRepeated()) {
+            throw new TrinoException(CONSTRAINT_VIOLATION, format("NULL value not allowed for repeated protobuf field '%s'", fieldDescriptor.getFullName()));
+        }
+        throw new TrinoException(CONSTRAINT_VIOLATION, format("NULL value not allowed for protobuf field '%s', which does not track presence; declare it optional to allow NULL", fieldDescriptor.getFullName()));
     }
 
     @Override
@@ -248,9 +276,7 @@ public class ProtobufRowEncoder
 
     private Object encodeObject(FieldDescriptor fieldDescriptor, Type type, Object value)
     {
-        if (value == null) {
-            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Protobuf doesn't support serializing null values");
-        }
+        requireNonNull(value, "value is null");
         if (type instanceof VarbinaryType) {
             if (value instanceof SqlVarbinary sqlVarbinary) {
                 return ByteString.copyFrom(sqlVarbinary.getBytes());
@@ -296,7 +322,12 @@ public class ProtobufRowEncoder
     private List<Object> encodeArray(FieldDescriptor fieldDescriptor, ArrayType type, List<Object> value)
     {
         return value.stream()
-                .map(entry -> encodeObject(fieldDescriptor, type.getElementType(), entry))
+                .map(element -> {
+                    if (element == null) {
+                        throw new TrinoException(CONSTRAINT_VIOLATION, format("NULL element not allowed in repeated protobuf field '%s'", fieldDescriptor.getFullName()));
+                    }
+                    return encodeObject(fieldDescriptor, type.getElementType(), element);
+                })
                 .collect(toImmutableList());
     }
 
@@ -305,6 +336,9 @@ public class ProtobufRowEncoder
         Descriptor descriptor = fieldDescriptor.getMessageType();
         ImmutableList.Builder<DynamicMessage> dynamicMessageListBuilder = ImmutableList.builder();
         for (Entry<Object, Object> entry : value.entrySet()) {
+            if (entry.getValue() == null) {
+                throw new TrinoException(CONSTRAINT_VIOLATION, format("NULL map value not allowed for protobuf field '%s'", fieldDescriptor.getFullName()));
+            }
             DynamicMessage.Builder builder = DynamicMessage.newBuilder(descriptor);
             setField(
                     descriptor.findFieldByNumber(1),
@@ -332,14 +366,18 @@ public class ProtobufRowEncoder
         int index = 0;
         for (RowType.Field field : type.getFields()) {
             checkArgument(field.getName().isPresent(), "FieldName is absent");
-            setField(
-                    descriptor.findFieldByName(field.getName().get()),
-                    builder,
-                    encodeObject(
-                            descriptor.findFieldByName(field.getName().get()),
-                            field.getType(),
-                            value.get(index)));
+            FieldDescriptor rowFieldDescriptor = descriptor.findFieldByName(field.getName().get());
+            checkState(rowFieldDescriptor != null, "Unknown Field %s", field.getName().get());
+            Object fieldValue = value.get(index);
             index++;
+            if (fieldValue == null) {
+                checkNullAllowed(rowFieldDescriptor);
+                continue;
+            }
+            setField(
+                    rowFieldDescriptor,
+                    builder,
+                    encodeObject(rowFieldDescriptor, field.getType(), fieldValue));
         }
         return builder.build();
     }

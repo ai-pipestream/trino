@@ -25,8 +25,14 @@ using only Apache-licensed dependencies:
 * Records are decoded with the schema id and message index path from their
   Confluent wire format frame, so a topic can hold records written with
   different schema versions and with message types other than the first one
-  in the file. Fields that an older writer schema lacks decode as `NULL`,
-  at the top level and within `ROW` columns (fixes trinodb/trino#20204).
+  in the file. Columns are matched to the fields of the writer schema by
+  field number, the identity of a field on the wire: the table's data
+  schema names the registry id of the schema the columns were derived from,
+  and the decoder maps each column's field to the writer field with the same
+  number and encoding, at the top level and within `ROW`, `ARRAY` and `MAP`
+  columns. A renamed field keeps its column; fields that an older writer
+  schema lacks, or that it encodes differently under the same number,
+  decode as `NULL` (fixes trinodb/trino#20204).
   The message index path is resolved the way Confluent's deserializer does,
   counting the map entry messages that registered schema text declares
   explicitly, and such explicit entries are read as maps.
@@ -40,6 +46,12 @@ using only Apache-licensed dependencies:
   Confluent wire format. Tables whose topic has no key subject write records
   with a null key; tables without a value subject reject `INSERT`, since a
   null value would be a tombstone.
+* The protobuf encoder writes `NULL` as an unset field when the field tracks
+  presence (`optional` or message typed), for columns, flattened columns and
+  `ROW` fields alike, and rejects it with `CONSTRAINT_VIOLATION` and a
+  message naming the field for the others (proto3 scalars without
+  `optional`, `repeated` and `map` fields, `ARRAY` elements and `MAP`
+  values). Previously every `NULL` failed with `GENERIC_INTERNAL_ERROR`.
 * New `kafka.confluent-schema-registry.basic-auth.*` and
   `kafka.confluent-schema-registry.ssl.*` properties configure basic
   authentication, a trust store, a client key store and host name
@@ -61,6 +73,12 @@ Behavior changes worth calling out for reviewers:
 * The descriptors follow protoc presence semantics for proto3 fields, so a
   proto3 scalar set to its default value is not serialized by the encoder
   (the Confluent provider's descriptors serialized it).
+* An unset message-typed field decodes as `NULL` (as a column, through a
+  flattened `a/b` mapping and within `ROW` values) instead of an empty
+  message, so a `ROW` column of default values or a `TIMESTAMP` of
+  1970-01-01 no longer stands in for a field that was never set. This is
+  what makes `INSERT` of `NULL` into such a field round-trip. Applies to the
+  file-based protobuf decoder as well.
 * File-based protobuf tables (`FileTableDescriptionSupplier`) gain the same
   descriptor builder; oneof fields no longer get dropped from their
   descriptors.
@@ -89,8 +107,9 @@ Commits (each builds on its own):
 8. Add schema registry auth and TLS configuration
 
 The review commits on top of these (map entries, known imports, proto3
-optional presence, enum and key-only INSERT fixes, docs) are to be folded
-into the commits above before the PR is opened.
+optional presence, enum and key-only INSERT fixes, docs, field number
+mapping, `NULL` encoding) are to be folded into the commits above before the
+PR is opened; the PR is to be opened as a single commit.
 
 Tests:
 
@@ -99,10 +118,15 @@ Tests:
   imports, public imports, transitive visibility, cycles, name resolution,
   map entry naming, groups, duplicates, package-less files, proto2 defaults
   including escaped bytes and special float values, reserved declarations)
-  and `TestProtobufDecoder`; `verify -P ci` and the error-prone compile pass.
+  and `TestProtobufDecoder` (including renamed fields read by number, a
+  number reused with another encoding, and name lookup without a reader
+  schema); `verify -P ci` and the error-prone compile pass.
 * `plugin/trino-kafka`: `TestConfluentProtobufWireFormat` (including a
   byte-for-byte comparison with Confluent's `MessageIndexes`),
-  `TestConfluentProtobufSchema`, `TestConfluentSchemaRegistryDynamicMessageProvider`,
+  `TestConfluentProtobufSchema`, `TestConfluentSchemaRegistryDynamicMessageProvider`
+  (including the reader schema reference and a rename evolution),
+  `TestConfluentContentSchemaProvider`, `TestProtobufEncoder` (`NULL` left
+  unset or rejected per field),
   `TestConfluentProtobufRowEncoderFactory`, `TestConfluentProtobufSchemaRegistryRest`
   (in-process HTTP and HTTPS registries: decode with references, encode
   with the latest schema, basic auth from the security config, 401, 404,
@@ -117,7 +141,7 @@ Tests:
   cases in `TestConfluentSchemaRegistryTableDescriptionSupplier`, and new
   Docker cases in `TestKafkaProtobufWithSchemaRegistryMinimalFunctionality`
   (INSERT round trip, INSERT without key subject, schema references, nested
-  schema evolution).
+  schema evolution, renamed fields read by number).
 
 ## Release notes
 
@@ -139,6 +163,10 @@ Tests:
   `disabled` to restore the previous behavior.
 * Fix query failure when a protobuf record was written with a schema that
   lacks a field of a `ROW` column. ({issue}`20204`)
+* Fix `NULL` results for protobuf records written before a field was renamed
+  in the Confluent table description supplier.
+* Allow `INSERT` of `NULL` into protobuf fields that track presence, and fail
+  with a clear error instead of an internal error for the others.
 * {{breaking}} Map protobuf fields declared `optional` in proto3 schemas of the
   Confluent table description supplier to columns of the field's type, instead
   of `JSON` columns named after their synthetic oneof.
