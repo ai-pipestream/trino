@@ -16,10 +16,13 @@ package io.trino.plugin.kafka.schema.confluent;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.io.Resources;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.DynamicMessage;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.HttpsConfigurator;
+import com.sun.net.httpserver.HttpsServer;
 import io.confluent.kafka.schemaregistry.client.CachedSchemaRegistryClient;
 import io.confluent.kafka.schemaregistry.client.SchemaRegistryClient;
 import io.trino.plugin.kafka.KafkaColumnHandle;
@@ -35,10 +38,17 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+
+import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.security.GeneralSecurityException;
+import java.security.KeyStore;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +61,8 @@ import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SCHEMA_REGISTRY_ERROR;
 import static io.trino.plugin.kafka.encoder.KafkaFieldType.MESSAGE;
 import static io.trino.plugin.kafka.schema.confluent.ConfluentProtobufWireFormat.frame;
 import static io.trino.plugin.kafka.schema.confluent.ConfluentProtobufWireFormat.readFrame;
+import static io.trino.plugin.kafka.security.KafkaEndpointIdentificationAlgorithm.DISABLED;
+import static io.trino.plugin.kafka.security.KafkaKeystoreTruststoreType.PKCS12;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -60,12 +72,15 @@ import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
 /**
  * Exercises the protobuf schema provider through the schema registry REST client against an
- * in-process registry, including HTTP basic authentication and reference resolution over REST.
+ * in-process registry, including HTTP basic authentication, TLS and reference resolution over REST.
  */
 @TestInstance(PER_CLASS)
 public class TestConfluentProtobufSchemaRegistryRest
 {
-    private static final String USER_INFO = "trino:secret";
+    private static final String USER = "trino";
+    private static final String PASSWORD = "secret";
+    private static final String USER_INFO = USER + ":" + PASSWORD;
+    private static final String STORE_PASSWORD = "secret";
     private static final String ADDRESS_PROTO =
             """
             syntax = "proto3";
@@ -90,6 +105,12 @@ public class TestConfluentProtobufSchemaRegistryRest
     private final List<String> requests = new CopyOnWriteArrayList<>();
     private HttpServer server;
     private String baseUrl;
+    // serves a certificate for 127.0.0.1
+    private HttpsServer tlsServer;
+    private String tlsBaseUrl;
+    // serves a certificate for another host name
+    private HttpsServer otherHostTlsServer;
+    private String otherHostTlsBaseUrl;
 
     @BeforeAll
     public void setUp()
@@ -99,12 +120,41 @@ public class TestConfluentProtobufSchemaRegistryRest
         server.createContext("/", this::handle);
         server.start();
         baseUrl = "127.0.0.1:" + server.getAddress().getPort();
+        tlsServer = startTlsServer("confluent/registry-keystore.p12");
+        tlsBaseUrl = "127.0.0.1:" + tlsServer.getAddress().getPort();
+        otherHostTlsServer = startTlsServer("confluent/registry-other-host-keystore.p12");
+        otherHostTlsBaseUrl = "127.0.0.1:" + otherHostTlsServer.getAddress().getPort();
     }
 
     @AfterAll
     public void tearDown()
     {
         server.stop(0);
+        tlsServer.stop(0);
+        otherHostTlsServer.stop(0);
+    }
+
+    private HttpsServer startTlsServer(String keystoreResource)
+            throws IOException
+    {
+        try {
+            KeyStore keystore = KeyStore.getInstance("PKCS12");
+            try (InputStream in = Resources.getResource(keystoreResource).openStream()) {
+                keystore.load(in, STORE_PASSWORD.toCharArray());
+            }
+            KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+            keyManagerFactory.init(keystore, STORE_PASSWORD.toCharArray());
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(keyManagerFactory.getKeyManagers(), null, null);
+            HttpsServer httpsServer = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            httpsServer.setHttpsConfigurator(new HttpsConfigurator(sslContext));
+            httpsServer.createContext("/", this::handle);
+            httpsServer.start();
+            return httpsServer;
+        }
+        catch (GeneralSecurityException e) {
+            throw new IOException(e);
+        }
     }
 
     private void handle(HttpExchange exchange)
@@ -176,6 +226,53 @@ public class TestConfluentProtobufSchemaRegistryRest
     }
 
     @Test
+    public void testBasicAuthFromSecurityConfig()
+    {
+        ConfluentSchemaRegistrySecurityConfig config = new ConfluentSchemaRegistrySecurityConfig()
+                .setBasicAuthUser(USER)
+                .setBasicAuthPassword(PASSWORD);
+        ConfluentSchemaRegistryDynamicMessageProvider provider = new ConfluentSchemaRegistryDynamicMessageProvider(createClient("http://" + baseUrl, config.getSchemaRegistryClientProperties()));
+        DynamicMessage decoded = provider.parseDynamicMessage(frame(ORDER_ID, ImmutableList.of(0), orderBytes()));
+        assertThat(decoded.getField(decoded.getDescriptorForType().findFieldByName("col_1"))).isEqualTo("Trino");
+    }
+
+    @Test
+    public void testTlsWithTruststore()
+    {
+        ConfluentSchemaRegistryDynamicMessageProvider provider = new ConfluentSchemaRegistryDynamicMessageProvider(createClient("https://" + tlsBaseUrl, tlsConfig().getSchemaRegistryClientProperties()));
+        DynamicMessage decoded = provider.parseDynamicMessage(frame(ORDER_ID, ImmutableList.of(0), orderBytes()));
+        assertThat(decoded.getField(decoded.getDescriptorForType().findFieldByName("col_1"))).isEqualTo("Trino");
+    }
+
+    @Test
+    public void testTlsWithoutTruststore()
+    {
+        ConfluentSchemaRegistrySecurityConfig config = new ConfluentSchemaRegistrySecurityConfig()
+                .setBasicAuthUser(USER)
+                .setBasicAuthPassword(PASSWORD);
+        ConfluentSchemaRegistryDynamicMessageProvider provider = new ConfluentSchemaRegistryDynamicMessageProvider(createClient("https://" + tlsBaseUrl, config.getSchemaRegistryClientProperties()));
+        assertThatThrownBy(() -> provider.parseDynamicMessage(frame(ORDER_ID, ImmutableList.of(0), orderBytes())))
+                .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(KAFKA_SCHEMA_REGISTRY_ERROR.toErrorCode()))
+                .hasMessageStartingWith("Failed to look up schema id 2 in the schema registry: ")
+                .hasMessageContaining("PKIX path building failed");
+    }
+
+    @Test
+    public void testTlsHostNameVerification()
+    {
+        // the certificate is trusted but issued for another host name
+        ConfluentSchemaRegistryDynamicMessageProvider provider = new ConfluentSchemaRegistryDynamicMessageProvider(createClient("https://" + otherHostTlsBaseUrl, tlsConfig().getSchemaRegistryClientProperties()));
+        assertThatThrownBy(() -> provider.parseDynamicMessage(frame(ORDER_ID, ImmutableList.of(0), orderBytes())))
+                .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(KAFKA_SCHEMA_REGISTRY_ERROR.toErrorCode()))
+                .hasMessageStartingWith("Failed to look up schema id 2 in the schema registry: ")
+                .hasMessageContaining("No subject alternative names matching IP address 127.0.0.1 found");
+
+        ConfluentSchemaRegistryDynamicMessageProvider lenientProvider = new ConfluentSchemaRegistryDynamicMessageProvider(createClient("https://" + otherHostTlsBaseUrl, tlsConfig().setEndpointIdentificationAlgorithm(DISABLED).getSchemaRegistryClientProperties()));
+        DynamicMessage decoded = lenientProvider.parseDynamicMessage(frame(ORDER_ID, ImmutableList.of(0), orderBytes()));
+        assertThat(decoded.getField(decoded.getDescriptorForType().findFieldByName("col_1"))).isEqualTo("Trino");
+    }
+
+    @Test
     public void testMissingCredentials()
     {
         ConfluentSchemaRegistryDynamicMessageProvider provider = new ConfluentSchemaRegistryDynamicMessageProvider(createClient("http://" + baseUrl, ImmutableMap.of()));
@@ -208,6 +305,16 @@ public class TestConfluentProtobufSchemaRegistryRest
         assertThatThrownBy(() -> provider.parseDynamicMessage(frame(ORDER_ID, ImmutableList.of(0), orderBytes())))
                 .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(KAFKA_SCHEMA_REGISTRY_ERROR.toErrorCode()))
                 .hasMessageStartingWith("Failed to look up schema id 2 in the schema registry: ");
+    }
+
+    private static ConfluentSchemaRegistrySecurityConfig tlsConfig()
+    {
+        return new ConfluentSchemaRegistrySecurityConfig()
+                .setBasicAuthUser(USER)
+                .setBasicAuthPassword(PASSWORD)
+                .setTruststoreLocation(new File(Resources.getResource("confluent/registry-truststore.p12").getFile()).getPath())
+                .setTruststorePassword(STORE_PASSWORD)
+                .setTruststoreType(PKCS12);
     }
 
     private static SchemaRegistryClient createClient(String url, Map<String, Object> properties)
