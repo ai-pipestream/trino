@@ -82,7 +82,7 @@ public class TestProtobufSchemaParser
                 false);
 
         assertThat(fieldGroup.dataFormat()).isEqualTo("protobuf");
-        assertThat(fieldGroup.dataSchema()).isEmpty();
+        assertThat(fieldGroup.dataSchema()).contains("schema-registry-id:1;message=schema");
         assertThat(fieldGroup.subject()).contains("topic-value");
         assertThat(fieldGroup.fields()).extracting(KafkaTopicFieldDescription::name).containsExactly(
                 "string_column",
@@ -218,7 +218,7 @@ public class TestProtobufSchemaParser
     {
         ProtobufSchemaParser parser = new ProtobufSchemaParser(TESTING_TYPE_MANAGER, new ProtobufAnySupportConfig());
         AvroSchema avroSchema = new AvroSchema(SchemaBuilder.record("schema").fields().name("id").type().stringType().noDefault().endRecord());
-        assertThatThrownBy(() -> parser.parse(TestingConnectorSession.SESSION, "topic-value", avroSchema))
+        assertThatThrownBy(() -> parser.parse(TestingConnectorSession.SESSION, "topic-value", 1, avroSchema))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("Unexpected schema type for subject 'topic-value': AVRO");
     }
@@ -226,12 +226,12 @@ public class TestProtobufSchemaParser
     private static KafkaTopicFieldGroup parse(String schema, boolean anySupportEnabled)
     {
         ProtobufSchemaParser parser = new ProtobufSchemaParser(TESTING_TYPE_MANAGER, new ProtobufAnySupportConfig().setProtobufAnySupportEnabled(anySupportEnabled));
-        return parser.parse(TestingConnectorSession.SESSION, "topic-value", new ConfluentProtobufSchema(schema, ImmutableList.of(), null));
+        return parser.parse(TestingConnectorSession.SESSION, "topic-value", 1, new ConfluentProtobufSchema(schema, ImmutableList.of(), null));
     }
 
     private static KafkaTopicFieldGroup parse(String subject, String schema)
     {
         ProtobufSchemaParser parser = new ProtobufSchemaParser(TESTING_TYPE_MANAGER, new ProtobufAnySupportConfig());
-        return parser.parse(TestingConnectorSession.SESSION, subject, new ConfluentProtobufSchema(schema, ImmutableList.of(), null));
+        return parser.parse(TestingConnectorSession.SESSION, subject, 1, new ConfluentProtobufSchema(schema, ImmutableList.of(), null));
     }
 }

@@ -220,7 +220,7 @@ public class ConfluentSchemaRegistryTableDescriptionSupplier
         catch (IOException e) {
             throw new TrinoException(KAFKA_SCHEMA_ERROR, format("Unable to parse the schema of the '%s' subject: %s", subject, e.getMessage()), e);
         }
-        return schemaParser.parse(session, subject, parsedSchema);
+        return schemaParser.parse(session, subject, schemaMetadata.getId(), parsedSchema);
     }
 
     private SchemaMetadata getLatestSchemaMetadata(String subject)

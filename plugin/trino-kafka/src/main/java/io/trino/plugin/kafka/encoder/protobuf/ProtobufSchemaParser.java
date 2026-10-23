@@ -43,6 +43,7 @@ import java.util.stream.Stream;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static io.trino.plugin.kafka.schema.confluent.ConfluentSchemaRegistryDynamicMessageProvider.readerSchemaReference;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
@@ -72,13 +73,16 @@ public class ProtobufSchemaParser
     }
 
     @Override
-    public KafkaTopicFieldGroup parse(ConnectorSession session, String subject, ParsedSchema parsedSchema)
+    public KafkaTopicFieldGroup parse(ConnectorSession session, String subject, int schemaId, ParsedSchema parsedSchema)
     {
         checkArgument(parsedSchema instanceof ConfluentProtobufSchema, "Unexpected schema type for subject '%s': %s", subject, parsedSchema.schemaType());
         Descriptor descriptor = ((ConfluentProtobufSchema) parsedSchema).getMessageDescriptor(subject);
+        // the table carries a reference to the message its columns come from, so records are read
+        // with that schema even when a newer version is registered between describing the table
+        // and reading it
         return new KafkaTopicFieldGroup(
                 ProtobufRowDecoder.NAME,
-                Optional.empty(),
+                Optional.of(readerSchemaReference(schemaId, descriptor)),
                 Optional.of(subject),
                 Streams.concat(getFields(descriptor), getOneofs(descriptor))
                         .collect(toImmutableList()));
