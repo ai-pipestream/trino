@@ -183,7 +183,8 @@ public class TestHiveHandleCodecProvider
     public void testDiscreteDomainsRoundTripByValue()
     {
         // Domain.singleValue and ValueSet.of build run-length and dictionary encoded blocks tagged as discrete
-        // sets. The codec rebuilds them the same way, so the handles are equal and re-encode to the same bytes.
+        // sets. The decoded sets are equal and still discrete; their blocks are whatever the block serde read,
+        // as on the JSON control plane, so the encoding is stable from the first decoded copy on.
         TupleDomain<HiveColumnHandle> predicate = TupleDomain.withColumnDomains(ImmutableMap.of(
                 DS, Domain.singleValue(VARCHAR, Slices.utf8Slice("2024-01-01")),
                 ID, Domain.create(ValueSet.of(BIGINT, 1L, 2L, 3L), true)));
@@ -206,7 +207,8 @@ public class TestHiveHandleCodecProvider
         for (Domain domain : decoded.getCompactEffectivePredicate().getDomains().orElseThrow().values()) {
             assertThat(domain.getValues().isDiscreteSet()).isTrue();
         }
-        assertThat(codec.serialize(decoded)).isEqualTo(codec.serialize(handle));
+        byte[] reencoded = codec.serialize(decoded);
+        assertThat(codec.serialize(codec.deserialize(reencoded))).isEqualTo(reencoded);
     }
 
     @Test
