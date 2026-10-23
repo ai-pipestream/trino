@@ -14,6 +14,11 @@
 package io.trino.decoder.protobuf;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableRangeSet;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Range;
+import com.google.common.collect.RangeSet;
+import com.google.common.collect.TreeRangeSet;
 import com.google.protobuf.AnyProto;
 import com.google.protobuf.ApiProto;
 import com.google.protobuf.DescriptorProtos;
@@ -64,8 +69,10 @@ import com.squareup.wire.schema.internal.parser.OneOfElement;
 import com.squareup.wire.schema.internal.parser.OptionElement;
 import com.squareup.wire.schema.internal.parser.ProtoFileElement;
 import com.squareup.wire.schema.internal.parser.ProtoParser;
+import com.squareup.wire.schema.internal.parser.ReservedElement;
 import com.squareup.wire.schema.internal.parser.TypeElement;
 import io.trino.spi.TrinoException;
+import kotlin.ranges.IntRange;
 
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayDeque;
@@ -76,6 +83,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
@@ -228,7 +236,7 @@ public final class ProtoFileDescriptorBuilder
                     proto.addMessageType(toDescriptorProto(message, proto3, fileName));
                 }
                 else if (type instanceof EnumElement enumElement) {
-                    proto.addEnumType(toEnumDescriptorProto(enumElement));
+                    proto.addEnumType(toEnumDescriptorProto(enumElement, fileName));
                 }
             }
 
@@ -292,6 +300,7 @@ public final class ProtoFileDescriptorBuilder
                 }
             }
         }
+        checkReserved(message, fileName);
         List<DescriptorProto> mapEntries = new ArrayList<>();
         for (FieldElement field : message.getFields()) {
             builder.addField(toFieldDescriptorProto(field, proto3, OptionalInt.empty(), mapEntries));
@@ -319,7 +328,7 @@ public final class ProtoFileDescriptorBuilder
                 builder.addNestedType(toDescriptorProto(nestedMessage, proto3, fileName));
             }
             else if (nested instanceof EnumElement nestedEnum) {
-                builder.addEnumType(toEnumDescriptorProto(nestedEnum));
+                builder.addEnumType(toEnumDescriptorProto(nestedEnum, fileName));
             }
         }
         // map entry types go last, so the position of a declared nested message among the
@@ -424,8 +433,61 @@ public final class ProtoFileDescriptorBuilder
         return builder.setTypeName(type.toString());
     }
 
-    private static EnumDescriptorProto toEnumDescriptorProto(EnumElement enumElement)
+    /**
+     * protoc rejects a field that uses a number or name the message reserves, so such a schema
+     * is most likely a mistake and could not have been registered by a serializer.
+     */
+    private static void checkReserved(MessageElement message, String fileName)
     {
+        Reserved reserved = Reserved.of(message.getReserveds());
+        Stream.concat(message.getFields().stream(), message.getOneOfs().stream().flatMap(oneOf -> oneOf.getFields().stream()))
+                .forEach(field -> {
+                    if (reserved.numbers().contains(field.getTag())) {
+                        throw new TrinoException(INVALID_PROTO_FILE, format("Field '%s' in message '%s' in protobuf schema '%s' uses reserved number %s", field.getName(), message.getName(), fileName, field.getTag()));
+                    }
+                    if (reserved.names().contains(field.getName())) {
+                        throw new TrinoException(INVALID_PROTO_FILE, format("Field '%s' in message '%s' in protobuf schema '%s' uses a reserved name", field.getName(), message.getName(), fileName));
+                    }
+                });
+    }
+
+    private static void checkReserved(EnumElement enumElement, String fileName)
+    {
+        Reserved reserved = Reserved.of(enumElement.getReserveds());
+        for (EnumConstantElement constant : enumElement.getConstants()) {
+            if (reserved.numbers().contains(constant.getTag())) {
+                throw new TrinoException(INVALID_PROTO_FILE, format("Value '%s' in enum '%s' in protobuf schema '%s' uses reserved number %s", constant.getName(), enumElement.getName(), fileName, constant.getTag()));
+            }
+            if (reserved.names().contains(constant.getName())) {
+                throw new TrinoException(INVALID_PROTO_FILE, format("Value '%s' in enum '%s' in protobuf schema '%s' uses a reserved name", constant.getName(), enumElement.getName(), fileName));
+            }
+        }
+    }
+
+    private record Reserved(RangeSet<Integer> numbers, Set<String> names)
+    {
+        private static Reserved of(List<ReservedElement> elements)
+        {
+            // the parser keeps a single number, a range (with "max" as its upper bound), or a name
+            RangeSet<Integer> numbers = TreeRangeSet.create();
+            ImmutableSet.Builder<String> names = ImmutableSet.builder();
+            for (ReservedElement element : elements) {
+                for (Object value : element.getValues()) {
+                    switch (value) {
+                        case Integer number -> numbers.add(Range.singleton(number));
+                        case IntRange range -> numbers.add(Range.closed(range.getFirst(), range.getLast()));
+                        case String name -> names.add(name);
+                        default -> throw new IllegalArgumentException("Unexpected reserved declaration: " + value);
+                    }
+                }
+            }
+            return new Reserved(ImmutableRangeSet.copyOf(numbers), names.build());
+        }
+    }
+
+    private static EnumDescriptorProto toEnumDescriptorProto(EnumElement enumElement, String fileName)
+    {
+        checkReserved(enumElement, fileName);
         EnumDescriptorProto.Builder builder = EnumDescriptorProto.newBuilder()
                 .setName(enumElement.getName());
         for (EnumConstantElement constant : enumElement.getConstants()) {
