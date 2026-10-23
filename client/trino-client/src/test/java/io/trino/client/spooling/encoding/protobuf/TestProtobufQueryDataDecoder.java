@@ -52,6 +52,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.math.BigInteger;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -444,14 +445,28 @@ public class TestProtobufQueryDataDecoder
                 .addValues(Value.newBuilder().setBigint(1)))))
                 .isInstanceOf(ProtobufFormatException.class)
                 .hasMessage("Map has 2 keys but 1 values");
-        // a duplicate key is a corrupt segment, not an entry to drop silently
-        assertThatThrownBy(() -> decode(varcharToBigint, Value.newBuilder().setMap(MapValue.newBuilder()
+        // two keys that are equal as decoded merge, last value winning, like in the json decoder
+        assertDecodes(varcharToBigint, Value.newBuilder().setMap(MapValue.newBuilder()
                 .addKeys(Value.newBuilder().setVarchar("a"))
                 .addKeys(Value.newBuilder().setVarchar("a"))
                 .addValues(Value.newBuilder().setBigint(1))
-                .addValues(NULL))))
-                .isInstanceOf(ProtobufFormatException.class)
-                .hasMessage("Map has duplicate key: a");
+                .addValues(NULL)), nullValues("a"));
+        // a real case of equal rendered keys for distinct server keys: both values of the fall-back hour
+        // of America/New_York, one hour apart, render to the same timestamp with time zone text
+        Column timestampWithTimeZoneToBigint = column(map(new ClientTypeSignature(TIMESTAMP_WITH_TIME_ZONE), new ClientTypeSignature(BIGINT)));
+        assertDecodes(timestampWithTimeZoneToBigint, Value.newBuilder().setMap(MapValue.newBuilder()
+                .addKeys(Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder()
+                        .setEpochMillis(Instant.parse("2024-11-03T05:30:00Z").toEpochMilli())
+                        .setPrecision(3)
+                        .setZoneId("America/New_York")
+                        .setOffsetSeconds(-4 * 3600)))
+                .addKeys(Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder()
+                        .setEpochMillis(Instant.parse("2024-11-03T06:30:00Z").toEpochMilli())
+                        .setPrecision(3)
+                        .setZoneId("America/New_York")
+                        .setOffsetSeconds(-5 * 3600)))
+                .addValues(Value.newBuilder().setBigint(1))
+                .addValues(Value.newBuilder().setBigint(2))), ImmutableMap.of("2024-11-03 01:30:00.000 America/New_York", 2L));
         // a null value does not look like a duplicate
         assertDecodes(varcharToBigint, Value.newBuilder().setMap(MapValue.newBuilder()
                 .addKeys(Value.newBuilder().setVarchar("a"))
