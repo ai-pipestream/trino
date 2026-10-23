@@ -1,0 +1,157 @@
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
+syntax = "proto3";
+
+package io.trino.server.protocol.v1;
+
+option java_package = "io.trino.server.protocol.v1";
+option java_multiple_files = true;
+
+// Wire format for the /v1/task control endpoints when
+// internal-communication.control-plane.encoding=PROTOBUF.
+// No JSON is ever carried inside these messages. Values that are already
+// binary (Trino blocks) travel as plain bytes fields.
+
+// Every io.trino.execution.TaskState value, including the transient
+// CANCELING, ABORTING and FAILING states a task reports while it terminates.
+enum TaskState {
+  TASK_STATE_UNSPECIFIED = 0;
+  PLANNED = 1;
+  RUNNING = 2;
+  FLUSHING = 3;
+  FINISHED = 4;
+  CANCELED = 5;
+  ABORTED = 6;
+  FAILED = 7;
+  CANCELING = 8;
+  ABORTING = 9;
+  FAILING = 10;
+}
+
+enum ErrorType {
+  ERROR_TYPE_UNSPECIFIED = 0;
+  USER_ERROR = 1;
+  INTERNAL_ERROR = 2;
+  INSUFFICIENT_RESOURCES = 3;
+  EXTERNAL = 4;
+}
+
+message ErrorLocation {
+  int32 line_number = 1;
+  int32 column_number = 2;
+}
+
+message ErrorCode {
+  int32 code = 1;
+  string name = 2;
+  ErrorType type = 3;
+  bool fatal = 4;
+}
+
+// Mirrors io.trino.execution.ExecutionFailureInfo. message, error_location,
+// error_code and remote_host use proto3 field presence (optional / message),
+// matching the nullable Java fields.
+message ExecutionFailureInfo {
+  string type = 1;
+  optional string message = 2;
+  ExecutionFailureInfo cause = 3;
+  repeated ExecutionFailureInfo suppressed = 4;
+  repeated string stack = 5;
+  ErrorLocation error_location = 6;
+  ErrorCode error_code = 7;
+  optional string remote_host = 8;
+}
+
+// Mirrors io.trino.execution.buffer.OutputBufferStatus.
+message OutputBufferStatus {
+  optional int64 output_buffers_version = 1;
+  bool overutilized = 2;
+  bool exchange_sink_instance_handle_update_required = 3;
+}
+
+// Mirrors io.trino.execution.TaskStatus. DataSize fields are byte counts;
+// full_gc_time is nanoseconds.
+message TaskStatus {
+  string task_id = 1;
+  int64 task_instance_id = 2;
+  int64 version = 3;
+  TaskState state = 4;
+  string self = 5;
+  string node_id = 6;
+  bool speculative = 7;
+  repeated ExecutionFailureInfo failures = 8;
+  int32 queued_partitioned_drivers = 9;
+  int32 running_partitioned_drivers = 10;
+  OutputBufferStatus output_buffer_status = 11;
+  int64 output_data_size_bytes = 12;
+  int64 writer_input_data_size_bytes = 13;
+  int64 physical_written_data_size_bytes = 14;
+  optional int32 max_writer_count = 15;
+  int64 memory_reservation_bytes = 16;
+  int64 peak_memory_reservation_bytes = 17;
+  int64 revocable_memory_reservation_bytes = 18;
+  int64 full_gc_count = 19;
+  int64 full_gc_time_nanos = 20;
+  int64 dynamic_filters_version = 21;
+  int64 queued_partitioned_splits_weight = 22;
+  int64 running_partitioned_splits_weight = 23;
+}
+
+// Mirrors io.trino.server.FailTaskRequest.
+message FailTaskRequest {
+  ExecutionFailureInfo failure_info = 1;
+}
+
+// One bound of a Domain value list: a single Trino Block holding every value
+// in order, serialized with BlockEncodingSerde. Null positions in the block
+// mark unbounded range ends.
+message DomainValues {
+  bytes block = 1;
+}
+
+message DomainRange {
+  bool low_inclusive = 1;
+  int32 low_position = 2;
+  bool high_inclusive = 3;
+  int32 high_position = 4;
+}
+
+// Mirrors io.trino.spi.predicate.Domain. The oneof mirrors the three
+// ValueSet implementations selected via ValuesProcessor.
+message Domain {
+  string type_id = 1;
+  bool null_allowed = 2;
+  oneof values {
+    bool all = 3;
+    DiscreteValues discrete = 4;
+    RangeValues ranges = 5;
+  }
+}
+
+message DiscreteValues {
+  bool inclusive = 1;
+  DomainValues values = 2;
+}
+
+message RangeValues {
+  DomainValues bounds = 1;
+  repeated DomainRange ranges = 2;
+}
+
+// Mirrors io.trino.execution.DynamicFiltersCollector.VersionedDynamicFilterDomains.
+message VersionedDynamicFilterDomains {
+  int64 version = 1;
+  map<string, Domain> dynamic_filter_domains = 2;
+}

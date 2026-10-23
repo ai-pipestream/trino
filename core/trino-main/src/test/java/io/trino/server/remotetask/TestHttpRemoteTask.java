@@ -63,7 +63,10 @@ import io.trino.node.InternalNode;
 import io.trino.server.DynamicFilterService;
 import io.trino.server.FailTaskRequest;
 import io.trino.server.HttpRemoteTaskFactory;
+import io.trino.server.InternalCommunicationConfig;
 import io.trino.server.TaskUpdateRequest;
+import io.trino.server.protobuf.DomainProtoMapper;
+import io.trino.server.protobuf.DynamicFilterDomainsProtoMapper;
 import io.trino.simd.BlockEncodingSimdSupport;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.NodeVersion;
@@ -134,6 +137,7 @@ import static io.trino.execution.DynamicFiltersCollector.INITIAL_DYNAMIC_FILTERS
 import static io.trino.execution.TaskState.FAILED;
 import static io.trino.execution.TaskTestUtils.TABLE_SCAN_NODE_ID;
 import static io.trino.execution.buffer.PipelinedOutputBuffers.BufferType.BROADCAST;
+import static io.trino.metadata.InternalBlockEncodingSerde.TESTING_BLOCK_ENCODING_SERDE;
 import static io.trino.metadata.TestingMetadataManager.createTestingMetadataManager;
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
 import static io.trino.server.InternalHeaders.TRINO_CURRENT_VERSION;
@@ -762,7 +766,9 @@ public class TestHttpRemoteTask
                                 failTaskRequestCodec,
                                 noopTracer(),
                                 new RemoteTaskStats(),
-                                dynamicFilterService);
+                                dynamicFilterService,
+                                new InternalCommunicationConfig(),
+                                new DynamicFilterDomainsProtoMapper(new DomainProtoMapper(TESTING_BLOCK_ENCODING_SERDE, TESTING_TYPE_MANAGER)));
                     }
                 });
         Injector injector = app

@@ -27,6 +27,8 @@ import io.opentelemetry.api.trace.SpanBuilder;
 import io.trino.execution.StateMachine;
 import io.trino.execution.TaskId;
 import io.trino.execution.TaskStatus;
+import io.trino.server.ControlPlaneEncoding;
+import io.trino.server.protobuf.TaskStatusProtoMapper;
 import io.trino.spi.HostAddress;
 import io.trino.spi.TrinoException;
 
@@ -44,6 +46,8 @@ import static io.airlift.http.client.Request.Builder.prepareGet;
 import static io.airlift.units.Duration.nanosSince;
 import static io.trino.server.InternalHeaders.TRINO_CURRENT_VERSION_HEADER;
 import static io.trino.server.InternalHeaders.TRINO_MAX_WAIT_HEADER;
+import static io.trino.server.protobuf.ProtobufMediaTypes.APPLICATION_X_PROTOBUF;
+import static io.trino.server.remotetask.ProtobufResponseHandler.createProtobufResponseHandler;
 import static io.trino.spi.StandardErrorCode.REMOTE_TASK_MISMATCH;
 import static io.trino.util.Failures.REMOTE_TASK_MISMATCH_ERROR;
 import static java.lang.String.format;
@@ -57,6 +61,7 @@ class ContinuousTaskStatusFetcher
     private final Consumer<Throwable> onFail;
     private final StateMachine<TaskStatus> taskStatus;
     private final JsonCodec<TaskStatus> taskStatusCodec;
+    private final ControlPlaneEncoding controlPlaneEncoding;
     private final DynamicFiltersFetcher dynamicFiltersFetcher;
 
     private final Duration refreshMaxWait;
@@ -70,13 +75,14 @@ class ContinuousTaskStatusFetcher
     private boolean running;
 
     @GuardedBy("this")
-    private ListenableFuture<FullJsonResponseHandler.JsonResponse<TaskStatus>> future;
+    private ListenableFuture<?> future;
 
     public ContinuousTaskStatusFetcher(
             Consumer<Throwable> onFail,
             TaskStatus initialTaskStatus,
             Duration refreshMaxWait,
             JsonCodec<TaskStatus> taskStatusCodec,
+            ControlPlaneEncoding controlPlaneEncoding,
             DynamicFiltersFetcher dynamicFiltersFetcher,
             Executor executor,
             HttpClient httpClient,
@@ -93,6 +99,7 @@ class ContinuousTaskStatusFetcher
 
         this.refreshMaxWait = requireNonNull(refreshMaxWait, "refreshMaxWait is null");
         this.taskStatusCodec = requireNonNull(taskStatusCodec, "taskStatusCodec is null");
+        this.controlPlaneEncoding = requireNonNull(controlPlaneEncoding, "controlPlaneEncoding is null");
         this.dynamicFiltersFetcher = requireNonNull(dynamicFiltersFetcher, "dynamicFiltersFetcher is null");
 
         this.executor = requireNonNull(executor, "executor is null");
@@ -146,15 +153,23 @@ class ContinuousTaskStatusFetcher
 
         Request request = prepareGet()
                 .setUri(uriBuilderFrom(taskStatus.self()).appendPath("status").build())
-                .setHeader(CONTENT_TYPE, JSON_UTF_8.toString())
+                .setHeader(CONTENT_TYPE, controlPlaneEncoding == ControlPlaneEncoding.PROTOBUF ? APPLICATION_X_PROTOBUF : JSON_UTF_8.toString())
                 .setHeader(TRINO_CURRENT_VERSION_HEADER, Long.toString(taskStatus.version()))
                 .setHeader(TRINO_MAX_WAIT_HEADER, refreshMaxWait.toString())
                 .setSpanBuilder(spanBuilderFactory.get())
                 .build();
 
         errorTracker.startRequest();
-        future = httpClient.executeAsync(request, createFullJsonResponseHandler(taskStatusCodec));
-        Futures.addCallback(future, new SimpleHttpResponseHandler<>(new TaskStatusResponseCallback(), request.getUri(), stats), executor);
+        if (controlPlaneEncoding == ControlPlaneEncoding.PROTOBUF) {
+            ListenableFuture<ProtobufResponseHandler.ProtobufResponse<TaskStatus>> protobufFuture = httpClient.executeAsync(request, createProtobufResponseHandler(TaskStatusProtoMapper::parseFrom));
+            future = protobufFuture;
+            Futures.addCallback(protobufFuture, new SimpleProtobufHttpResponseHandler<>(new TaskStatusResponseCallback(), request.getUri(), stats), executor);
+        }
+        else {
+            ListenableFuture<FullJsonResponseHandler.JsonResponse<TaskStatus>> jsonFuture = httpClient.executeAsync(request, createFullJsonResponseHandler(taskStatusCodec));
+            future = jsonFuture;
+            Futures.addCallback(jsonFuture, new SimpleHttpResponseHandler<>(new TaskStatusResponseCallback(), request.getUri(), stats), executor);
+        }
     }
 
     TaskStatus getTaskStatus()
