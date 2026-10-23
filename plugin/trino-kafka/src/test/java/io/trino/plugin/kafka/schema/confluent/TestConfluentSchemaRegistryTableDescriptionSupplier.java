@@ -201,14 +201,14 @@ public class TestConfluentSchemaRegistryTableDescriptionSupplier
         TableDescriptionSupplier tableDescriptionSupplier = createTableDescriptionSupplier();
         String topicName = "protobuf_topic";
         SchemaTableName schemaTableName = new SchemaTableName(DEFAULT_NAME, topicName);
-        SCHEMA_REGISTRY_CLIENT.register(topicName + "-key", getProtobufSchema(
+        int keySchemaId = SCHEMA_REGISTRY_CLIENT.register(topicName + "-key", getProtobufSchema(
                 """
                 syntax = "proto3";
                 message key {
                     int64 id = 1;
                 }
                 """));
-        SCHEMA_REGISTRY_CLIENT.register(topicName + "-value", getProtobufSchema(
+        int messageSchemaId = SCHEMA_REGISTRY_CLIENT.register(topicName + "-value", getProtobufSchema(
                 """
                 syntax = "proto3";
                 message schema {
@@ -219,14 +219,15 @@ public class TestConfluentSchemaRegistryTableDescriptionSupplier
 
         assertThat(tableDescriptionSupplier.listTables()).contains(schemaTableName);
 
+        // the table refers to the schemas its columns were derived from
         assertThat(getKafkaTopicDescription(tableDescriptionSupplier, schemaTableName))
                 .isEqualTo(
                         new KafkaTopicDescription(
                                 schemaTableName.getTableName(),
                                 Optional.of(schemaTableName.getSchemaName()),
                                 schemaTableName.getTableName(),
-                                Optional.of(new KafkaTopicFieldGroup("protobuf", Optional.empty(), Optional.of(topicName + "-key"), ImmutableList.of(getFieldDescription("id", BIGINT)))),
-                                Optional.of(new KafkaTopicFieldGroup("protobuf", Optional.empty(), Optional.of(topicName + "-value"), ImmutableList.of(getFieldDescription("col1", createUnboundedVarcharType()), getFieldDescription("col2", BIGINT))))));
+                                Optional.of(new KafkaTopicFieldGroup("protobuf", Optional.of("schema-registry-id:" + keySchemaId + ";message=key"), Optional.of(topicName + "-key"), ImmutableList.of(getFieldDescription("id", BIGINT)))),
+                                Optional.of(new KafkaTopicFieldGroup("protobuf", Optional.of("schema-registry-id:" + messageSchemaId + ";message=schema"), Optional.of(topicName + "-value"), ImmutableList.of(getFieldDescription("col1", createUnboundedVarcharType()), getFieldDescription("col2", BIGINT))))));
     }
 
     @Test

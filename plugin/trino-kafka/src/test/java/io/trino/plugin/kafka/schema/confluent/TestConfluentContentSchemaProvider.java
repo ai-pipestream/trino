@@ -127,6 +127,39 @@ public class TestConfluentContentSchemaProvider
         assertThat(schemaProvider.getMessage(tableHandle(TOPIC + "-value"))).contains(readerSchemaReference(headerId, parsed.getMessageDescriptor()));
     }
 
+    @Test
+    public void testProtobufReaderOfTheTableIsKept()
+            throws Exception
+    {
+        MockSchemaRegistryClient mockSchemaRegistryClient = new MockSchemaRegistryClient(ImmutableList.of(new AvroSchemaProvider(), new ConfluentProtobufSchemaProvider()));
+        int firstId = mockSchemaRegistryClient.register(SUBJECT_NAME, new ConfluentProtobufSchema(
+                """
+                syntax = "proto3";
+                message schema {
+                  string col_1 = 1;
+                }
+                """,
+                ImmutableList.of(),
+                mockSchemaRegistryClient));
+        Descriptor first = ((ConfluentProtobufSchema) mockSchemaRegistryClient.getSchemaById(firstId)).getMessageDescriptor();
+        String reference = readerSchemaReference(firstId, first);
+        KafkaTableHandle tableHandle = new KafkaTableHandle("default", TOPIC, TOPIC, ProtobufRowDecoder.NAME, ProtobufRowDecoder.NAME, Optional.empty(), Optional.of(reference), Optional.empty(), Optional.of(SUBJECT_NAME), ImmutableList.of(), TupleDomain.all());
+
+        // a schema registered after the table was described does not change the schema the table is read with
+        mockSchemaRegistryClient.register(SUBJECT_NAME, new ConfluentProtobufSchema(
+                """
+                syntax = "proto3";
+                message schema {
+                  string renamed = 1;
+                }
+                """,
+                ImmutableList.of(),
+                mockSchemaRegistryClient));
+        ConfluentContentSchemaProvider schemaProvider = new ConfluentContentSchemaProvider(mockSchemaRegistryClient);
+        assertThat(schemaProvider.getMessage(tableHandle)).contains(reference);
+        assertThat(schemaProvider.getMessage(tableHandle(SUBJECT_NAME))).isNotEqualTo(Optional.of(reference));
+    }
+
     private static KafkaTableHandle tableHandle(String messageSubject)
     {
         return new KafkaTableHandle("default", TOPIC, TOPIC, ProtobufRowDecoder.NAME, ProtobufRowDecoder.NAME, Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(messageSubject), ImmutableList.of(), TupleDomain.all());
