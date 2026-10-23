@@ -14,6 +14,8 @@
 package io.trino.plugin.base.classloader;
 
 import io.trino.spi.connector.ConnectorAccessControl;
+import io.trino.spi.connector.ConnectorHandleCodec;
+import io.trino.spi.connector.ConnectorHandleCodecProvider;
 import io.trino.spi.connector.ConnectorMergeSink;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorNodePartitioningProvider;
@@ -49,6 +51,8 @@ public class TestClassLoaderSafeWrappers
     {
         testClassLoaderSafe(ConnectorAccessControl.class, ClassLoaderSafeConnectorAccessControl.class);
         testClassLoaderSafe(ConnectorMetadata.class, ClassLoaderSafeConnectorMetadata.class);
+        testClassLoaderSafe(ConnectorHandleCodecProvider.class, ClassLoaderSafeConnectorHandleCodecProvider.class);
+        testClassLoaderSafe(ConnectorHandleCodec.class, ClassLoaderSafeConnectorHandleCodec.class);
         testClassLoaderSafe(ConnectorMergeSink.class, ClassLoaderSafeConnectorMergeSink.class);
         testClassLoaderSafe(ConnectorPageSink.class, ClassLoaderSafeConnectorPageSink.class);
         testClassLoaderSafe(ConnectorPageSinkProvider.class, ClassLoaderSafeConnectorPageSinkProvider.class);
