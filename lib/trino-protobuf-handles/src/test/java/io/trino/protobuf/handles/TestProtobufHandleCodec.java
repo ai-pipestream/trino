@@ -81,6 +81,37 @@ public class TestProtobufHandleCodec
     }
 
     @Test
+    public void testHandleConstructorFailureIsCategorized()
+    {
+        // a handle constructor rejecting a missing field with requireNonNull or a failed cast
+        ConnectorHandleCodec<ConnectorSplit> nullRejecting = protobufHandleCodec(
+                NumberedSplit.class,
+                Int64Value.parser(),
+                split -> Int64Value.of(split.number()),
+                _ -> {
+                    throw new NullPointerException("location is null");
+                });
+        byte[] bytes = codec.serialize(new NumberedSplit(3));
+        assertThatThrownBy(() -> nullRejecting.deserialize(bytes))
+                .isInstanceOf(TrinoException.class)
+                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()))
+                .hasMessage("Protobuf NumberedSplit does not describe a valid handle: location is null")
+                .hasCauseInstanceOf(NullPointerException.class);
+
+        // categorized errors raised while decoding pass through unchanged
+        TrinoException original = new TrinoException(GENERIC_INTERNAL_ERROR, "already categorized");
+        ConnectorHandleCodec<ConnectorSplit> trinoFailing = protobufHandleCodec(
+                NumberedSplit.class,
+                Int64Value.parser(),
+                split -> Int64Value.of(split.number()),
+                _ -> {
+                    throw original;
+                });
+        assertThatThrownBy(() -> trinoFailing.deserialize(bytes))
+                .isSameAs(original);
+    }
+
+    @Test
     public void testCorruptBytesAreRejected()
     {
         // field 1, length-delimited, declared length 5 but only one byte follows

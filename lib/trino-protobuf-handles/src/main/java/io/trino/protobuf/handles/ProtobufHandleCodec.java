@@ -84,7 +84,11 @@ public final class ProtobufHandleCodec<F, H extends F, P extends Message>
         try {
             return fromProto.apply(proto);
         }
-        catch (IllegalArgumentException | IllegalStateException e) {
+        catch (TrinoException e) {
+            throw e;
+        }
+        catch (RuntimeException e) {
+            // handle constructors reject inconsistent state with IllegalArgumentException, NullPointerException and the like
             throw new TrinoException(GENERIC_INTERNAL_ERROR, "Protobuf %s does not describe a valid handle: %s".formatted(handleClass.getSimpleName(), e.getMessage()), e);
         }
     }

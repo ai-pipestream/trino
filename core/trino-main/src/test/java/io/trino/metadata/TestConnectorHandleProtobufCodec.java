@@ -293,6 +293,42 @@ public class TestConnectorHandleProtobufCodec
     }
 
     @Test
+    public void testThrowingCodecIsCategorized()
+    {
+        CatalogHandle catalogHandle = CatalogHandle.createRootCatalogHandle(new CatalogName("throwing"), new CatalogVersion("v1"));
+        ConnectorHandleCodecProvider provider = new ConnectorHandleCodecProvider()
+        {
+            @Override
+            public Optional<ConnectorHandleCodec<ConnectorSplit>> getSplitCodec()
+            {
+                return Optional.of(new ConnectorHandleCodec<>()
+                {
+                    @Override
+                    public byte[] serialize(ConnectorSplit handle)
+                    {
+                        throw new ClassCastException("cannot encode");
+                    }
+
+                    @Override
+                    public ConnectorSplit deserialize(byte[] bytes)
+                    {
+                        throw new IndexOutOfBoundsException("cannot decode");
+                    }
+                });
+            }
+        };
+        ConnectorHandleProtobufCodec throwingCodec = new ConnectorHandleProtobufCodec(singleCatalog(catalogHandle, provider));
+        assertTrinoExceptionThrownBy(() -> throwingCodec.encode(catalogHandle, SPLIT, new TpchSplit(0, 1, ImmutableList.of())))
+                .hasErrorCode(GENERIC_INTERNAL_ERROR)
+                .hasMessage("Protobuf handle codec of catalog 'throwing' failed to encode split handle " + TpchSplit.class.getName())
+                .hasCauseInstanceOf(ClassCastException.class);
+        assertTrinoExceptionThrownBy(() -> throwingCodec.decode(SPLIT, ConnectorHandle.newBuilder().setCatalogHandle(catalogHandle.getId()).build()))
+                .hasErrorCode(GENERIC_INTERNAL_ERROR)
+                .hasMessage("Protobuf handle codec of catalog 'throwing' failed to decode a split handle")
+                .hasCauseInstanceOf(IndexOutOfBoundsException.class);
+    }
+
+    @Test
     public void testEveryFamilyIsListed()
     {
         assertThat(HandleFamily.all()).hasSize(14);
