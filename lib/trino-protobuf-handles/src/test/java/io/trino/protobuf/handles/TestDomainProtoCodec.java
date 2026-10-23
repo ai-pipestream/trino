@@ -348,6 +348,27 @@ public class TestDomainProtoCodec
     }
 
     @Test
+    public void testSortedRangesOfUnorderableTypeAreRejected()
+    {
+        // a map is not orderable, so no sorted range set can exist for it, whatever the marker claims
+        ByteString bounds = serialize(BIGINT_MAP, mapOf(1, 2), mapOf(1, 2));
+        for (DiscreteSetMarker marker : List.of(DiscreteSetMarker.DISCRETE, DiscreteSetMarker.DISCRETE_SET_MARKER_UNKNOWN)) {
+            io.trino.protobuf.handles.v1.Domain unorderable = io.trino.protobuf.handles.v1.Domain.newBuilder()
+                    .setTypeId(BIGINT_MAP.getTypeId().getId())
+                    .setSortedRanges(io.trino.protobuf.handles.v1.SortedRangeSet.newBuilder()
+                            .setBounds(bounds)
+                            .addInclusive(true)
+                            .addInclusive(true)
+                            .setDiscreteSetMarker(marker))
+                    .build();
+            assertThatThrownBy(() -> codec.fromProto(unorderable))
+                    .isInstanceOf(TrinoException.class)
+                    .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()))
+                    .hasMessageContaining("not orderable");
+        }
+    }
+
+    @Test
     public void testTupleDomainKind()
     {
         assertThat(DomainProtoCodec.kindOf(TupleDomain.all())).isEqualTo(TupleDomainKind.ALL);

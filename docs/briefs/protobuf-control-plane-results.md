@@ -111,10 +111,11 @@ loops over `TaskStatusProtoMapper` / `JsonCodec<TaskStatus>` and
 
 ## Tests run for this branch
 
-- `lib/trino-protobuf-handles`: `TestDomainProtoCodec` (18, incl. a lying
+- `lib/trino-protobuf-handles`: `TestDomainProtoCodec` (19, incl. a lying
   discrete marker, duplicate discrete values, corrupt blocks, mismatched
   inclusive flags, null in equatable values, unknown and invalid types,
-  blocks of the wrong class, trailing bytes, unordered values and NaN),
+  blocks of the wrong class, trailing bytes, unordered values, NaN and
+  unorderable types),
   `TestProtobufHandleCodec` (5).
 - `core/trino-main`: `TestConnectorHandleProtobufCodec` (13),
   `TestSplitProtoMapper` (11), `TestSystemHandleCodecProvider` (9),
