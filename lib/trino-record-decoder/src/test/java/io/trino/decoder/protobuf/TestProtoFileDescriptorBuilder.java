@@ -932,7 +932,7 @@ public class TestProtoFileDescriptorBuilder
                 syntax = "proto3";
                 message Empty {}
                 message Reserved {
-                  reserved 2, 15 to 20, 1000 to max;
+                  reserved 2, 15 to 20, 1000 to 18999;
                   reserved "old_name", "older_name";
                   string name = 1;
                   int32 last = 536870911;
