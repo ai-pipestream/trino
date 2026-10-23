@@ -25,6 +25,7 @@ import io.trino.spi.classloader.ThreadContextClassLoader;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorAccessControl;
 import io.trino.spi.connector.ConnectorCapabilities;
+import io.trino.spi.connector.ConnectorHandleCodecProvider;
 import io.trino.spi.connector.ConnectorIndexProvider;
 import io.trino.spi.connector.ConnectorNodePartitioningProvider;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
@@ -89,6 +90,7 @@ public class ConnectorServices
     private final Map<String, PropertyMetadata<?>> analyzeProperties;
     private final Map<String, PropertyMetadata<?>> branchProperties;
     private final Set<ConnectorCapabilities> capabilities;
+    private final Optional<ConnectorHandleCodecProvider> handleCodecProvider;
 
     private final AtomicBoolean shutdown = new AtomicBoolean();
 
@@ -216,6 +218,10 @@ public class ConnectorServices
         Set<ConnectorCapabilities> capabilities = connector.getCapabilities();
         requireNonNull(capabilities, format("Connector '%s' returned a null capabilities set", catalogHandle));
         this.capabilities = capabilities;
+
+        Optional<ConnectorHandleCodecProvider> handleCodecProvider = connector.getHandleCodecProvider();
+        requireNonNull(handleCodecProvider, format("Connector '%s' returned a null handle codec provider", catalogHandle));
+        this.handleCodecProvider = handleCodecProvider;
     }
 
     public Tracer getTracer()
@@ -337,6 +343,17 @@ public class ConnectorServices
     public Set<ConnectorCapabilities> getCapabilities()
     {
         return capabilities;
+    }
+
+    /**
+     * Codecs for this connector's handles under protobuf control-plane
+     * encoding. Empty when the connector provides none; the engine then
+     * fails any query that has to ship one of its handles, because there
+     * is no JSON fallback.
+     */
+    public Optional<ConnectorHandleCodecProvider> getHandleCodecProvider()
+    {
+        return handleCodecProvider;
     }
 
     public void shutdown()

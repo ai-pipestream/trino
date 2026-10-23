@@ -21,6 +21,7 @@ import io.opentelemetry.api.trace.Tracer;
 import io.trino.cache.CacheManagerRegistry;
 import io.trino.connector.informationschema.InformationSchemaConnector;
 import io.trino.connector.system.SystemConnector;
+import io.trino.connector.system.SystemHandleCodecProvider;
 import io.trino.connector.system.SystemTablesProvider;
 import io.trino.execution.scheduler.NodeSchedulerConfig;
 import io.trino.metadata.InternalFunctionBundleFactory;
@@ -28,6 +29,7 @@ import io.trino.metadata.Metadata;
 import io.trino.node.InternalNode;
 import io.trino.node.InternalNodeManager;
 import io.trino.operator.FlatHashStrategyCompiler;
+import io.trino.protobuf.handles.DomainProtoCodec;
 import io.trino.security.AccessControl;
 import io.trino.spi.BlocksHashFactory;
 import io.trino.spi.PageIndexerFactory;
@@ -73,6 +75,7 @@ public class DefaultCatalogFactory
     private final TransactionManager transactionManager;
     private final TypeManager typeManager;
     private final BlockEncodingSerde blockEncodingSerde;
+    private final DomainProtoCodec domainProtoCodec;
     private final BlocksHashFactory blocksHashFactory;
 
     private final boolean schedulerIncludeCoordinator;
@@ -96,6 +99,7 @@ public class DefaultCatalogFactory
             TransactionManager transactionManager,
             TypeManager typeManager,
             BlockEncodingSerde blockEncodingSerde,
+            DomainProtoCodec domainProtoCodec,
             FlatHashStrategyCompiler flatHashStrategyCompiler,
             NodeSchedulerConfig nodeSchedulerConfig,
             OptimizerConfig optimizerConfig,
@@ -114,6 +118,7 @@ public class DefaultCatalogFactory
         this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.blockEncodingSerde = requireNonNull(blockEncodingSerde, "blockEncodingSerde is null");
+        this.domainProtoCodec = requireNonNull(domainProtoCodec, "domainProtoCodec is null");
         this.blocksHashFactory = requireNonNull(flatHashStrategyCompiler, "flatHashStrategyCompiler is null").createBlocksHashFactory();
         this.schedulerIncludeCoordinator = nodeSchedulerConfig.isIncludeCoordinator();
         this.maxPrefetchedInformationSchemaPrefixes = optimizerConfig.getMaxPrefetchedInformationSchemaPrefixes();
@@ -190,7 +195,8 @@ public class DefaultCatalogFactory
                         transactionId -> transactionManager.getConnectorTransaction(transactionId, catalogHandle),
                         accessControl,
                         catalogHandle.getCatalogName().toString(),
-                        catalogConnector.getPageSourceProviderFactory()));
+                        catalogConnector.getPageSourceProviderFactory(),
+                        new SystemHandleCodecProvider(catalogHandle, catalogConnector.getHandleCodecProvider(), domainProtoCodec)));
 
         return new CatalogConnector(
                 catalogHandle,

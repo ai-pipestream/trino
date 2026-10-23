@@ -1,0 +1,63 @@
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
+syntax = "proto3";
+
+package io.trino.server.protocol.v1;
+
+option java_package = "io.trino.server.protocol.v1";
+option java_multiple_files = true;
+
+import "io/trino/server/protocol/v1/handle.proto";
+
+// io.trino.metadata.Split. The engine owns remote and empty splits itself;
+// every other split belongs to a catalog and travels as that catalog's
+// protobuf payload.
+message Split {
+  oneof kind {
+    ConnectorHandle connector_split = 1;
+    RemoteSplit remote_split = 2;
+    EmptySplit empty_split = 3;
+  }
+}
+
+// io.trino.split.RemoteSplit. Spooling exchange inputs carry
+// ExchangeSourceHandle values owned by the exchange manager plugin; they get
+// their own codec when fault-tolerant execution moves to protobuf.
+message RemoteSplit {
+  oneof exchange_input {
+    DirectExchangeInput direct = 1;
+  }
+}
+
+message DirectExchangeInput {
+  string task_id = 1;
+  string location = 2;
+}
+
+message EmptySplit {
+  string catalog_handle = 1;
+}
+
+message ScheduledSplit {
+  int64 sequence_id = 1;
+  string plan_node_id = 2;
+  Split split = 3;
+}
+
+message SplitAssignment {
+  string plan_node_id = 1;
+  repeated ScheduledSplit splits = 2;
+  bool no_more_splits = 3;
+}

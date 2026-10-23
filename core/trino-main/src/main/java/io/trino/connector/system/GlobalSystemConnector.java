@@ -20,6 +20,7 @@ import io.trino.operator.table.SequenceFunction.SequenceFunctionHandle;
 import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.connector.CatalogVersion;
 import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ConnectorHandleCodecProvider;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
@@ -35,6 +36,7 @@ import io.trino.spi.transaction.IsolationLevel;
 import io.trino.transaction.InternalConnector;
 import io.trino.transaction.TransactionId;
 
+import java.util.Optional;
 import java.util.Set;
 
 import static io.trino.connector.CatalogHandle.createRootCatalogHandle;
@@ -50,6 +52,7 @@ public class GlobalSystemConnector
     private final Set<SystemTable> systemTables;
     private final Set<Procedure> procedures;
     private final Set<ConnectorTableFunction> tableFunctions;
+    private final ConnectorHandleCodecProvider handleCodecProvider = new GlobalSystemHandleCodecProvider();
 
     @Inject
     public GlobalSystemConnector(Set<SystemTable> systemTables, Set<Procedure> procedures, Set<ConnectorTableFunction> tableFunctions)
@@ -87,6 +90,12 @@ public class GlobalSystemConnector
     public Set<ConnectorTableFunction> getTableFunctions()
     {
         return tableFunctions;
+    }
+
+    @Override
+    public Optional<ConnectorHandleCodecProvider> getHandleCodecProvider()
+    {
+        return Optional.of(handleCodecProvider);
     }
 
     @Override

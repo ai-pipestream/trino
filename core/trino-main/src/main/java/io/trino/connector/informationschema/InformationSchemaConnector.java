@@ -17,6 +17,7 @@ import io.trino.metadata.Metadata;
 import io.trino.node.InternalNode;
 import io.trino.security.AccessControl;
 import io.trino.spi.connector.ConnectorExpressionEvaluator;
+import io.trino.spi.connector.ConnectorHandleCodecProvider;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorSession;
@@ -26,6 +27,8 @@ import io.trino.spi.transaction.IsolationLevel;
 import io.trino.transaction.InternalConnector;
 import io.trino.transaction.TransactionId;
 
+import java.util.Optional;
+
 import static java.util.Objects.requireNonNull;
 
 public class InformationSchemaConnector
@@ -34,6 +37,7 @@ public class InformationSchemaConnector
     private final ConnectorMetadata metadata;
     private final ConnectorSplitManager splitManager;
     private final ConnectorPageSourceProvider pageSourceProvider;
+    private final ConnectorHandleCodecProvider handleCodecProvider = new InformationSchemaHandleCodecProvider();
 
     public InformationSchemaConnector(String catalogName, InternalNode currentNode, Metadata metadata, AccessControl accessControl, int maxPrefetchedInformationSchemaPrefixes, ConnectorExpressionEvaluator evaluator)
     {
@@ -67,5 +71,11 @@ public class InformationSchemaConnector
     public ConnectorPageSourceProvider getPageSourceProvider()
     {
         return pageSourceProvider;
+    }
+
+    @Override
+    public Optional<ConnectorHandleCodecProvider> getHandleCodecProvider()
+    {
+        return Optional.of(handleCodecProvider);
     }
 }

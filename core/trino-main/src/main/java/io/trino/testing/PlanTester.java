@@ -139,6 +139,7 @@ import io.trino.operator.scalar.json.JsonQueryFunction;
 import io.trino.operator.scalar.json.JsonValueFunction;
 import io.trino.operator.table.ExcludeColumnsFunction;
 import io.trino.plugin.base.security.AllowAllSystemAccessControl;
+import io.trino.protobuf.handles.DomainProtoCodec;
 import io.trino.security.AllowAllAccessControl;
 import io.trino.security.GroupProviderManager;
 import io.trino.server.PluginManager;
@@ -456,6 +457,7 @@ public class PlanTester
                 transactionManager,
                 typeManager,
                 blockEncodingSerde,
+                new DomainProtoCodec(typeManager, blockEncodingSerde),
                 hashStrategyCompiler,
                 nodeSchedulerConfig,
                 optimizerConfig,
@@ -717,6 +719,11 @@ public class PlanTester
     }
 
     public CatalogManager getCatalogManager()
+    {
+        return catalogManager;
+    }
+
+    public ConnectorServicesProvider getConnectorServicesProvider()
     {
         return catalogManager;
     }

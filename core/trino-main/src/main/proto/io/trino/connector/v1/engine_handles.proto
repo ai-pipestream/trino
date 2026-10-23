@@ -1,0 +1,125 @@
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
+syntax = "proto3";
+
+package io.trino.connector.v1;
+
+option java_package = "io.trino.connector.v1";
+option java_multiple_files = true;
+
+import "io/trino/protobuf/handles/v1/domain.proto";
+import "io/trino/server/protocol/v1/handle.proto";
+
+// Handles of the connectors the engine owns: the information_schema and
+// system schemas of every catalog, and the global system catalog. They are
+// encoded by the engine's own ConnectorHandleCodecProviders under protobuf
+// control-plane encoding, exactly like plugin connectors encode theirs.
+
+// io.trino.connector.informationschema.InformationSchemaTable
+enum InformationSchemaTableName {
+  INFORMATION_SCHEMA_TABLE_NAME_UNSPECIFIED = 0;
+  COLUMNS = 1;
+  TABLES = 2;
+  VIEWS = 3;
+  SCHEMATA = 4;
+  TABLE_PRIVILEGES = 5;
+  ROLES = 6;
+  APPLICABLE_ROLES = 7;
+  ENABLED_ROLES = 8;
+}
+
+message QualifiedTablePrefix {
+  string catalog_name = 1;
+  optional string schema_name = 2;
+  optional string table_name = 3;
+}
+
+message InformationSchemaTableHandle {
+  string catalog_name = 1;
+  InformationSchemaTableName table = 2;
+  repeated QualifiedTablePrefix prefixes = 3;
+  optional int64 limit = 4;
+}
+
+message InformationSchemaColumnHandle {
+  string column_name = 1;
+}
+
+message InformationSchemaSplit {
+  string address = 1;
+}
+
+message InformationSchemaTransactionHandle {
+  string transaction_id = 1;
+}
+
+// TupleDomain<ColumnHandle> whose keys are io.trino.spi.connector.SystemColumnHandle.
+message SystemTupleDomain {
+  io.trino.protobuf.handles.v1.TupleDomainKind kind = 1;
+  repeated SystemColumnDomain column_domains = 2;
+}
+
+message SystemColumnDomain {
+  string column_name = 1;
+  io.trino.protobuf.handles.v1.Domain domain = 2;
+}
+
+message SystemTableHandle {
+  string schema_name = 1;
+  string table_name = 2;
+  SystemTupleDomain constraint = 3;
+}
+
+message SystemColumnHandle {
+  string column_name = 1;
+}
+
+message SystemSplit {
+  repeated string addresses = 1;
+  SystemTupleDomain constraint = 2;
+  optional string catalog_name = 3;
+}
+
+// The nested handle is the transaction handle of the catalog whose system
+// tables this connector serves, encoded by that catalog's own codec.
+message SystemTransactionHandle {
+  string transaction_id = 1;
+  io.trino.server.protocol.v1.ConnectorHandle connector_transaction_handle = 2;
+}
+
+message GlobalSystemTransactionHandle {
+  string transaction_id = 1;
+}
+
+message GlobalSystemTableFunctionHandle {
+  oneof function {
+    ExcludeColumnsFunctionHandle exclude_columns = 1;
+    SequenceFunctionHandle sequence = 2;
+  }
+}
+
+message ExcludeColumnsFunctionHandle {
+}
+
+message SequenceFunctionHandle {
+  int64 start = 1;
+  int64 stop = 2;
+  int64 step = 3;
+}
+
+message SequenceFunctionSplit {
+  int64 start = 1;
+  int64 stop = 2;
+}

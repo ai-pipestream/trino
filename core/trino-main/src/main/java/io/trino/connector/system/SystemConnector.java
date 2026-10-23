@@ -16,6 +16,7 @@ package io.trino.connector.system;
 import io.trino.node.InternalNode;
 import io.trino.node.InternalNodeManager;
 import io.trino.security.AccessControl;
+import io.trino.spi.connector.ConnectorHandleCodecProvider;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorPageSourceProvider;
 import io.trino.spi.connector.ConnectorPageSourceProviderFactory;
@@ -38,6 +39,7 @@ public class SystemConnector
     private final ConnectorSplitManager splitManager;
     private final ConnectorPageSourceProvider pageSourceProvider;
     private final Function<TransactionId, ConnectorTransactionHandle> transactionHandleFunction;
+    private final ConnectorHandleCodecProvider handleCodecProvider;
 
     public SystemConnector(
             InternalNode currentNode,
@@ -46,7 +48,8 @@ public class SystemConnector
             Function<TransactionId, ConnectorTransactionHandle> transactionHandleFunction,
             AccessControl accessControl,
             String catalogName,
-            Optional<ConnectorPageSourceProviderFactory> pageSourceProviderFactory)
+            Optional<ConnectorPageSourceProviderFactory> pageSourceProviderFactory,
+            ConnectorHandleCodecProvider handleCodecProvider)
     {
         requireNonNull(currentNode, "currentNode is null");
         requireNonNull(nodeManager, "nodeManager is null");
@@ -59,6 +62,7 @@ public class SystemConnector
         this.splitManager = new SystemSplitManager(currentNode, nodeManager, tables);
         this.pageSourceProvider = new SystemPageSourceProvider(tables, accessControl, catalogName, pageSourceProviderFactory);
         this.transactionHandleFunction = transactionHandleFunction;
+        this.handleCodecProvider = requireNonNull(handleCodecProvider, "handleCodecProvider is null");
     }
 
     @Override
@@ -83,5 +87,11 @@ public class SystemConnector
     public ConnectorPageSourceProvider getPageSourceProvider()
     {
         return pageSourceProvider;
+    }
+
+    @Override
+    public Optional<ConnectorHandleCodecProvider> getHandleCodecProvider()
+    {
+        return Optional.of(handleCodecProvider);
     }
 }

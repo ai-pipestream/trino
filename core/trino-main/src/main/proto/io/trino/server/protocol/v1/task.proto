@@ -121,11 +121,3 @@ message VersionedDynamicFilterDomains {
   int64 version = 1;
   map<string, io.trino.protobuf.handles.v1.Domain> dynamic_filter_domains = 2;
 }
-
-// Engine wrapper for a connector handle encoded by a
-// ConnectorHandleCodecProvider. The payload is the connector's own protobuf
-// message. It is never JSON.
-message ConnectorHandle {
-  string catalog_handle = 1;
-  bytes payload = 2;
-}

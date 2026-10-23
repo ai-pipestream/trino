@@ -64,6 +64,7 @@ import io.trino.memory.MemoryManagerConfig;
 import io.trino.memory.MemoryResource;
 import io.trino.memory.NodeMemoryConfig;
 import io.trino.metadata.BlockEncodingManager;
+import io.trino.metadata.ConnectorHandleProtobufCodec;
 import io.trino.metadata.DisabledSystemSecurityMetadata;
 import io.trino.metadata.FunctionManager;
 import io.trino.metadata.GlobalFunctionCatalog;
@@ -101,6 +102,7 @@ import io.trino.server.PluginManager.PluginsProvider;
 import io.trino.server.SliceSerialization.SliceDeserializer;
 import io.trino.server.SliceSerialization.SliceSerializer;
 import io.trino.server.protobuf.DynamicFilterDomainsProtoMapper;
+import io.trino.server.protobuf.SplitProtoMapper;
 import io.trino.server.protocol.PreparedStatementEncoder;
 import io.trino.server.protocol.spooling.SpoolingServerModule;
 import io.trino.server.remotetask.HttpLocationFactory;
@@ -327,6 +329,8 @@ public class ServerMainModule
         binder.bind(PagesInputStreamFactory.class);
         binder.bind(DynamicFilterDomainsProtoMapper.class).in(Scopes.SINGLETON);
         binder.bind(DomainProtoCodec.class).in(Scopes.SINGLETON);
+        binder.bind(ConnectorHandleProtobufCodec.class).in(Scopes.SINGLETON);
+        binder.bind(SplitProtoMapper.class).in(Scopes.SINGLETON);
         jaxrsBinder(binder).bind(IoExceptionSuppressingWriterInterceptor.class);
 
         // exchange client
