@@ -257,6 +257,11 @@ public class TestProtobufQueryDataDecoder
         Column timestampWithTimeZone = column(TIMESTAMP_WITH_TIME_ZONE);
         long epochMillis = 1_600_000_000_123L;
         assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(epochMillis).setPrecision(3).setZoneId("UTC")), "2020-09-13 12:26:40.123 UTC");
+        // an explicit zero offset (the server always sets the optional field) decodes like a missing one
+        TimestampWithTimeZone explicitZero = TimestampWithTimeZone.newBuilder().setEpochMillis(epochMillis).setPrecision(3).setZoneId("UTC").setOffsetSeconds(0).build();
+        assertThat(explicitZero.hasOffsetSeconds()).isTrue();
+        assertThat(TimestampWithTimeZone.newBuilder().setEpochMillis(epochMillis).setPrecision(3).setZoneId("UTC").build().hasOffsetSeconds()).isFalse();
+        assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(explicitZero), "2020-09-13 12:26:40.123 UTC");
         assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(epochMillis).setPrecision(3).setZoneId("Europe/Warsaw").setOffsetSeconds(2 * 3600)), "2020-09-13 14:26:40.123 Europe/Warsaw");
         assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(epochMillis).setPrecision(3).setZoneId("+05:30").setOffsetSeconds(5 * 3600 + 30 * 60)), "2020-09-13 17:56:40.123 +05:30");
         assertDecodes(timestampWithTimeZone, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(epochMillis).setPrecision(3).setZoneId("America/Los_Angeles").setOffsetSeconds(-7 * 3600)), "2020-09-13 05:26:40.123 America/Los_Angeles");

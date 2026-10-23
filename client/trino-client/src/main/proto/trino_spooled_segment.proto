@@ -159,8 +159,11 @@ message TimestampWithTimeZone {
   // the server's time zone rules: the local date-time of the value is
   // epoch_millis + offset_seconds, so a reader needs no time zone database
   // and renders the same local date-time as the server, whatever its own
-  // time zone rules are
-  sint32 offset_seconds = 5;
+  // time zone rules are. Optional so that an intended zero offset is told
+  // apart from a writer too old to send the field: the server always sets
+  // it, and a reader treats a missing field as zero for segments written
+  // before it existed
+  optional sint32 offset_seconds = 5;
 }
 
 message IntervalDayToSecond {

@@ -827,6 +827,7 @@ public final class ProtobufValueDecoders
             int picosOfMilli = 0;
             int precision = 0;
             String zoneId = null;
+            // a segment written before offset_seconds existed has no field; zero keeps rendering it as before
             int offsetSeconds = 0;
             while (reader.hasRemaining()) {
                 int tag = reader.readTag();

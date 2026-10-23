@@ -669,9 +669,9 @@ public final class ProtobufEncodingUtils
         // The offset is resolved here, with the rules the json encoding formats the value with, so a client
         // renders the same local date-time without a time zone database of its own
         int offsetSeconds = zone.rules().getOffset(Instant.ofEpochMilli(epochMillis)).getTotalSeconds();
-        if (offsetSeconds != 0) {
-            timestamp.writeSint32(TIMESTAMP_WITH_TIME_ZONE_OFFSET_SECONDS, offsetSeconds);
-        }
+        // always written, also when zero: the field is optional, so a reader can tell a resolved
+        // zero offset from a writer too old to send the field at all
+        timestamp.writeSint32(TIMESTAMP_WITH_TIME_ZONE_OFFSET_SECONDS, offsetSeconds);
         writer.writeMessage(VALUE_TIMESTAMP_WITH_TIME_ZONE, timestamp);
     }
 
