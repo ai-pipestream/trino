@@ -1,0 +1,77 @@
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
+syntax = "proto3";
+
+package io.trino.protobuf.handles.v1;
+
+option java_package = "io.trino.protobuf.handles.v1";
+option java_multiple_files = true;
+
+// Protobuf form of io.trino.spi.predicate.Domain, shared by the engine and
+// by connector handle codecs so every constraint on the control plane is
+// encoded the same way. Values travel as Trino blocks serialized with
+// BlockEncodingSerde: that is binary already, so no JSON is involved.
+
+message Domain {
+  // io.trino.spi.type.TypeId of the domain's type
+  string type_id = 1;
+  bool null_allowed = 2;
+  oneof value_set {
+    AllOrNoneValueSet all_or_none = 3;
+    SortedRangeSet sorted_ranges = 4;
+    EquatableValueSet equatable_values = 5;
+  }
+}
+
+// Mirrors io.trino.spi.predicate.AllOrNoneValueSet.
+message AllOrNoneValueSet {
+  bool all = 1;
+}
+
+// Mirrors io.trino.spi.predicate.SortedRangeSet. One block holds every range
+// bound in order: position 2*i is the low bound of range i and 2*i+1 its high
+// bound. A null position is an unbounded end. inclusive has one flag per
+// position, in the same order. The receiver rebuilds the set from the ranges,
+// so the ranges are validated on the way in instead of trusted. The marker
+// lets a set known to be discrete (single values only) be rebuilt as the same
+// discrete set the sender had, without the receiver scanning it again.
+message SortedRangeSet {
+  bytes bounds = 1;
+  repeated bool inclusive = 2;
+  DiscreteSetMarker discrete_set_marker = 3;
+}
+
+// Mirrors io.trino.spi.predicate.SortedRangeSet.DiscreteSetMarker.
+enum DiscreteSetMarker {
+  DISCRETE_SET_MARKER_UNKNOWN = 0;
+  DISCRETE = 1;
+  NON_DISCRETE = 2;
+}
+
+// Mirrors io.trino.spi.predicate.EquatableValueSet. The block holds one value
+// per position. inclusive=false means the complement of the listed values.
+message EquatableValueSet {
+  bool inclusive = 1;
+  bytes values = 2;
+}
+
+// How a TupleDomain is encoded. Connectors key COLUMN_DOMAINS entries by their
+// own column handle message, so the entry message is connector specific.
+enum TupleDomainKind {
+  TUPLE_DOMAIN_KIND_UNSPECIFIED = 0;
+  ALL = 1;
+  NONE = 2;
+  COLUMN_DOMAINS = 3;
+}

@@ -277,6 +277,11 @@
 
         <dependency>
             <groupId>io.trino</groupId>
+            <artifactId>trino-protobuf-handles</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.trino</groupId>
             <artifactId>trino-re2j</artifactId>
         </dependency>
 
@@ -572,16 +577,6 @@
             <plugin>
                 <groupId>com.github.os72</groupId>
                 <artifactId>protoc-jar-maven-plugin</artifactId>
-                <version>3.11.4</version>
-                <configuration>
-                    <protocArtifact>com.google.protobuf:protoc:${dep.protobuf.version}</protocArtifact>
-                    <protocVersion>${dep.protobuf.version}</protocVersion>
-                    <addSources>main</addSources>
-                    <inputDirectories>
-                        <include>src/main/proto</include>
-                    </inputDirectories>
-                    <outputDirectory>target/generated-sources/protobuf</outputDirectory>
-                </configuration>
                 <executions>
                     <execution>
                         <id>generate-sources</id>

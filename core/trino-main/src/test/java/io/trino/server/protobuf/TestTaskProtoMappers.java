@@ -15,6 +15,7 @@ package io.trino.server.protobuf;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.protobuf.ByteString;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.client.ErrorLocation;
@@ -24,6 +25,7 @@ import io.trino.execution.TaskId;
 import io.trino.execution.TaskState;
 import io.trino.execution.TaskStatus;
 import io.trino.execution.buffer.OutputBufferStatus;
+import io.trino.protobuf.handles.DomainProtoCodec;
 import io.trino.server.FailTaskRequest;
 import io.trino.spi.ErrorCode;
 import io.trino.spi.ErrorType;
@@ -62,7 +64,7 @@ import static org.assertj.core.api.Assertions.within;
 public class TestTaskProtoMappers
 {
     private final DynamicFilterDomainsProtoMapper dynamicFilterDomainsProtoMapper = new DynamicFilterDomainsProtoMapper(
-            new DomainProtoMapper(TESTING_BLOCK_ENCODING_SERDE, TESTING_TYPE_MANAGER));
+            new DomainProtoCodec(TESTING_TYPE_MANAGER, TESTING_BLOCK_ENCODING_SERDE));
 
     @Test
     public void testTaskStatusRoundTrip()
@@ -251,23 +253,60 @@ public class TestTaskProtoMappers
     }
 
     @Test
-    public void testRangeBoundPositionOutOfRangeIsRejected()
+    public void testMismatchedRangeBoundsAreRejected()
     {
-        io.trino.server.protocol.v1.Domain domain = dynamicFilterDomainsProtoMapper.toProto(new VersionedDynamicFilterDomains(
+        io.trino.protobuf.handles.v1.Domain domain = dynamicFilterDomainsProtoMapper.toProto(new VersionedDynamicFilterDomains(
                         1,
                         ImmutableMap.of(new DynamicFilterId("df"), Domain.create(ValueSet.ofRanges(Range.range(BIGINT, 1L, true, 5L, true)), false))))
                 .getDynamicFilterDomainsOrThrow("df");
-        byte[] outOfRange = io.trino.server.protocol.v1.VersionedDynamicFilterDomains.newBuilder()
+        // Two bounds in the block but three inclusive flags
+        byte[] mismatched = io.trino.server.protocol.v1.VersionedDynamicFilterDomains.newBuilder()
                 .setVersion(1)
                 .putDynamicFilterDomains("df", domain.toBuilder()
-                        .setRanges(domain.getRanges().toBuilder()
-                                .setRanges(0, domain.getRanges().getRanges(0).toBuilder().setHighPosition(2)))
+                        .setSortedRanges(domain.getSortedRanges().toBuilder().addInclusive(true))
                         .build())
                 .build()
                 .toByteArray();
-        assertTrinoExceptionThrownBy(() -> dynamicFilterDomainsProtoMapper.parseFrom(outOfRange))
+        assertTrinoExceptionThrownBy(() -> dynamicFilterDomainsProtoMapper.parseFrom(mismatched))
                 .hasErrorCode(GENERIC_INTERNAL_ERROR)
-                .hasMessageContaining("Range bound position 2");
+                .hasMessageContaining("2 bounds and 3 inclusive flags");
+    }
+
+    @Test
+    public void testInvertedRangeIsRejected()
+    {
+        io.trino.protobuf.handles.v1.Domain low = dynamicFilterDomainsProtoMapper.toProto(new VersionedDynamicFilterDomains(
+                        1,
+                        ImmutableMap.of(new DynamicFilterId("df"), Domain.create(ValueSet.ofRanges(Range.range(BIGINT, 5L, true, 1L + 5L, true)), false))))
+                .getDynamicFilterDomainsOrThrow("df");
+        io.trino.protobuf.handles.v1.Domain high = dynamicFilterDomainsProtoMapper.toProto(new VersionedDynamicFilterDomains(
+                        1,
+                        ImmutableMap.of(new DynamicFilterId("df"), Domain.create(ValueSet.ofRanges(Range.range(BIGINT, 1L, true, 2L, true)), false))))
+                .getDynamicFilterDomainsOrThrow("df");
+        // Splice the bounds block of a [1, 2] range under the flags of another domain,
+        // then swap to a block whose low bound is above its high bound
+        byte[] inverted = io.trino.server.protocol.v1.VersionedDynamicFilterDomains.newBuilder()
+                .setVersion(1)
+                .putDynamicFilterDomains("df", low.toBuilder()
+                        .setSortedRanges(low.getSortedRanges().toBuilder().setBounds(invertedBounds(high)))
+                        .build())
+                .build()
+                .toByteArray();
+        assertTrinoExceptionThrownBy(() -> dynamicFilterDomainsProtoMapper.parseFrom(inverted))
+                .hasErrorCode(GENERIC_INTERNAL_ERROR)
+                .hasMessageContaining("invalid");
+    }
+
+    private static ByteString invertedBounds(io.trino.protobuf.handles.v1.Domain domain)
+    {
+        // A bigint block with values [2, 1]: the encoding of the sorted block [1, 2]
+        // with its two 8-byte little-endian values swapped
+        byte[] bytes = domain.getSortedRanges().getBounds().toByteArray();
+        int valuesStart = bytes.length - 16;
+        byte[] swapped = bytes.clone();
+        System.arraycopy(bytes, valuesStart + 8, swapped, valuesStart, 8);
+        System.arraycopy(bytes, valuesStart, swapped, valuesStart + 8, 8);
+        return ByteString.copyFrom(swapped);
     }
 
     @Test
@@ -288,14 +327,14 @@ public class TestTaskProtoMappers
     {
         byte[] domainWithoutValues = io.trino.server.protocol.v1.VersionedDynamicFilterDomains.newBuilder()
                 .setVersion(1)
-                .putDynamicFilterDomains("df", io.trino.server.protocol.v1.Domain.newBuilder()
+                .putDynamicFilterDomains("df", io.trino.protobuf.handles.v1.Domain.newBuilder()
                         .setTypeId(BIGINT.getTypeId().getId())
                         .build())
                 .build()
                 .toByteArray();
         assertTrinoExceptionThrownBy(() -> dynamicFilterDomainsProtoMapper.parseFrom(domainWithoutValues))
                 .hasErrorCode(GENERIC_INTERNAL_ERROR)
-                .hasMessageContaining("no values set");
+                .hasMessageContaining("no value set");
     }
 
     private static void assertInvalidEnumValuesAreRejected(int value)

@@ -16,6 +16,7 @@ package io.trino.server.protobuf;
 import com.google.inject.Inject;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.trino.execution.DynamicFiltersCollector.VersionedDynamicFilterDomains;
+import io.trino.protobuf.handles.DomainProtoCodec;
 import io.trino.spi.TrinoException;
 import io.trino.spi.predicate.Domain;
 import io.trino.sql.planner.plan.DynamicFilterId;
@@ -28,12 +29,12 @@ import static java.util.Objects.requireNonNull;
 
 public class DynamicFilterDomainsProtoMapper
 {
-    private final DomainProtoMapper domainProtoMapper;
+    private final DomainProtoCodec domainProtoCodec;
 
     @Inject
-    public DynamicFilterDomainsProtoMapper(DomainProtoMapper domainProtoMapper)
+    public DynamicFilterDomainsProtoMapper(DomainProtoCodec domainProtoCodec)
     {
-        this.domainProtoMapper = requireNonNull(domainProtoMapper, "domainProtoMapper is null");
+        this.domainProtoCodec = requireNonNull(domainProtoCodec, "domainProtoCodec is null");
     }
 
     public io.trino.server.protocol.v1.VersionedDynamicFilterDomains toProto(VersionedDynamicFilterDomains domains)
@@ -41,14 +42,14 @@ public class DynamicFilterDomainsProtoMapper
         io.trino.server.protocol.v1.VersionedDynamicFilterDomains.Builder builder = io.trino.server.protocol.v1.VersionedDynamicFilterDomains.newBuilder()
                 .setVersion(domains.getVersion());
         domains.getDynamicFilterDomains().forEach((id, domain) ->
-                builder.putDynamicFilterDomains(id.toString(), domainProtoMapper.toProto(domain)));
+                builder.putDynamicFilterDomains(id.toString(), domainProtoCodec.toProto(domain)));
         return builder.build();
     }
 
     public VersionedDynamicFilterDomains fromProto(io.trino.server.protocol.v1.VersionedDynamicFilterDomains proto)
     {
         Map<DynamicFilterId, Domain> domains = proto.getDynamicFilterDomainsMap().entrySet().stream()
-                .collect(toImmutableMap(entry -> new DynamicFilterId(entry.getKey()), entry -> domainProtoMapper.fromProto(entry.getValue())));
+                .collect(toImmutableMap(entry -> new DynamicFilterId(entry.getKey()), entry -> domainProtoCodec.fromProto(entry.getValue())));
         return new VersionedDynamicFilterDomains(proto.getVersion(), domains);
     }
 

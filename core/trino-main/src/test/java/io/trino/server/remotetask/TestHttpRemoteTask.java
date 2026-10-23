@@ -60,12 +60,12 @@ import io.trino.metadata.InternalBlockEncodingSerde;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.Split;
 import io.trino.node.InternalNode;
+import io.trino.protobuf.handles.DomainProtoCodec;
 import io.trino.server.DynamicFilterService;
 import io.trino.server.FailTaskRequest;
 import io.trino.server.HttpRemoteTaskFactory;
 import io.trino.server.InternalCommunicationConfig;
 import io.trino.server.TaskUpdateRequest;
-import io.trino.server.protobuf.DomainProtoMapper;
 import io.trino.server.protobuf.DynamicFilterDomainsProtoMapper;
 import io.trino.simd.BlockEncodingSimdSupport;
 import io.trino.spi.ErrorCode;
@@ -768,7 +768,7 @@ public class TestHttpRemoteTask
                                 new RemoteTaskStats(),
                                 dynamicFilterService,
                                 new InternalCommunicationConfig(),
-                                new DynamicFilterDomainsProtoMapper(new DomainProtoMapper(TESTING_BLOCK_ENCODING_SERDE, TESTING_TYPE_MANAGER)));
+                                new DynamicFilterDomainsProtoMapper(new DomainProtoCodec(TESTING_TYPE_MANAGER, TESTING_BLOCK_ENCODING_SERDE)));
                     }
                 });
         Injector injector = app

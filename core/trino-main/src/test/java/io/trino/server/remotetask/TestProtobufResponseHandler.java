@@ -23,7 +23,7 @@ import io.airlift.http.client.Response;
 import io.trino.execution.DynamicFiltersCollector.VersionedDynamicFilterDomains;
 import io.trino.execution.TaskId;
 import io.trino.execution.TaskStatus;
-import io.trino.server.protobuf.DomainProtoMapper;
+import io.trino.protobuf.handles.DomainProtoCodec;
 import io.trino.server.protobuf.DynamicFilterDomainsProtoMapper;
 import io.trino.server.protobuf.TaskStatusProtoMapper;
 import io.trino.spi.TrinoException;
@@ -101,7 +101,7 @@ public class TestProtobufResponseHandler
     {
         // A worker that has not started the task returns the initial domains,
         // which encode to zero bytes
-        DynamicFilterDomainsProtoMapper mapper = new DynamicFilterDomainsProtoMapper(new DomainProtoMapper(TESTING_BLOCK_ENCODING_SERDE, TESTING_TYPE_MANAGER));
+        DynamicFilterDomainsProtoMapper mapper = new DynamicFilterDomainsProtoMapper(new DomainProtoCodec(TESTING_TYPE_MANAGER, TESTING_BLOCK_ENCODING_SERDE));
         byte[] body = mapper.toByteArray(INITIAL_DYNAMIC_FILTER_DOMAINS);
         assertThat(body).isEmpty();
 

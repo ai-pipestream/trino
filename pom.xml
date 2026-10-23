@@ -59,6 +59,7 @@
         <module>lib/trino-orc</module>
         <module>lib/trino-parquet</module>
         <module>lib/trino-plugin-toolkit</module>
+        <module>lib/trino-protobuf-handles</module>
         <module>lib/trino-record-decoder</module>
         <module>plugin/trino-ai-functions</module>
         <module>plugin/trino-base-jdbc</module>
@@ -1315,6 +1316,19 @@
 
             <dependency>
                 <groupId>io.trino</groupId>
+                <artifactId>trino-protobuf-handles</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>io.trino</groupId>
+                <artifactId>trino-protobuf-handles</artifactId>
+                <version>${project.version}</version>
+                <type>test-jar</type>
+            </dependency>
+
+            <dependency>
+                <groupId>io.trino</groupId>
                 <artifactId>trino-ranger</artifactId>
                 <version>${project.version}</version>
             </dependency>
@@ -2211,6 +2225,24 @@
                     <version>${dep.frontend-maven-plugin.version}</version>
                     <configuration>
                         <bunVersion>${dep.frontend-bun.version}</bunVersion>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>com.github.os72</groupId>
+                    <artifactId>protoc-jar-maven-plugin</artifactId>
+                    <version>3.11.4</version>
+                    <configuration>
+                        <protocArtifact>com.google.protobuf:protoc:${dep.protobuf.version}</protocArtifact>
+                        <protocVersion>${dep.protobuf.version}</protocVersion>
+                        <addSources>main</addSources>
+                        <includeMavenTypes>direct</includeMavenTypes>
+                        <inputDirectories>
+                            <include>src/main/proto</include>
+                        </inputDirectories>
+                        <includeDirectories>
+                            <include>src/main/proto</include>
+                        </includeDirectories>
+                        <outputDirectory>target/generated-sources/protobuf</outputDirectory>
                     </configuration>
                 </plugin>
                 <plugin>

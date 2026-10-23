@@ -19,6 +19,8 @@ package io.trino.server.protocol.v1;
 option java_package = "io.trino.server.protocol.v1";
 option java_multiple_files = true;
 
+import "io/trino/protobuf/handles/v1/domain.proto";
+
 // Wire format for the /v1/task control endpoints when
 // internal-communication.control-plane.encoding=PROTOBUF.
 // No JSON is ever carried inside these messages. Values that are already
@@ -114,46 +116,10 @@ message FailTaskRequest {
   ExecutionFailureInfo failure_info = 1;
 }
 
-// One bound of a Domain value list: a single Trino Block holding every value
-// in order, serialized with BlockEncodingSerde. Null positions in the block
-// mark unbounded range ends.
-message DomainValues {
-  bytes block = 1;
-}
-
-message DomainRange {
-  bool low_inclusive = 1;
-  int32 low_position = 2;
-  bool high_inclusive = 3;
-  int32 high_position = 4;
-}
-
-// Mirrors io.trino.spi.predicate.Domain. The oneof mirrors the three
-// ValueSet implementations selected via ValuesProcessor.
-message Domain {
-  string type_id = 1;
-  bool null_allowed = 2;
-  oneof values {
-    bool all = 3;
-    DiscreteValues discrete = 4;
-    RangeValues ranges = 5;
-  }
-}
-
-message DiscreteValues {
-  bool inclusive = 1;
-  DomainValues values = 2;
-}
-
-message RangeValues {
-  DomainValues bounds = 1;
-  repeated DomainRange ranges = 2;
-}
-
 // Mirrors io.trino.execution.DynamicFiltersCollector.VersionedDynamicFilterDomains.
 message VersionedDynamicFilterDomains {
   int64 version = 1;
-  map<string, Domain> dynamic_filter_domains = 2;
+  map<string, io.trino.protobuf.handles.v1.Domain> dynamic_filter_domains = 2;
 }
 
 // Engine wrapper for a connector handle encoded by a

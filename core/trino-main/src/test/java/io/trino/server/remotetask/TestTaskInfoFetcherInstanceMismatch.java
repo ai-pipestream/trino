@@ -31,9 +31,9 @@ import io.trino.execution.buffer.OutputBufferInfo;
 import io.trino.execution.buffer.OutputBufferStatus;
 import io.trino.operator.RetryPolicy;
 import io.trino.operator.TaskStats;
+import io.trino.protobuf.handles.DomainProtoCodec;
 import io.trino.server.ControlPlaneEncoding;
 import io.trino.server.DynamicFilterService;
-import io.trino.server.protobuf.DomainProtoMapper;
 import io.trino.server.protobuf.DynamicFilterDomainsProtoMapper;
 import io.trino.spi.type.TypeOperators;
 import org.junit.jupiter.api.Test;
@@ -223,7 +223,7 @@ public class TestTaskInfoFetcherInstanceMismatch
                 new Duration(10, SECONDS),
                 JsonCodec.jsonCodec(VersionedDynamicFilterDomains.class),
                 ControlPlaneEncoding.JSON,
-                new DynamicFilterDomainsProtoMapper(new DomainProtoMapper(TESTING_BLOCK_ENCODING_SERDE, TESTING_TYPE_MANAGER)),
+                new DynamicFilterDomainsProtoMapper(new DomainProtoCodec(TESTING_TYPE_MANAGER, TESTING_BLOCK_ENCODING_SERDE)),
                 executor,
                 new TestingHttpClient(_ -> { throw new UnsupportedOperationException(); }),
                 () -> noopTracer().spanBuilder("test"),
