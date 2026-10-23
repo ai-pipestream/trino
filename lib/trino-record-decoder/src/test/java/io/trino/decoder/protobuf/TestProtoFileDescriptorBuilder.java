@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Descriptors.Descriptor;
+import com.google.protobuf.Descriptors.EnumValueDescriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor.JavaType;
 import com.google.protobuf.Descriptors.FileDescriptor;
@@ -921,6 +922,54 @@ public class TestProtoFileDescriptorBuilder
         assertThat(defaults.findFieldByName("zero").getDefaultValue()).isEqualTo(0);
         assertThat(defaults.findFieldByName("count").hasDefaultValue()).isTrue();
         assertThat(defaults.findFieldByName("zero").hasDefaultValue()).isFalse();
+    }
+
+    @Test
+    public void testProto2DefaultValueEscapesAndSpecialValues()
+    {
+        // what protoc records for these defaults: bytes as their escaped bytes, strings as their text
+        FileDescriptor file = build("escapes.proto",
+                """
+                syntax = "proto2";
+                enum Color {
+                  RED = 0;
+                  BLUE = 1;
+                }
+                message Escapes {
+                  optional bytes high = 1 [default = "\\377\\x80\\000"];
+                  optional bytes backslash = 2 [default = "a\\\\b"];
+                  optional bytes quote = 3 [default = "\\"'"];
+                  optional string text_backslash = 4 [default = "a\\\\b"];
+                  optional string unicode = 5 [default = "\u00e9t\u00e9"];
+                  optional bytes unicode_bytes = 6 [default = "\u20ac"];
+                  optional double positive_infinity = 7 [default = inf];
+                  optional float negative_infinity = 8 [default = -inf];
+                  optional double not_a_number = 9 [default = nan];
+                  optional int32 hex = 10 [default = 0x1F];
+                  optional int64 octal = 11 [default = 017];
+                  optional int32 min = 12 [default = -2147483648];
+                  optional sfixed64 min64 = 13 [default = -9223372036854775808];
+                  optional uint32 max32 = 14 [default = 4294967295];
+                  optional Color color = 15 [default = BLUE];
+                }
+                """);
+        Descriptor escapes = file.findMessageTypeByName("Escapes");
+        assertThat(escapes.findFieldByName("high").getDefaultValue()).isEqualTo(ByteString.copyFrom(new byte[] {(byte) 0xFF, (byte) 0x80, 0}));
+        assertThat(escapes.findFieldByName("backslash").getDefaultValue()).isEqualTo(ByteString.copyFromUtf8("a\\b"));
+        assertThat(escapes.findFieldByName("quote").getDefaultValue()).isEqualTo(ByteString.copyFromUtf8("\"'"));
+        assertThat(escapes.findFieldByName("text_backslash").getDefaultValue()).isEqualTo("a\\b");
+        assertThat(escapes.findFieldByName("unicode").getDefaultValue()).isEqualTo("\u00e9t\u00e9");
+        // protoc encodes other text in a bytes default as UTF-8
+        assertThat(escapes.findFieldByName("unicode_bytes").getDefaultValue()).isEqualTo(ByteString.copyFromUtf8("\u20ac"));
+        assertThat(escapes.findFieldByName("positive_infinity").getDefaultValue()).isEqualTo(Double.POSITIVE_INFINITY);
+        assertThat(escapes.findFieldByName("negative_infinity").getDefaultValue()).isEqualTo(Float.NEGATIVE_INFINITY);
+        assertThat((double) escapes.findFieldByName("not_a_number").getDefaultValue()).isNaN();
+        assertThat(escapes.findFieldByName("hex").getDefaultValue()).isEqualTo(31);
+        assertThat(escapes.findFieldByName("octal").getDefaultValue()).isEqualTo(15L);
+        assertThat(escapes.findFieldByName("min").getDefaultValue()).isEqualTo(Integer.MIN_VALUE);
+        assertThat(escapes.findFieldByName("min64").getDefaultValue()).isEqualTo(Long.MIN_VALUE);
+        assertThat(escapes.findFieldByName("max32").getDefaultValue()).isEqualTo(-1);
+        assertThat(((EnumValueDescriptor) escapes.findFieldByName("color").getDefaultValue()).getName()).isEqualTo("BLUE");
     }
 
     @Test
