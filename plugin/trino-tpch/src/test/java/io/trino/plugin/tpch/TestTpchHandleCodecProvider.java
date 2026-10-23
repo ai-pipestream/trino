@@ -15,6 +15,12 @@ package io.trino.plugin.tpch;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.trino.plugin.tpch.protobuf.TpchColumnDomain;
+import io.trino.plugin.tpch.protobuf.TpchTupleDomain;
+import io.trino.protobuf.handles.DomainProtoCodec;
+import io.trino.protobuf.handles.TestingBlockEncodingSerde;
+import io.trino.protobuf.handles.TestingTypeManager;
+import io.trino.protobuf.handles.v1.TupleDomainKind;
 import io.trino.spi.HostAddress;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.BlockBuilder;
@@ -31,17 +37,15 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.TypeDescriptor;
-import io.trino.spi.type.TypeId;
 import io.trino.spi.type.TypeManager;
-import io.trino.spi.type.TypeOperators;
+import org.assertj.core.api.AbstractThrowableAssert;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 
-import java.util.Map;
+import java.util.List;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
-import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -53,13 +57,10 @@ public class TestTpchHandleCodecProvider
 {
     private static final Type VARCHAR_25 = createVarcharType(25);
     private static final Type DECIMAL_15_2 = createDecimalType(15, 2);
-    private static final Map<String, Type> TYPES = ImmutableMap.of(
-            BIGINT.getTypeId().getId(), BIGINT,
-            DOUBLE.getTypeId().getId(), DOUBLE,
-            VARCHAR_25.getTypeId().getId(), VARCHAR_25,
-            DECIMAL_15_2.getTypeId().getId(), DECIMAL_15_2);
+    private static final Type BIGINT_ARRAY = new ArrayType(BIGINT);
+    private static final TypeManager TYPE_MANAGER = new TestingTypeManager(List.of(VARCHAR_25, DECIMAL_15_2, BIGINT_ARRAY));
 
-    private final ConnectorHandleCodecProvider provider = new TpchHandleCodecProvider(testTypeManager());
+    private final ConnectorHandleCodecProvider provider = new TpchHandleCodecProvider(TYPE_MANAGER, new DomainProtoCodec(TYPE_MANAGER, new TestingBlockEncodingSerde(TYPE_MANAGER)));
 
     @Test
     public void testTableHandleRoundTrip()
@@ -105,34 +106,75 @@ public class TestTpchHandleCodecProvider
     }
 
     @Test
-    public void testNonScalarDomainValueIsRejected()
+    public void testNonScalarDomainValueRoundTrip()
     {
-        ArrayType arrayType = new ArrayType(BIGINT);
-        BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, 1);
+        // domain values are blocks on the wire, so a value of a structural type needs no special case
+        BlockBuilder blockBuilder = BIGINT.createBlockBuilder(null, 2);
         BIGINT.writeLong(blockBuilder, 1);
-        TpchTableHandle handle = new TpchTableHandle(
+        BIGINT.writeLong(blockBuilder, 2);
+        TpchTableHandle original = new TpchTableHandle(
                 "sf1",
                 "orders",
                 1.0,
-                TupleDomain.withColumnDomains(ImmutableMap.of(new TpchColumnHandle("c", arrayType), Domain.singleValue(arrayType, blockBuilder.build()))));
+                TupleDomain.withColumnDomains(ImmutableMap.of(new TpchColumnHandle("c", BIGINT_ARRAY), Domain.singleValue(BIGINT_ARRAY, blockBuilder.build()))));
 
         ConnectorHandleCodec<ConnectorTableHandle> codec = provider.getTableHandleCodec().orElseThrow();
-        assertThatThrownBy(() -> codec.serialize(handle))
-                .isInstanceOf(TrinoException.class)
-                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
-                .hasMessageContaining("non-scalar");
+        assertThat(codec.deserialize(codec.serialize(original))).isEqualTo(original);
+    }
+
+    @Test
+    public void testConstraintKeyedByForeignColumnIsRejected()
+    {
+        ColumnHandle foreign = new ColumnHandle() {};
+        TpchTableHandle handle = new TpchTableHandle("sf1", "orders", 1.0, TupleDomain.withColumnDomains(ImmutableMap.of(foreign, Domain.singleValue(BIGINT, 1L))));
+
+        assertInternalError(() -> provider.getTableHandleCodec().orElseThrow().serialize(handle))
+                .hasMessageContaining("Tpch table constraint is keyed by");
+    }
+
+    @Test
+    public void testIncompleteConstraintEntriesAreRejected()
+    {
+        ConnectorHandleCodec<ConnectorTableHandle> codec = provider.getTableHandleCodec().orElseThrow();
+        io.trino.plugin.tpch.protobuf.TpchColumnHandle column = io.trino.plugin.tpch.protobuf.TpchColumnHandle.newBuilder()
+                .setColumnName("orderkey")
+                .setTypeId(BIGINT.getTypeId().getId())
+                .build();
+        DomainProtoCodec domainProtoCodec = new DomainProtoCodec(TYPE_MANAGER, new TestingBlockEncodingSerde(TYPE_MANAGER));
+        io.trino.protobuf.handles.v1.Domain domain = domainProtoCodec.toProto(Domain.singleValue(BIGINT, 1L));
+
+        byte[] missingDomain = tableHandle(TpchTupleDomain.newBuilder()
+                .setKind(TupleDomainKind.COLUMN_DOMAINS)
+                .addColumnDomains(TpchColumnDomain.newBuilder().setColumn(column)));
+        assertInternalError(() -> codec.deserialize(missingDomain))
+                .hasMessage("Protobuf tpch table constraint has an entry without a column or a domain");
+
+        byte[] repeatedColumn = tableHandle(TpchTupleDomain.newBuilder()
+                .setKind(TupleDomainKind.COLUMN_DOMAINS)
+                .addColumnDomains(TpchColumnDomain.newBuilder().setColumn(column).setDomain(domain))
+                .addColumnDomains(TpchColumnDomain.newBuilder().setColumn(column).setDomain(domain)));
+        assertInternalError(() -> codec.deserialize(repeatedColumn))
+                .hasMessage("Protobuf tpch table constraint repeats column orderkey");
+
+        byte[] unspecifiedKind = tableHandle(TpchTupleDomain.newBuilder());
+        assertInternalError(() -> codec.deserialize(unspecifiedKind))
+                .hasMessage("Invalid TupleDomain kind TUPLE_DOMAIN_KIND_UNSPECIFIED in tpch table constraint");
+
+        // entries are ignored unless the kind says they are there
+        byte[] noneWithEntries = tableHandle(TpchTupleDomain.newBuilder()
+                .setKind(TupleDomainKind.NONE)
+                .addColumnDomains(TpchColumnDomain.newBuilder().setColumn(column).setDomain(domain)));
+        assertThat(codec.deserialize(noneWithEntries)).isEqualTo(new TpchTableHandle("sf1", "orders", 1.0, TupleDomain.none()));
     }
 
     @Test
     public void testCorruptBytesFailWithCategorizedError()
     {
         byte[] truncated = {0x0A, 0x05, 0x01};
-        assertThatThrownBy(() -> provider.getTableHandleCodec().orElseThrow().deserialize(truncated))
-                .isInstanceOf(TrinoException.class)
-                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()));
-        assertThatThrownBy(() -> provider.getSplitCodec().orElseThrow().deserialize(truncated))
-                .isInstanceOf(TrinoException.class)
-                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()));
+        assertInternalError(() -> provider.getTableHandleCodec().orElseThrow().deserialize(truncated))
+                .hasMessageContaining("Failed to decode protobuf TpchTableHandle");
+        assertInternalError(() -> provider.getSplitCodec().orElseThrow().deserialize(truncated))
+                .hasMessageContaining("Failed to decode protobuf TpchSplit");
     }
 
     @Test
@@ -154,6 +196,18 @@ public class TestTpchHandleCodecProvider
     }
 
     @Test
+    public void testUnknownColumnTypeIsRejected()
+    {
+        byte[] unknownType = io.trino.plugin.tpch.protobuf.TpchColumnHandle.newBuilder()
+                .setColumnName("c")
+                .setTypeId("no such type")
+                .build()
+                .toByteArray();
+        assertInternalError(() -> provider.getColumnHandleCodec().orElseThrow().deserialize(unknownType))
+                .hasMessage("Protobuf TpchColumnHandle does not describe a valid handle: Unknown type: no such type");
+    }
+
+    @Test
     public void testSplitRoundTrip()
     {
         TpchSplit original = new TpchSplit(2, 10, ImmutableList.of(HostAddress.fromString("worker1:8080"), HostAddress.fromString("worker2:8080")));
@@ -161,6 +215,19 @@ public class TestTpchHandleCodecProvider
         TpchSplit decoded = (TpchSplit) codec.deserialize(codec.serialize(original));
         assertThat(decoded).isEqualTo(original);
         assertThat(decoded.getAddresses()).isEqualTo(original.getAddresses());
+    }
+
+    @Test
+    public void testInvalidSplitAddressIsRejected()
+    {
+        byte[] invalidAddress = io.trino.plugin.tpch.protobuf.TpchSplit.newBuilder()
+                .setPartNumber(1)
+                .setTotalParts(2)
+                .addAddresses("worker:not-a-port")
+                .build()
+                .toByteArray();
+        assertInternalError(() -> provider.getSplitCodec().orElseThrow().deserialize(invalidAddress))
+                .hasMessageContaining("Protobuf TpchSplit does not describe a valid handle");
     }
 
     @Test
@@ -190,43 +257,21 @@ public class TestTpchHandleCodecProvider
         assertThat(provider.getTableCredentialsCodec()).isEmpty();
     }
 
-    private static TypeManager testTypeManager()
+    private static AbstractThrowableAssert<?, ? extends Throwable> assertInternalError(ThrowingCallable callable)
     {
-        return new TypeManager()
-        {
-            @Override
-            public Type getType(TypeDescriptor descriptor)
-            {
-                throw new UnsupportedOperationException();
-            }
+        return assertThatThrownBy(callable)
+                .isInstanceOf(TrinoException.class)
+                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()));
+    }
 
-            @Override
-            public Type fromSqlType(String type)
-            {
-                throw new UnsupportedOperationException();
-            }
-
-            @Override
-            public Type getType(TypeId id)
-            {
-                Type type = TYPES.get(id.getId());
-                if (type == null) {
-                    throw new IllegalArgumentException("Unknown type id: " + id);
-                }
-                return type;
-            }
-
-            @Override
-            public boolean isTypeRegistered(String name)
-            {
-                return false;
-            }
-
-            @Override
-            public TypeOperators getTypeOperators()
-            {
-                throw new UnsupportedOperationException();
-            }
-        };
+    private static byte[] tableHandle(TpchTupleDomain.Builder constraint)
+    {
+        return io.trino.plugin.tpch.protobuf.TpchTableHandle.newBuilder()
+                .setSchemaName("sf1")
+                .setTableName("orders")
+                .setScaleFactor(1.0)
+                .setConstraint(constraint)
+                .build()
+                .toByteArray();
     }
 }

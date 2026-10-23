@@ -13,20 +13,10 @@
  */
 package io.trino.plugin.tpch;
 
-import com.google.common.collect.ImmutableMap;
-import com.google.protobuf.ByteString;
-import com.google.protobuf.InvalidProtocolBufferException;
-import com.google.protobuf.Message;
-import com.google.protobuf.Parser;
-import io.airlift.slice.Slice;
-import io.airlift.slice.Slices;
-import io.trino.plugin.tpch.protobuf.DomainDiscreteValues;
-import io.trino.plugin.tpch.protobuf.DomainRange;
-import io.trino.plugin.tpch.protobuf.DomainRanges;
-import io.trino.plugin.tpch.protobuf.Int128Value;
-import io.trino.plugin.tpch.protobuf.ScalarValue;
-import io.trino.plugin.tpch.protobuf.TupleDomainEntry;
-import io.trino.plugin.tpch.protobuf.TupleDomainKind;
+import com.google.inject.Inject;
+import io.trino.plugin.tpch.protobuf.TpchColumnDomain;
+import io.trino.plugin.tpch.protobuf.TpchTupleDomain;
+import io.trino.protobuf.handles.DomainProtoCodec;
 import io.trino.spi.HostAddress;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
@@ -37,111 +27,122 @@ import io.trino.spi.connector.ConnectorSplit;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.predicate.Domain;
-import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
-import io.trino.spi.predicate.ValueSet;
-import io.trino.spi.type.Int128;
-import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeId;
 import io.trino.spi.type.TypeManager;
 
-import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
-import java.util.function.Function;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.protobuf.handles.DomainProtoCodec.invalidTupleDomainKind;
+import static io.trino.protobuf.handles.DomainProtoCodec.kindOf;
+import static io.trino.protobuf.handles.ProtobufHandleCodec.protobufHandleCodec;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
-import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
-import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
 /**
  * Protobuf handle codecs for the families tpch implements: table, column,
  * split, partitioning and transaction handles. The pushed-down
- * {@link TupleDomain} constraint in {@link TpchTableHandle} encodes scalar
- * domain values natively; a non-scalar domain value (a block for an array,
- * row or map type) fails loudly instead of falling back to another format.
+ * {@link TupleDomain} constraint in {@link TpchTableHandle} uses the shared
+ * domain encoding, so a value of any column type travels as a Trino block.
  */
 public class TpchHandleCodecProvider
         implements ConnectorHandleCodecProvider
 {
     private final TypeManager typeManager;
+    private final DomainProtoCodec domainProtoCodec;
 
-    public TpchHandleCodecProvider(TypeManager typeManager)
+    private final ConnectorHandleCodec<ConnectorTableHandle> tableHandleCodec;
+    private final ConnectorHandleCodec<ColumnHandle> columnHandleCodec;
+    private final ConnectorHandleCodec<ConnectorSplit> splitCodec;
+    private final ConnectorHandleCodec<ConnectorTransactionHandle> transactionHandleCodec;
+    private final ConnectorHandleCodec<ConnectorPartitioningHandle> partitioningHandleCodec;
+
+    @Inject
+    public TpchHandleCodecProvider(TypeManager typeManager, DomainProtoCodec domainProtoCodec)
     {
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
+        this.domainProtoCodec = requireNonNull(domainProtoCodec, "domainProtoCodec is null");
+
+        tableHandleCodec = protobufHandleCodec(
+                TpchTableHandle.class,
+                io.trino.plugin.tpch.protobuf.TpchTableHandle.parser(),
+                handle -> io.trino.plugin.tpch.protobuf.TpchTableHandle.newBuilder()
+                        .setSchemaName(handle.schemaName())
+                        .setTableName(handle.tableName())
+                        .setScaleFactor(handle.scaleFactor())
+                        .setConstraint(toProto(handle.constraint()))
+                        .build(),
+                proto -> new TpchTableHandle(proto.getSchemaName(), proto.getTableName(), proto.getScaleFactor(), fromProto(proto.getConstraint())));
+
+        columnHandleCodec = protobufHandleCodec(
+                TpchColumnHandle.class,
+                io.trino.plugin.tpch.protobuf.TpchColumnHandle.parser(),
+                TpchHandleCodecProvider::toProto,
+                this::fromProto);
+
+        splitCodec = protobufHandleCodec(
+                TpchSplit.class,
+                io.trino.plugin.tpch.protobuf.TpchSplit.parser(),
+                split -> io.trino.plugin.tpch.protobuf.TpchSplit.newBuilder()
+                        .setPartNumber(split.getPartNumber())
+                        .setTotalParts(split.getTotalParts())
+                        .addAllAddresses(split.getAddresses().stream().map(HostAddress::toString).collect(toImmutableList()))
+                        .build(),
+                proto -> new TpchSplit(
+                        proto.getPartNumber(),
+                        proto.getTotalParts(),
+                        proto.getAddressesList().stream().map(HostAddress::fromString).collect(toImmutableList())));
+
+        transactionHandleCodec = protobufHandleCodec(
+                TpchTransactionHandle.class,
+                io.trino.plugin.tpch.protobuf.TpchTransactionHandle.parser(),
+                _ -> io.trino.plugin.tpch.protobuf.TpchTransactionHandle.getDefaultInstance(),
+                _ -> TpchTransactionHandle.INSTANCE);
+
+        partitioningHandleCodec = protobufHandleCodec(
+                TpchPartitioningHandle.class,
+                io.trino.plugin.tpch.protobuf.TpchPartitioningHandle.parser(),
+                handle -> io.trino.plugin.tpch.protobuf.TpchPartitioningHandle.newBuilder()
+                        .setTable(handle.table())
+                        .setTotalRows(handle.totalRows())
+                        .build(),
+                proto -> new TpchPartitioningHandle(proto.getTable(), proto.getTotalRows()));
     }
 
     @Override
     public Optional<ConnectorHandleCodec<ConnectorTableHandle>> getTableHandleCodec()
     {
-        return Optional.of(codec(
-                handle -> {
-                    TpchTableHandle tableHandle = (TpchTableHandle) handle;
-                    return io.trino.plugin.tpch.protobuf.TpchTableHandle.newBuilder()
-                            .setSchemaName(tableHandle.schemaName())
-                            .setTableName(tableHandle.tableName())
-                            .setScaleFactor(tableHandle.scaleFactor())
-                            .setConstraint(toProto(tableHandle.constraint()))
-                            .build();
-                },
-                proto -> new TpchTableHandle(proto.getSchemaName(), proto.getTableName(), proto.getScaleFactor(), fromProto(proto.getConstraint())),
-                io.trino.plugin.tpch.protobuf.TpchTableHandle.parser()));
+        return Optional.of(tableHandleCodec);
     }
 
     @Override
     public Optional<ConnectorHandleCodec<ColumnHandle>> getColumnHandleCodec()
     {
-        return Optional.of(codec(
-                handle -> toProto((TpchColumnHandle) handle),
-                this::fromProto,
-                io.trino.plugin.tpch.protobuf.TpchColumnHandle.parser()));
+        return Optional.of(columnHandleCodec);
     }
 
     @Override
     public Optional<ConnectorHandleCodec<ConnectorSplit>> getSplitCodec()
     {
-        return Optional.of(codec(
-                handle -> {
-                    TpchSplit split = (TpchSplit) handle;
-                    return io.trino.plugin.tpch.protobuf.TpchSplit.newBuilder()
-                            .setPartNumber(split.getPartNumber())
-                            .setTotalParts(split.getTotalParts())
-                            .addAllAddresses(split.getAddresses().stream().map(HostAddress::toString).collect(toImmutableList()))
-                            .build();
-                },
-                proto -> new TpchSplit(
-                        proto.getPartNumber(),
-                        proto.getTotalParts(),
-                        proto.getAddressesList().stream().map(HostAddress::fromString).collect(toImmutableList())),
-                io.trino.plugin.tpch.protobuf.TpchSplit.parser()));
+        return Optional.of(splitCodec);
     }
 
     @Override
     public Optional<ConnectorHandleCodec<ConnectorTransactionHandle>> getTransactionHandleCodec()
     {
-        return Optional.of(codec(
-                _ -> io.trino.plugin.tpch.protobuf.TpchTransactionHandle.getDefaultInstance(),
-                _ -> TpchTransactionHandle.INSTANCE,
-                io.trino.plugin.tpch.protobuf.TpchTransactionHandle.parser()));
+        return Optional.of(transactionHandleCodec);
     }
 
     @Override
     public Optional<ConnectorHandleCodec<ConnectorPartitioningHandle>> getPartitioningHandleCodec()
     {
-        return Optional.of(codec(
-                handle -> {
-                    TpchPartitioningHandle partitioningHandle = (TpchPartitioningHandle) handle;
-                    return io.trino.plugin.tpch.protobuf.TpchPartitioningHandle.newBuilder()
-                            .setTable(partitioningHandle.table())
-                            .setTotalRows(partitioningHandle.totalRows())
-                            .build();
-                },
-                proto -> new TpchPartitioningHandle(proto.getTable(), proto.getTotalRows()),
-                io.trino.plugin.tpch.protobuf.TpchPartitioningHandle.parser()));
+        return Optional.of(partitioningHandleCodec);
     }
 
-    private io.trino.plugin.tpch.protobuf.TpchColumnHandle toProto(TpchColumnHandle columnHandle)
+    private static io.trino.plugin.tpch.protobuf.TpchColumnHandle toProto(TpchColumnHandle columnHandle)
     {
         return io.trino.plugin.tpch.protobuf.TpchColumnHandle.newBuilder()
                 .setColumnName(columnHandle.columnName())
@@ -154,160 +155,42 @@ public class TpchHandleCodecProvider
         return new TpchColumnHandle(proto.getColumnName(), typeManager.getType(TypeId.of(proto.getTypeId())));
     }
 
-    private io.trino.plugin.tpch.protobuf.TupleDomain toProto(TupleDomain<ColumnHandle> tupleDomain)
+    private TpchTupleDomain toProto(TupleDomain<ColumnHandle> constraint)
     {
-        if (tupleDomain.isAll()) {
-            return io.trino.plugin.tpch.protobuf.TupleDomain.newBuilder()
-                    .setKind(TupleDomainKind.ALL)
-                    .build();
+        TpchTupleDomain.Builder builder = TpchTupleDomain.newBuilder()
+                .setKind(kindOf(constraint));
+        if (!constraint.isAll() && !constraint.isNone()) {
+            constraint.getDomains().orElseThrow().forEach((column, domain) -> {
+                if (!(column instanceof TpchColumnHandle tpchColumn)) {
+                    throw new TrinoException(GENERIC_INTERNAL_ERROR, "Tpch table constraint is keyed by %s instead of %s".formatted(column.getClass().getName(), TpchColumnHandle.class.getName()));
+                }
+                builder.addColumnDomains(TpchColumnDomain.newBuilder()
+                        .setColumn(toProto(tpchColumn))
+                        .setDomain(domainProtoCodec.toProto(domain)));
+            });
         }
-        if (tupleDomain.isNone()) {
-            return io.trino.plugin.tpch.protobuf.TupleDomain.newBuilder()
-                    .setKind(TupleDomainKind.NONE)
-                    .build();
-        }
-        io.trino.plugin.tpch.protobuf.TupleDomain.Builder builder = io.trino.plugin.tpch.protobuf.TupleDomain.newBuilder()
-                .setKind(TupleDomainKind.ENTRIES);
-        tupleDomain.getDomains().orElseThrow().forEach((column, domain) -> builder.addEntries(TupleDomainEntry.newBuilder()
-                .setColumn(toProto((TpchColumnHandle) column))
-                .setDomain(toProto(domain))
-                .build()));
         return builder.build();
     }
 
-    private TupleDomain<ColumnHandle> fromProto(io.trino.plugin.tpch.protobuf.TupleDomain proto)
+    private TupleDomain<ColumnHandle> fromProto(TpchTupleDomain proto)
     {
         return switch (proto.getKind()) {
             case ALL -> TupleDomain.all();
             case NONE -> TupleDomain.none();
-            case ENTRIES -> {
-                ImmutableMap.Builder<ColumnHandle, Domain> domains = ImmutableMap.builder();
-                proto.getEntriesList().forEach(entry -> domains.put(fromProto(entry.getColumn()), fromProto(entry.getDomain())));
-                yield TupleDomain.withColumnDomains(domains.buildOrThrow());
-            }
-            case TUPLE_DOMAIN_KIND_UNSPECIFIED, UNRECOGNIZED -> throw new TrinoException(GENERIC_INTERNAL_ERROR, "Invalid TupleDomain kind in tpch table handle");
-        };
-    }
-
-    private io.trino.plugin.tpch.protobuf.Domain toProto(Domain domain)
-    {
-        io.trino.plugin.tpch.protobuf.Domain.Builder builder = io.trino.plugin.tpch.protobuf.Domain.newBuilder()
-                .setTypeId(domain.getType().getTypeId().getId())
-                .setNullAllowed(domain.isNullAllowed());
-        domain.getValues().getValuesProcessor().consume(
-                ranges -> {
-                    DomainRanges.Builder rangesBuilder = DomainRanges.newBuilder();
-                    for (Range range : ranges.getOrderedRanges()) {
-                        DomainRange.Builder rangeBuilder = DomainRange.newBuilder()
-                                .setLowInclusive(range.isLowInclusive())
-                                .setHighInclusive(range.isHighInclusive());
-                        range.getLowValue().ifPresent(low -> rangeBuilder.setLow(toScalarProto(domain.getType(), low)));
-                        range.getHighValue().ifPresent(high -> rangeBuilder.setHigh(toScalarProto(domain.getType(), high)));
-                        rangesBuilder.addRanges(rangeBuilder.build());
+            case COLUMN_DOMAINS -> {
+                Map<ColumnHandle, Domain> domains = new LinkedHashMap<>();
+                for (TpchColumnDomain entry : proto.getColumnDomainsList()) {
+                    if (!entry.hasColumn() || !entry.hasDomain()) {
+                        throw new TrinoException(GENERIC_INTERNAL_ERROR, "Protobuf tpch table constraint has an entry without a column or a domain");
                     }
-                    builder.setRanges(rangesBuilder.build());
-                },
-                discreteValues -> {
-                    DomainDiscreteValues.Builder discreteBuilder = DomainDiscreteValues.newBuilder()
-                            .setInclusive(discreteValues.isInclusive());
-                    discreteValues.getValues().forEach(value -> discreteBuilder.addValues(toScalarProto(domain.getType(), value)));
-                    builder.setDiscrete(discreteBuilder.build());
-                },
-                allOrNone -> builder.setAll(allOrNone.isAll()));
-        return builder.build();
-    }
-
-    private Domain fromProto(io.trino.plugin.tpch.protobuf.Domain proto)
-    {
-        Type type = typeManager.getType(TypeId.of(proto.getTypeId()));
-        ValueSet values = switch (proto.getValuesCase()) {
-            case ALL -> proto.getAll() ? ValueSet.all(type) : ValueSet.none(type);
-            case DISCRETE -> {
-                List<Object> discreteValues = proto.getDiscrete().getValuesList().stream()
-                        .map(TpchHandleCodecProvider::fromScalarProto)
-                        .collect(toImmutableList());
-                ValueSet valueSet = discreteValues.isEmpty() ? ValueSet.none(type) : ValueSet.copyOf(type, discreteValues);
-                yield proto.getDiscrete().getInclusive() ? valueSet : valueSet.complement();
-            }
-            case RANGES -> {
-                List<Range> ranges = proto.getRanges().getRangesList().stream()
-                        .map(range -> toRange(type, range))
-                        .collect(toImmutableList());
-                yield ranges.isEmpty() ? ValueSet.none(type) : ValueSet.ofRanges(ranges);
-            }
-            case VALUES_NOT_SET -> throw new TrinoException(GENERIC_INTERNAL_ERROR, "Domain in tpch table handle has no values set");
-        };
-        return Domain.create(values, proto.getNullAllowed());
-    }
-
-    private static Range toRange(Type type, DomainRange range)
-    {
-        Object low = range.hasLow() ? fromScalarProto(range.getLow()) : null;
-        Object high = range.hasHigh() ? fromScalarProto(range.getHigh()) : null;
-        if (low == null && high == null) {
-            return Range.all(type);
-        }
-        if (high == null) {
-            return range.getLowInclusive() ? Range.greaterThanOrEqual(type, low) : Range.greaterThan(type, low);
-        }
-        if (low == null) {
-            return range.getHighInclusive() ? Range.lessThanOrEqual(type, high) : Range.lessThan(type, high);
-        }
-        return Range.range(type, low, range.getLowInclusive(), high, range.getHighInclusive());
-    }
-
-    private static ScalarValue toScalarProto(Type type, Object value)
-    {
-        ScalarValue.Builder builder = ScalarValue.newBuilder();
-        switch (value) {
-            case Long longValue -> builder.setLongValue(longValue);
-            case Integer intValue -> builder.setLongValue(intValue.longValue());
-            case Double doubleValue -> builder.setDoubleValue(doubleValue);
-            case Boolean boolValue -> builder.setBoolValue(boolValue);
-            case Slice sliceValue -> builder.setSliceValue(ByteString.copyFrom(sliceValue.byteArray(), sliceValue.byteArrayOffset(), sliceValue.length()));
-            case Int128 int128Value -> builder.setInt128Value(Int128Value.newBuilder()
-                    .setHigh(int128Value.getHigh())
-                    .setLow(int128Value.getLow())
-                    .build());
-            default -> throw new TrinoException(
-                    NOT_SUPPORTED,
-                    format("Tpch protobuf handle codec does not support non-scalar domain values of type %s (value class %s)", type, value.getClass().getName()));
-        }
-        return builder.build();
-    }
-
-    private static Object fromScalarProto(ScalarValue proto)
-    {
-        return switch (proto.getValueCase()) {
-            case LONG_VALUE -> proto.getLongValue();
-            case DOUBLE_VALUE -> proto.getDoubleValue();
-            case BOOL_VALUE -> proto.getBoolValue();
-            case SLICE_VALUE -> Slices.wrappedBuffer(proto.getSliceValue().toByteArray());
-            case INT128_VALUE -> Int128.valueOf(proto.getInt128Value().getHigh(), proto.getInt128Value().getLow());
-            case VALUE_NOT_SET -> throw new TrinoException(GENERIC_INTERNAL_ERROR, "Scalar value in tpch table handle has no value set");
-        };
-    }
-
-    private static <H, P extends Message> ConnectorHandleCodec<H> codec(Function<H, P> toProto, Function<P, H> fromProto, Parser<P> parser)
-    {
-        return new ConnectorHandleCodec<>()
-        {
-            @Override
-            public byte[] serialize(H handle)
-            {
-                return toProto.apply(handle).toByteArray();
-            }
-
-            @Override
-            public H deserialize(byte[] bytes)
-            {
-                try {
-                    return fromProto.apply(parser.parseFrom(bytes));
+                    TpchColumnHandle column = fromProto(entry.getColumn());
+                    if (domains.put(column, domainProtoCodec.fromProto(entry.getDomain())) != null) {
+                        throw new TrinoException(GENERIC_INTERNAL_ERROR, "Protobuf tpch table constraint repeats column " + column.columnName());
+                    }
                 }
-                catch (InvalidProtocolBufferException e) {
-                    throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to decode protobuf tpch handle", e);
-                }
+                yield TupleDomain.withColumnDomains(domains);
             }
+            case TUPLE_DOMAIN_KIND_UNSPECIFIED, UNRECOGNIZED -> throw invalidTupleDomainKind(proto.getKind(), "tpch table constraint");
         };
     }
 }

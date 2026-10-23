@@ -16,6 +16,7 @@ package io.trino.plugin.tpch;
 import com.google.inject.Binder;
 import com.google.inject.Scopes;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
+import io.trino.protobuf.handles.DomainProtoCodec;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorNodePartitioningProvider;
@@ -44,6 +45,8 @@ public class TpchModule
         binder.bind(ConnectorPageSourceProvider.class).to(TpchPageSourceProvider.class).in(Scopes.SINGLETON);
         binder.bind(ConnectorSplitManager.class).to(TpchSplitManager.class).in(Scopes.SINGLETON);
         binder.bind(ConnectorNodePartitioningProvider.class).to(TpchNodePartitioningProvider.class).in(Scopes.SINGLETON);
+        binder.bind(DomainProtoCodec.class).in(Scopes.SINGLETON);
+        binder.bind(TpchHandleCodecProvider.class).in(Scopes.SINGLETON);
 
         configBinder(binder).bindConfig(TpchConfig.class);
         configBinder(binder).bindConfigDefaults(TpchConfig.class, config -> {

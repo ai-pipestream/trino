@@ -13,9 +13,6 @@
  */
 package io.trino.plugin.memory;
 
-import com.google.protobuf.InvalidProtocolBufferException;
-import com.google.protobuf.Message;
-import com.google.protobuf.Parser;
 import io.trino.plugin.memory.protobuf.InsertMode;
 import io.trino.spi.HostAddress;
 import io.trino.spi.TrinoException;
@@ -34,9 +31,9 @@ import io.trino.spi.type.TypeManager;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.OptionalLong;
-import java.util.function.Function;
 
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static io.trino.protobuf.handles.ProtobufHandleCodec.protobufHandleCodec;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static java.util.Objects.requireNonNull;
 
@@ -47,57 +44,49 @@ import static java.util.Objects.requireNonNull;
 public class MemoryHandleCodecProvider
         implements ConnectorHandleCodecProvider
 {
-    private final TypeManager typeManager;
+    private final ConnectorHandleCodec<ConnectorTableHandle> tableHandleCodec;
+    private final ConnectorHandleCodec<ColumnHandle> columnHandleCodec;
+    private final ConnectorHandleCodec<ConnectorSplit> splitCodec;
+    private final ConnectorHandleCodec<ConnectorOutputTableHandle> outputTableHandleCodec;
+    private final ConnectorHandleCodec<ConnectorInsertTableHandle> insertTableHandleCodec;
+    private final ConnectorHandleCodec<ConnectorTransactionHandle> transactionHandleCodec;
 
     public MemoryHandleCodecProvider(TypeManager typeManager)
     {
-        this.typeManager = requireNonNull(typeManager, "typeManager is null");
-    }
+        requireNonNull(typeManager, "typeManager is null");
 
-    @Override
-    public Optional<ConnectorHandleCodec<ConnectorTableHandle>> getTableHandleCodec()
-    {
-        return Optional.of(codec(
+        tableHandleCodec = protobufHandleCodec(
+                MemoryTableHandle.class,
+                io.trino.plugin.memory.protobuf.MemoryTableHandle.parser(),
                 handle -> {
-                    MemoryTableHandle tableHandle = (MemoryTableHandle) handle;
                     io.trino.plugin.memory.protobuf.MemoryTableHandle.Builder builder = io.trino.plugin.memory.protobuf.MemoryTableHandle.newBuilder()
-                            .setId(tableHandle.id())
-                            .setSchemaName(tableHandle.name().getSchemaName())
-                            .setTableName(tableHandle.name().getTableName());
-                    tableHandle.limit().ifPresent(builder::setLimit);
-                    tableHandle.sampleRatio().ifPresent(builder::setSampleRatio);
+                            .setId(handle.id())
+                            .setSchemaName(handle.name().getSchemaName())
+                            .setTableName(handle.name().getTableName());
+                    handle.limit().ifPresent(builder::setLimit);
+                    handle.sampleRatio().ifPresent(builder::setSampleRatio);
                     return builder.build();
                 },
                 proto -> new MemoryTableHandle(
                         proto.getId(),
                         new SchemaTableName(proto.getSchemaName(), proto.getTableName()),
                         proto.hasLimit() ? OptionalLong.of(proto.getLimit()) : OptionalLong.empty(),
-                        proto.hasSampleRatio() ? OptionalDouble.of(proto.getSampleRatio()) : OptionalDouble.empty()),
-                io.trino.plugin.memory.protobuf.MemoryTableHandle.parser()));
-    }
+                        proto.hasSampleRatio() ? OptionalDouble.of(proto.getSampleRatio()) : OptionalDouble.empty()));
 
-    @Override
-    public Optional<ConnectorHandleCodec<ColumnHandle>> getColumnHandleCodec()
-    {
-        return Optional.of(codec(
-                handle -> {
-                    MemoryColumnHandle columnHandle = (MemoryColumnHandle) handle;
-                    return io.trino.plugin.memory.protobuf.MemoryColumnHandle.newBuilder()
-                            .setColumnIndex(columnHandle.columnIndex())
-                            .setName(columnHandle.name())
-                            .setTypeId(columnHandle.type().getTypeId().getId())
-                            .build();
-                },
-                proto -> new MemoryColumnHandle(proto.getColumnIndex(), proto.getName(), typeManager.getType(TypeId.of(proto.getTypeId()))),
-                io.trino.plugin.memory.protobuf.MemoryColumnHandle.parser()));
-    }
+        columnHandleCodec = protobufHandleCodec(
+                MemoryColumnHandle.class,
+                io.trino.plugin.memory.protobuf.MemoryColumnHandle.parser(),
+                handle -> io.trino.plugin.memory.protobuf.MemoryColumnHandle.newBuilder()
+                        .setColumnIndex(handle.columnIndex())
+                        .setName(handle.name())
+                        .setTypeId(handle.type().getTypeId().getId())
+                        .build(),
+                proto -> new MemoryColumnHandle(proto.getColumnIndex(), proto.getName(), typeManager.getType(TypeId.of(proto.getTypeId()))));
 
-    @Override
-    public Optional<ConnectorHandleCodec<ConnectorSplit>> getSplitCodec()
-    {
-        return Optional.of(codec(
-                handle -> {
-                    MemorySplit split = (MemorySplit) handle;
+        splitCodec = protobufHandleCodec(
+                MemorySplit.class,
+                io.trino.plugin.memory.protobuf.MemorySplit.parser(),
+                split -> {
                     io.trino.plugin.memory.protobuf.MemorySplit.Builder builder = io.trino.plugin.memory.protobuf.MemorySplit.newBuilder()
                             .setTable(split.table())
                             .setPartNumber(split.partNumber())
@@ -113,83 +102,88 @@ public class MemoryHandleCodecProvider
                         proto.getTotalPartsPerWorker(),
                         HostAddress.fromString(proto.getAddress()),
                         proto.getExpectedRows(),
-                        proto.hasLimit() ? OptionalLong.of(proto.getLimit()) : OptionalLong.empty()),
-                io.trino.plugin.memory.protobuf.MemorySplit.parser()));
+                        proto.hasLimit() ? OptionalLong.of(proto.getLimit()) : OptionalLong.empty()));
+
+        outputTableHandleCodec = protobufHandleCodec(
+                MemoryOutputTableHandle.class,
+                io.trino.plugin.memory.protobuf.MemoryOutputTableHandle.parser(),
+                handle -> io.trino.plugin.memory.protobuf.MemoryOutputTableHandle.newBuilder()
+                        .setTable(handle.table())
+                        .addAllActiveTableIds(handle.activeTableIds())
+                        .build(),
+                proto -> new MemoryOutputTableHandle(proto.getTable(), proto.getActiveTableIdsList().stream().collect(toImmutableSet())));
+
+        insertTableHandleCodec = protobufHandleCodec(
+                MemoryInsertTableHandle.class,
+                io.trino.plugin.memory.protobuf.MemoryInsertTableHandle.parser(),
+                handle -> io.trino.plugin.memory.protobuf.MemoryInsertTableHandle.newBuilder()
+                        .setTable(handle.table())
+                        .setMode(toProto(handle.mode()))
+                        .addAllActiveTableIds(handle.activeTableIds())
+                        .build(),
+                proto -> new MemoryInsertTableHandle(
+                        proto.getTable(),
+                        insertMode(proto),
+                        proto.getActiveTableIdsList().stream().collect(toImmutableSet())));
+
+        transactionHandleCodec = protobufHandleCodec(
+                MemoryTransactionHandle.class,
+                io.trino.plugin.memory.protobuf.MemoryTransactionHandle.parser(),
+                _ -> io.trino.plugin.memory.protobuf.MemoryTransactionHandle.getDefaultInstance(),
+                _ -> MemoryTransactionHandle.INSTANCE);
+    }
+
+    @Override
+    public Optional<ConnectorHandleCodec<ConnectorTableHandle>> getTableHandleCodec()
+    {
+        return Optional.of(tableHandleCodec);
+    }
+
+    @Override
+    public Optional<ConnectorHandleCodec<ColumnHandle>> getColumnHandleCodec()
+    {
+        return Optional.of(columnHandleCodec);
+    }
+
+    @Override
+    public Optional<ConnectorHandleCodec<ConnectorSplit>> getSplitCodec()
+    {
+        return Optional.of(splitCodec);
     }
 
     @Override
     public Optional<ConnectorHandleCodec<ConnectorOutputTableHandle>> getOutputTableHandleCodec()
     {
-        return Optional.of(codec(
-                handle -> {
-                    MemoryOutputTableHandle outputTableHandle = (MemoryOutputTableHandle) handle;
-                    return io.trino.plugin.memory.protobuf.MemoryOutputTableHandle.newBuilder()
-                            .setTable(outputTableHandle.table())
-                            .addAllActiveTableIds(outputTableHandle.activeTableIds())
-                            .build();
-                },
-                proto -> new MemoryOutputTableHandle(proto.getTable(), proto.getActiveTableIdsList().stream().collect(toImmutableSet())),
-                io.trino.plugin.memory.protobuf.MemoryOutputTableHandle.parser()));
+        return Optional.of(outputTableHandleCodec);
     }
 
     @Override
     public Optional<ConnectorHandleCodec<ConnectorInsertTableHandle>> getInsertTableHandleCodec()
     {
-        return Optional.of(codec(
-                handle -> {
-                    MemoryInsertTableHandle insertTableHandle = (MemoryInsertTableHandle) handle;
-                    return io.trino.plugin.memory.protobuf.MemoryInsertTableHandle.newBuilder()
-                            .setTable(insertTableHandle.table())
-                            .setMode(InsertMode.valueOf(insertTableHandle.mode().name()))
-                            .addAllActiveTableIds(insertTableHandle.activeTableIds())
-                            .build();
-                },
-                proto -> new MemoryInsertTableHandle(
-                        proto.getTable(),
-                        insertMode(proto),
-                        proto.getActiveTableIdsList().stream().collect(toImmutableSet())),
-                io.trino.plugin.memory.protobuf.MemoryInsertTableHandle.parser()));
+        return Optional.of(insertTableHandleCodec);
     }
 
     @Override
     public Optional<ConnectorHandleCodec<ConnectorTransactionHandle>> getTransactionHandleCodec()
     {
-        return Optional.of(codec(
-                _ -> io.trino.plugin.memory.protobuf.MemoryTransactionHandle.getDefaultInstance(),
-                _ -> MemoryTransactionHandle.INSTANCE,
-                io.trino.plugin.memory.protobuf.MemoryTransactionHandle.parser()));
+        return Optional.of(transactionHandleCodec);
+    }
+
+    private static InsertMode toProto(MemoryInsertTableHandle.InsertMode mode)
+    {
+        return switch (mode) {
+            case APPEND -> InsertMode.APPEND;
+            case OVERWRITE -> InsertMode.OVERWRITE;
+        };
     }
 
     private static MemoryInsertTableHandle.InsertMode insertMode(io.trino.plugin.memory.protobuf.MemoryInsertTableHandle proto)
     {
-        InsertMode mode = proto.getMode();
-        // UNRECOGNIZED has no number, so report the raw wire value
-        if (mode == InsertMode.INSERT_MODE_UNSPECIFIED || mode == InsertMode.UNRECOGNIZED) {
-            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Invalid insert mode in protobuf memory insert table handle: " + proto.getModeValue());
-        }
-        return MemoryInsertTableHandle.InsertMode.valueOf(mode.name());
-    }
-
-    private static <H, P extends Message> ConnectorHandleCodec<H> codec(Function<H, P> toProto, Function<P, H> fromProto, Parser<P> parser)
-    {
-        return new ConnectorHandleCodec<>()
-        {
-            @Override
-            public byte[] serialize(H handle)
-            {
-                return toProto.apply(handle).toByteArray();
-            }
-
-            @Override
-            public H deserialize(byte[] bytes)
-            {
-                try {
-                    return fromProto.apply(parser.parseFrom(bytes));
-                }
-                catch (InvalidProtocolBufferException e) {
-                    throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to decode protobuf memory handle", e);
-                }
-            }
+        return switch (proto.getMode()) {
+            case APPEND -> MemoryInsertTableHandle.InsertMode.APPEND;
+            case OVERWRITE -> MemoryInsertTableHandle.InsertMode.OVERWRITE;
+            // UNRECOGNIZED has no number, so report the raw wire value
+            case INSERT_MODE_UNSPECIFIED, UNRECOGNIZED -> throw new TrinoException(GENERIC_INTERNAL_ERROR, "Invalid insert mode in protobuf memory insert table handle: " + proto.getModeValue());
         };
     }
 }

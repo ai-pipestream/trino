@@ -24,7 +24,6 @@ import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.transaction.IsolationLevel;
-import io.trino.spi.type.TypeManager;
 
 import java.util.Optional;
 
@@ -41,14 +40,20 @@ public class TpchConnector
     private final ConnectorHandleCodecProvider handleCodecProvider;
 
     @Inject
-    public TpchConnector(LifeCycleManager lifeCycleManager, ConnectorMetadata metadata, ConnectorSplitManager splitManager, ConnectorNodePartitioningProvider nodePartitioningProvider, ConnectorPageSourceProvider pageSourceProvider, TypeManager typeManager)
+    public TpchConnector(
+            LifeCycleManager lifeCycleManager,
+            ConnectorMetadata metadata,
+            ConnectorSplitManager splitManager,
+            ConnectorNodePartitioningProvider nodePartitioningProvider,
+            ConnectorPageSourceProvider pageSourceProvider,
+            TpchHandleCodecProvider handleCodecProvider)
     {
         this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
         this.metadata = requireNonNull(metadata, "metadata is null");
         this.splitManager = requireNonNull(splitManager, "splitManager is null");
         this.nodePartitioningProvider = requireNonNull(nodePartitioningProvider, "nodePartitioningProvider is null");
         this.pageSourceProvider = requireNonNull(pageSourceProvider, "pageSourceProvider is null");
-        this.handleCodecProvider = new TpchHandleCodecProvider(requireNonNull(typeManager, "typeManager is null"));
+        this.handleCodecProvider = requireNonNull(handleCodecProvider, "handleCodecProvider is null");
     }
 
     @Override
