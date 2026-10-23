@@ -73,14 +73,31 @@ public class ProtobufSchemaParser
     @Override
     public KafkaTopicFieldGroup parse(ConnectorSession session, String subject, ParsedSchema parsedSchema)
     {
-        ProtobufSchema protobufSchema = (ProtobufSchema) parsedSchema;
+        Descriptor descriptor = getMessageDescriptor(subject, (ProtobufSchema) parsedSchema);
         return new KafkaTopicFieldGroup(
                 ProtobufRowDecoder.NAME,
                 Optional.empty(),
                 Optional.of(subject),
-                Streams.concat(getFields(protobufSchema.toDescriptor()),
-                                getOneofs(protobufSchema.toDescriptor()))
+                Streams.concat(getFields(descriptor),
+                                getOneofs(descriptor))
                         .collect(toImmutableList()));
+    }
+
+    private static Descriptor getMessageDescriptor(String subject, ProtobufSchema protobufSchema)
+    {
+        // RecordNameStrategy and TopicRecordNameStrategy subjects end with the full name of the message.
+        // Other subjects do not identify a message, so the first message in the schema is used
+        Descriptor firstMessage = protobufSchema.toDescriptor();
+        return getMessageTypes(firstMessage.getFile().getMessageTypes())
+                .filter(descriptor -> subject.equals(descriptor.getFullName()) || subject.endsWith("-" + descriptor.getFullName()))
+                .findFirst()
+                .orElse(firstMessage);
+    }
+
+    private static Stream<Descriptor> getMessageTypes(List<Descriptor> descriptors)
+    {
+        return descriptors.stream()
+                .flatMap(descriptor -> Stream.concat(Stream.of(descriptor), getMessageTypes(descriptor.getNestedTypes())));
     }
 
     private Stream<KafkaTopicFieldDescription> getFields(Descriptor descriptor)
