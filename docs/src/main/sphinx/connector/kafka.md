@@ -437,7 +437,8 @@ a table without a key subject are written with a `null` key.
     set together with the password.
   -
 * - `kafka.confluent-schema-registry.basic-auth.password`
-  - Password for HTTP basic authentication to the schema registry.
+  - Password for HTTP basic authentication to the schema registry. Use an
+    `https` registry URL, so that the credentials are not sent in clear text.
   -
 * - `kafka.confluent-schema-registry.ssl.keystore.location`
   - Location of the key store file used to authenticate to the schema registry
@@ -462,7 +463,8 @@ a table without a key subject are written with a `null` key.
   - File format of the trust store file, `JKS` or `PKCS12`.
   - `JKS`
 * - `kafka.confluent-schema-registry.ssl.key.password`
-  - Password of the private key in the key store file.
+  - Password of the private key in the key store file. Defaults to the key
+    store password.
   -
 * - `kafka.confluent-schema-registry.ssl.endpoint-identification-algorithm`
   - Endpoint identification algorithm used to validate the schema registry
@@ -471,6 +473,9 @@ a table without a key subject are written with a `null` key.
   - `https`
 
 :::
+
+The `kafka.confluent-schema-registry.ssl.*` properties apply to schema registry
+URLs with the `https` scheme, such as `https://schema-registry.example.org:8081`.
 
 #### Confluent subject to table name mapping
 
