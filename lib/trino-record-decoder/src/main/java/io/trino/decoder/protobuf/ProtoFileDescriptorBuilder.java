@@ -67,6 +67,7 @@ import com.squareup.wire.schema.internal.parser.ProtoParser;
 import com.squareup.wire.schema.internal.parser.TypeElement;
 import io.trino.spi.TrinoException;
 
+import java.io.ByteArrayOutputStream;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -78,8 +79,10 @@ import java.util.OptionalInt;
 import java.util.stream.Stream;
 
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static com.google.protobuf.TextFormat.escapeBytes;
 import static io.trino.decoder.protobuf.ProtobufErrorCode.INVALID_PROTO_FILE;
 import static java.lang.String.format;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 import static java.util.function.Function.identity;
 
@@ -385,7 +388,13 @@ public final class ProtoFileDescriptorBuilder
         }
         oneofIndex.ifPresent(builder::setOneofIndex);
         if (field.getDefaultValue() != null) {
-            builder.setDefaultValue(field.getDefaultValue());
+            if (builder.getType() == Type.TYPE_BYTES) {
+                // the parser unescapes the literal, while the descriptor expects a bytes default C-escaped
+                builder.setDefaultValue(escapeBytes(toBytesDefault(field.getDefaultValue())));
+            }
+            else {
+                builder.setDefaultValue(field.getDefaultValue());
+            }
         }
         if (field.getJsonName() != null) {
             builder.setJsonName(field.getJsonName());
@@ -437,6 +446,25 @@ public final class ProtoFileDescriptorBuilder
             }
         }
         return builder.build();
+    }
+
+    /**
+     * The bytes of an unescaped bytes default. An octal or hex escape stands for one byte and is
+     * unescaped to the character of that value, so such characters are taken as bytes; other text
+     * is encoded as UTF-8, as {@code protoc} does.
+     */
+    private static byte[] toBytesDefault(String value)
+    {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(value.length());
+        value.codePoints().forEach(codePoint -> {
+            if (codePoint <= 0xFF) {
+                bytes.write(codePoint);
+            }
+            else {
+                bytes.writeBytes(Character.toString(codePoint).getBytes(UTF_8));
+            }
+        });
+        return bytes.toByteArray();
     }
 
     private static boolean toBoolean(OptionElement option)
