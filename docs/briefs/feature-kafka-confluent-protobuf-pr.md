@@ -94,11 +94,12 @@ into the commits above before the PR is opened.
 
 Tests:
 
-* `lib/trino-record-decoder`: `TestProtoFileDescriptorBuilder` (18 cases:
+* `lib/trino-record-decoder`: `TestProtoFileDescriptorBuilder` (28 cases:
   scalars, labels, enums, oneofs, maps, proto3 optional, well-known types,
   imports, public imports, transitive visibility, cycles, name resolution,
-  map entry naming, groups, duplicates) and `TestProtobufDecoder`; `verify
-  -P ci` and the error-prone compile pass.
+  map entry naming, groups, duplicates, package-less files, proto2 defaults
+  including escaped bytes and special float values, reserved declarations)
+  and `TestProtobufDecoder`; `verify -P ci` and the error-prone compile pass.
 * `plugin/trino-kafka`: `TestConfluentProtobufWireFormat` (including a
   byte-for-byte comparison with Confluent's `MessageIndexes`),
   `TestConfluentProtobufSchema`, `TestConfluentSchemaRegistryDynamicMessageProvider`,
@@ -106,9 +107,12 @@ Tests:
   (in-process HTTP and HTTPS registries: decode with references, encode
   with the latest schema, basic auth from the security config, 401, 404,
   dangling reference, registry down, TLS with and without a trust store,
-  host name verification and disabling it),
+  host name verification and disabling it, a registry that requires a
+  client certificate, and a client built from the connector configuration
+  through all properties providers),
   `TestConfluentSchemaRegistrySecurityConfig` (defaults, mappings, client
-  property names, validation),
+  property names, validation), connector startup with the registry
+  properties in `TestKafkaPlugin`,
   `TestProtobufSchemaParser`, `TestNoConfluentProtobufDependency`, protobuf
   cases in `TestConfluentSchemaRegistryTableDescriptionSupplier`, and new
   Docker cases in `TestKafkaProtobufWithSchemaRegistryMinimalFunctionality`
@@ -128,8 +132,11 @@ Tests:
   including schema references, schema evolution and `INSERT`. ({issue}`23736`)
 * Add `kafka.confluent-schema-registry.basic-auth.*` and
   `kafka.confluent-schema-registry.ssl.*` configuration properties for
-  authentication and TLS to the Confluent schema registry, and verify the
-  registry host name by default.
+  authentication and TLS to the Confluent schema registry.
+* {{breaking}} Verify the host name of an HTTPS Confluent schema registry
+  against its certificate. Set
+  `kafka.confluent-schema-registry.ssl.endpoint-identification-algorithm` to
+  `disabled` to restore the previous behavior.
 * Fix query failure when a protobuf record was written with a schema that
   lacks a field of a `ROW` column. ({issue}`20204`)
 * {{breaking}} Map protobuf fields declared `optional` in proto3 schemas of the
