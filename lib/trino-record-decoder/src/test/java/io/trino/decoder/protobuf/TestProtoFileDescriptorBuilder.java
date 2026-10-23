@@ -15,18 +15,23 @@ package io.trino.decoder.protobuf;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.protobuf.ByteString;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor.JavaType;
 import com.google.protobuf.Descriptors.FileDescriptor;
 import com.google.protobuf.DynamicMessage;
+import com.google.protobuf.Struct;
 import com.google.protobuf.Timestamp;
 import com.google.protobuf.TimestampProto;
+import com.google.protobuf.Value;
 import com.google.type.Date;
 import com.google.type.Money;
 import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -727,6 +732,232 @@ public class TestProtoFileDescriptorBuilder
         DynamicMessage parsed = DynamicMessage.parseFrom(pair, message.toByteArray());
         assertThat(parsed).isEqualTo(message);
         assertThat(parsed.getOneofFieldDescriptor(pair.getOneofs().getFirst()).getName()).isEqualTo("text");
+    }
+
+    @Test
+    public void testMapValueTypesKeepTheirQualification()
+    {
+        ImmutableMap<String, String> imports = ImmutableMap.of(
+                "common/item.proto",
+                """
+                syntax = "proto3";
+                package common;
+                message Item {
+                  string id = 1;
+                }
+                """);
+        FileDescriptor file = build(
+                "maps.proto",
+                """
+                syntax = "proto3";
+                package app;
+                import "common/item.proto";
+                import "google/protobuf/struct.proto";
+                enum Color {
+                  COLOR_UNSPECIFIED = 0;
+                  COLOR_RED = 1;
+                }
+                message Outer {
+                  message Inner {
+                    string id = 1;
+                  }
+                }
+                message Bundle {
+                  map<string, common.Item> items = 1;
+                  map<string, google.protobuf.Value> metadata = 2;
+                  map<string, Outer.Inner> inners = 3;
+                  map<string, Color> colors = 4;
+                  map<bool, Bundle> bundles = 5;
+                  map<fixed64, bytes> blobs = 6;
+                }
+                """,
+                importPath -> Optional.ofNullable(imports.get(importPath)));
+        Descriptor bundle = file.findMessageTypeByName("Bundle");
+        for (FieldDescriptor field : bundle.getFields()) {
+            assertThat(field.isMapField()).as("%s is a map field", field.getName()).isTrue();
+            assertThat(field.getMessageType().getOptions().getMapEntry()).isTrue();
+            assertThat(field.getMessageType().findFieldByName("key").getNumber()).isEqualTo(1);
+            assertThat(field.getMessageType().findFieldByName("value").getNumber()).isEqualTo(2);
+        }
+        assertThat(mapValue(bundle, "items").getMessageType().getFullName()).isEqualTo("common.Item");
+        assertThat(mapValue(bundle, "metadata").getMessageType()).isSameAs(Value.getDescriptor());
+        assertThat(mapValue(bundle, "inners").getMessageType().getFullName()).isEqualTo("app.Outer.Inner");
+        assertThat(mapValue(bundle, "colors").getEnumType().getFullName()).isEqualTo("app.Color");
+        assertThat(mapValue(bundle, "bundles").getMessageType()).isSameAs(bundle);
+        assertThat(bundle.findFieldByName("bundles").getMessageType().findFieldByName("key").getType()).isEqualTo(FieldDescriptor.Type.BOOL);
+        assertThat(bundle.findFieldByName("blobs").getMessageType().findFieldByName("key").getType()).isEqualTo(FieldDescriptor.Type.FIXED64);
+        assertThat(mapValue(bundle, "blobs").getType()).isEqualTo(FieldDescriptor.Type.BYTES);
+    }
+
+    @Test
+    public void testMapsAreWireCompatibleWithGeneratedCode()
+            throws Exception
+    {
+        // a twin of google.protobuf.Struct must accept the bytes of the real one, and vice versa
+        FileDescriptor file = build("mirror.proto",
+                """
+                syntax = "proto3";
+                import "google/protobuf/struct.proto";
+                message Mirror {
+                  map<string, google.protobuf.Value> fields = 1;
+                }
+                """);
+        Descriptor mirror = file.findMessageTypeByName("Mirror");
+        Struct struct = Struct.newBuilder()
+                .putFields("k", Value.newBuilder().setStringValue("v").build())
+                .putFields("n", Value.newBuilder().setNumberValue(1.5).build())
+                .build();
+
+        DynamicMessage parsed = DynamicMessage.parseFrom(mirror, struct.toByteArray());
+        FieldDescriptor fields = mirror.findFieldByName("fields");
+        assertThat(parsed.getRepeatedFieldCount(fields)).isEqualTo(2);
+        DynamicMessage entry = (DynamicMessage) parsed.getRepeatedField(fields, 0);
+        assertThat(entry.getField(entry.getDescriptorForType().findFieldByName("key"))).isEqualTo("k");
+        assertThat(entry.getField(entry.getDescriptorForType().findFieldByName("value"))).isEqualTo(Value.newBuilder().setStringValue("v").build());
+        assertThat(Struct.parseFrom(parsed.toByteArray())).isEqualTo(struct);
+    }
+
+    @Test
+    public void testPackageLessFiles()
+    {
+        ImmutableMap<String, String> imports = ImmutableMap.of(
+                "bare.proto",
+                """
+                syntax = "proto3";
+                message Bare {
+                  string id = 1;
+                  message Inner {}
+                  enum Kind {
+                    NONE = 0;
+                  }
+                }
+                """);
+        FileDescriptor file = build(
+                "user.proto",
+                """
+                syntax = "proto3";
+                package app;
+                import "bare.proto";
+                message User {
+                  Bare bare = 1;
+                  Bare.Inner inner = 2;
+                  .Bare.Kind kind = 3;
+                }
+                """,
+                importPath -> Optional.ofNullable(imports.get(importPath)));
+        FileDescriptor bare = file.getDependencies().getFirst();
+        assertThat(bare.getPackage()).isEmpty();
+        assertThat(bare.findMessageTypeByName("Bare").getFullName()).isEqualTo("Bare");
+        assertThat(bare.findMessageTypeByName("Bare").findNestedTypeByName("Inner").getFullName()).isEqualTo("Bare.Inner");
+        Descriptor user = file.findMessageTypeByName("User");
+        assertThat(user.getFullName()).isEqualTo("app.User");
+        assertThat(user.findFieldByName("bare").getMessageType().getFullName()).isEqualTo("Bare");
+        assertThat(user.findFieldByName("inner").getMessageType().getFullName()).isEqualTo("Bare.Inner");
+        assertThat(user.findFieldByName("kind").getEnumType().getFullName()).isEqualTo("Bare.Kind");
+    }
+
+    @Test
+    public void testBuiltInFilesTakePrecedenceOverResolver()
+    {
+        // a resolver that offers its own copy of a built-in file is never consulted for it
+        List<String> requested = new ArrayList<>();
+        FileDescriptor file = build(
+                "stamped.proto",
+                """
+                syntax = "proto3";
+                import "google/protobuf/timestamp.proto";
+                import "google/type/date.proto";
+                import "other.proto";
+                message Stamped {
+                  google.protobuf.Timestamp at = 1;
+                  google.type.Date on = 2;
+                  Other other = 3;
+                }
+                """,
+                importPath -> {
+                    requested.add(importPath);
+                    return switch (importPath) {
+                        case "google/protobuf/timestamp.proto", "google/type/date.proto" -> Optional.of("syntax = \"proto3\"; message Wrong {}");
+                        case "other.proto" -> Optional.of("syntax = \"proto3\"; message Other {}");
+                        default -> Optional.empty();
+                    };
+                });
+        assertThat(requested).containsExactly("other.proto");
+        Descriptor stamped = file.findMessageTypeByName("Stamped");
+        assertThat(stamped.findFieldByName("at").getMessageType()).isSameAs(Timestamp.getDescriptor());
+        assertThat(stamped.findFieldByName("on").getMessageType()).isSameAs(Date.getDescriptor());
+        assertThat(file.getDependencies()).extracting(FileDescriptor::getName).containsExactly("google/protobuf/timestamp.proto", "google/type/date.proto", "other.proto");
+    }
+
+    @Test
+    public void testProto2DefaultValues()
+    {
+        FileDescriptor file = build("defaults.proto",
+                """
+                syntax = "proto2";
+                message Defaults {
+                  optional int32 count = 1 [default = 42];
+                  optional sint64 offset = 2 [default = -7];
+                  optional double ratio = 3 [default = 0.25];
+                  optional float scale = 4 [default = -1.5];
+                  optional bool enabled = 5 [default = true];
+                  optional string label = 6 [default = "a \\"quoted\\" label"];
+                  optional bytes raw = 7 [default = "\\001\\002"];
+                  optional uint64 big = 8 [default = 18446744073709551615];
+                  optional string empty = 9;
+                  optional int32 zero = 10;
+                }
+                """);
+        Descriptor defaults = file.findMessageTypeByName("Defaults");
+        assertThat(defaults.findFieldByName("count").getDefaultValue()).isEqualTo(42);
+        assertThat(defaults.findFieldByName("offset").getDefaultValue()).isEqualTo(-7L);
+        assertThat(defaults.findFieldByName("ratio").getDefaultValue()).isEqualTo(0.25);
+        assertThat(defaults.findFieldByName("scale").getDefaultValue()).isEqualTo(-1.5f);
+        assertThat(defaults.findFieldByName("enabled").getDefaultValue()).isEqualTo(true);
+        assertThat(defaults.findFieldByName("label").getDefaultValue()).isEqualTo("a \"quoted\" label");
+        assertThat(defaults.findFieldByName("raw").getDefaultValue()).isEqualTo(ByteString.copyFrom(new byte[] {1, 2}));
+        assertThat(defaults.findFieldByName("big").getDefaultValue()).isEqualTo(-1L);
+        assertThat(defaults.findFieldByName("empty").getDefaultValue()).isEqualTo("");
+        assertThat(defaults.findFieldByName("zero").getDefaultValue()).isEqualTo(0);
+        assertThat(defaults.findFieldByName("count").hasDefaultValue()).isTrue();
+        assertThat(defaults.findFieldByName("zero").hasDefaultValue()).isFalse();
+    }
+
+    @Test
+    public void testReservedDeclarationsAndEmptyMessages()
+            throws Exception
+    {
+        FileDescriptor file = build("reserved.proto",
+                """
+                syntax = "proto3";
+                message Empty {}
+                message Reserved {
+                  reserved 2, 15 to 20, 1000 to max;
+                  reserved "old_name", "older_name";
+                  string name = 1;
+                  int32 last = 536870911;
+                }
+                enum Status {
+                  reserved 5;
+                  reserved "LEGACY";
+                  STATUS_UNSPECIFIED = 0;
+                }
+                """);
+        assertThat(file.findMessageTypeByName("Empty").getFields()).isEmpty();
+        Descriptor reserved = file.findMessageTypeByName("Reserved");
+        assertThat(reserved.getFields()).extracting(FieldDescriptor::getName).containsExactly("name", "last");
+        assertThat(reserved.findFieldByName("last").getNumber()).isEqualTo(536870911);
+        assertThat(file.findEnumTypeByName("Status").getValues()).hasSize(1);
+
+        DynamicMessage message = DynamicMessage.newBuilder(reserved)
+                .setField(reserved.findFieldByName("last"), 5)
+                .build();
+        assertThat(DynamicMessage.parseFrom(reserved, message.toByteArray())).isEqualTo(message);
+    }
+
+    private static FieldDescriptor mapValue(Descriptor message, String field)
+    {
+        return message.findFieldByName(field).getMessageType().findFieldByName("value");
     }
 
     private static FileDescriptor build(String fileName, String source)
