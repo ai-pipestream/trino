@@ -14,6 +14,7 @@
 package io.trino.plugin.kafka.schema.confluent;
 
 import com.google.common.collect.ImmutableMap;
+import io.airlift.configuration.validation.FileExists;
 import jakarta.validation.constraints.AssertTrue;
 import org.junit.jupiter.api.Test;
 
@@ -163,6 +164,59 @@ public class TestConfluentSchemaRegistrySecurityConfig
                 "keystorePasswordValid",
                 "kafka.confluent-schema-registry.ssl.keystore.password must be set when kafka.confluent-schema-registry.ssl.keystore.location is given",
                 AssertTrue.class);
+    }
+
+    @Test
+    public void testKeystoreLocationRequiredWithKeystorePasswords()
+            throws IOException
+    {
+        String message = "kafka.confluent-schema-registry.ssl.keystore.location must be set when kafka.confluent-schema-registry.ssl.keystore.password or kafka.confluent-schema-registry.ssl.key.password is given";
+        assertFailsValidation(new ConfluentSchemaRegistrySecurityConfig().setKeystorePassword("keystore-password"), "keystoreLocationValid", message, AssertTrue.class);
+        assertFailsValidation(new ConfluentSchemaRegistrySecurityConfig().setKeyPassword("key-password"), "keystoreLocationValid", message, AssertTrue.class);
+        assertValidates(new ConfluentSchemaRegistrySecurityConfig()
+                .setKeystoreLocation(Files.createTempFile("keystore", ".p12").toString())
+                .setKeystorePassword("keystore-password")
+                .setKeyPassword("key-password"));
+    }
+
+    @Test
+    public void testTruststoreLocationRequiredWithTruststorePassword()
+            throws IOException
+    {
+        assertFailsValidation(
+                new ConfluentSchemaRegistrySecurityConfig().setTruststorePassword("truststore-password"),
+                "truststoreLocationValid",
+                "kafka.confluent-schema-registry.ssl.truststore.location must be set when kafka.confluent-schema-registry.ssl.truststore.password is given",
+                AssertTrue.class);
+        assertValidates(new ConfluentSchemaRegistrySecurityConfig()
+                .setTruststoreLocation(Files.createTempFile("truststore", ".p12").toString())
+                .setTruststorePassword("truststore-password"));
+    }
+
+    @Test
+    public void testMissingStoreFile()
+    {
+        assertFailsValidation(
+                new ConfluentSchemaRegistrySecurityConfig().setTruststoreLocation("/not/a/real/path").setTruststorePassword("truststore-password"),
+                "truststoreLocation",
+                "file does not exist: /not/a/real/path",
+                FileExists.class);
+        assertFailsValidation(
+                new ConfluentSchemaRegistrySecurityConfig().setKeystoreLocation("/not/a/real/path").setKeystorePassword("keystore-password"),
+                "keystoreLocation",
+                "file does not exist: /not/a/real/path",
+                FileExists.class);
+    }
+
+    @Test
+    public void testBasicAuthPasswordMayContainColon()
+    {
+        // the client splits the user info at the first colon
+        ConfluentSchemaRegistrySecurityConfig config = new ConfluentSchemaRegistrySecurityConfig()
+                .setBasicAuthUser("trino")
+                .setBasicAuthPassword("se:cr:et");
+        assertValidates(config);
+        assertThat(config.getSchemaRegistryClientProperties()).containsEntry("basic.auth.user.info", "trino:se:cr:et");
     }
 
     @Test
