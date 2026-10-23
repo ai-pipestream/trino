@@ -154,6 +154,17 @@
                             <goal>run</goal>
                         </goals>
                         <phase>generate-sources</phase>
+                        <configuration>
+                            <addSources>main</addSources>
+                            <includeMavenTypes>direct</includeMavenTypes>
+                            <inputDirectories>
+                                <include>src/main/proto</include>
+                            </inputDirectories>
+                            <includeDirectories>
+                                <include>src/main/proto</include>
+                            </includeDirectories>
+                            <outputDirectory>target/generated-sources/protobuf</outputDirectory>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
