@@ -175,6 +175,29 @@ public class TestConfluentProtobufRowEncoderFactory
     }
 
     @Test
+    public void testSubjectNamingAnotherMessage()
+            throws Exception
+    {
+        MockSchemaRegistryClient client = createClient();
+        // the TopicRecordNameStrategy names the subject after the topic and the message, which is not the first one here
+        String subject = TOPIC + "-Other";
+        int schemaId = client.register(subject, schema(client, SCHEMA));
+        Descriptor other = ((ConfluentProtobufSchema) client.getSchemaById(schemaId)).getFileDescriptor().findMessageTypeByName("Other");
+        KafkaColumnHandle name = new KafkaColumnHandle("name", VARCHAR, "name", null, null, false, false, false);
+
+        try (RowEncoder encoder = createEncoder(client, Optional.of(subject), ImmutableList.of(name))) {
+            encoder.appendColumnValue(writeNativeValue(VARCHAR, utf8Slice("second")), 0);
+            byte[] record = encoder.toByteArray();
+            Frame frame = readFrame(record);
+            assertThat(frame.schemaId()).isEqualTo(schemaId);
+            assertThat(frame.messageIndexes()).containsExactly(1);
+            DynamicMessage decoded = new ConfluentSchemaRegistryDynamicMessageProvider(client).parseDynamicMessage(record);
+            assertThat(decoded.getDescriptorForType()).isSameAs(other);
+            assertThat(decoded.getField(other.findFieldByName("name"))).isEqualTo("second");
+        }
+    }
+
+    @Test
     public void testColumnMissingFromSchema()
             throws Exception
     {

@@ -40,6 +40,7 @@ import io.trino.decoder.FieldValueProvider;
 import io.trino.decoder.RowDecoder;
 import io.trino.decoder.RowDecoderSpec;
 import io.trino.decoder.protobuf.DummyDescriptorProvider;
+import io.trino.decoder.protobuf.DynamicMessageProvider;
 import io.trino.decoder.protobuf.ProtobufRowDecoder;
 import io.trino.decoder.protobuf.ProtobufRowDecoderFactory;
 import io.trino.plugin.kafka.KafkaColumnHandle;
@@ -381,7 +382,7 @@ public class TestConfluentSchemaRegistryDynamicMessageProvider
         KafkaColumnHandle info = new KafkaColumnHandle("info", infoType, "info", null, null, false, false, false);
         KafkaColumnHandle text = new KafkaColumnHandle("text", VARCHAR, "info/text", null, null, false, false, false);
         RowDecoder decoder = new ProtobufRowDecoderFactory(new ConfluentSchemaRegistryDynamicMessageProvider.Factory(client), TESTING_TYPE_MANAGER, new DummyDescriptorProvider())
-                .create(TestingConnectorSession.SESSION, new RowDecoderSpec(ProtobufRowDecoder.NAME, ImmutableMap.of("dataSchema", readerSchemaReference(newId)), ImmutableSet.of(name, info, text)));
+                .create(TestingConnectorSession.SESSION, new RowDecoderSpec(ProtobufRowDecoder.NAME, ImmutableMap.of("dataSchema", readerSchemaReference(newId, ((ConfluentProtobufSchema) client.getSchemaById(newId)).getMessageDescriptor())), ImmutableSet.of(name, info, text)));
 
         Descriptor oldDescriptor = ((ConfluentProtobufSchema) client.getSchemaById(oldId)).getMessageDescriptor();
         Descriptor oldDetail = oldDescriptor.findFieldByName("detail").getMessageType();
@@ -402,18 +403,32 @@ public class TestConfluentSchemaRegistryDynamicMessageProvider
     {
         MockSchemaRegistryClient client = createClient();
         int schemaId = client.register("topic-value", schema(client, SCHEMA));
+        ConfluentProtobufSchema schema = (ConfluentProtobufSchema) client.getSchemaById(schemaId);
+        Descriptor first = schema.getMessageDescriptor();
+        Descriptor deep = first.findNestedTypeByName("Detail").findNestedTypeByName("Deep");
         ConfluentSchemaRegistryDynamicMessageProvider.Factory factory = new ConfluentSchemaRegistryDynamicMessageProvider.Factory(client);
 
         assertThat(factory.create(Optional.empty()).getReaderDescriptor()).isEmpty();
-        assertThat(factory.create(Optional.of(readerSchemaReference(schemaId))).getReaderDescriptor())
-                .contains(((ConfluentProtobufSchema) client.getSchemaById(schemaId)).getMessageDescriptor());
+        assertThat(readerSchemaReference(schemaId, first)).isEqualTo("schema-registry-id:" + schemaId + ";message=schema");
+        assertThat(factory.create(Optional.of(readerSchemaReference(schemaId, first))).getReaderDescriptor()).contains(first);
+        // the reader can be a nested message, and is the same descriptor instance records decode with
+        assertThat(readerSchemaReference(schemaId, deep)).isEqualTo("schema-registry-id:" + schemaId + ";message=schema.Detail.Deep");
+        DynamicMessageProvider deepProvider = factory.create(Optional.of(readerSchemaReference(schemaId, deep)));
+        assertThat(deepProvider.getReaderDescriptor()).contains(deep);
+        assertThat(deepProvider.parseDynamicMessage(frame(schemaId, messageIndexes(deep), new byte[0])).getDescriptorForType()).isSameAs(deepProvider.getReaderDescriptor().orElseThrow());
         assertTrinoException(
-                () -> factory.create(Optional.of(readerSchemaReference(12345))).getReaderDescriptor(),
+                () -> factory.create(Optional.of(readerSchemaReference(12345, first))).getReaderDescriptor(),
                 KAFKA_SCHEMA_ERROR,
                 "Schema id 12345 does not exist in the schema registry");
-        assertThatThrownBy(() -> factory.create(Optional.of(SCHEMA)))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageStartingWith("Data schema is not a schema registry reference: syntax");
+        assertTrinoException(
+                () -> factory.create(Optional.of("schema-registry-id:" + schemaId + ";message=schema.Missing")).getReaderDescriptor(),
+                KAFKA_SCHEMA_ERROR,
+                "Schema id " + schemaId + " does not declare message schema.Missing");
+        for (String reference : ImmutableList.of(SCHEMA, "schema-registry-id:" + schemaId, "schema-registry-id:" + schemaId + ";message=", "schema-registry-id:x;message=schema", "schema-registry-id:99999999999;message=schema")) {
+            assertThatThrownBy(() -> factory.create(Optional.of(reference)))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageStartingWith("Data schema is not a schema registry reference: " + reference.substring(0, 6));
+        }
     }
 
     @Test

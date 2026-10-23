@@ -14,6 +14,7 @@
 package io.trino.plugin.kafka.schema.confluent;
 
 import com.google.common.collect.ImmutableList;
+import com.google.protobuf.Descriptors.Descriptor;
 import io.confluent.kafka.schemaregistry.ParsedSchema;
 import io.confluent.kafka.schemaregistry.avro.AvroSchema;
 import io.confluent.kafka.schemaregistry.avro.AvroSchemaProvider;
@@ -89,8 +90,46 @@ public class TestConfluentContentSchemaProvider
         // a protobuf schema compiles only with its registry references, so the table refers to the schema by id
         ConfluentContentSchemaProvider schemaProvider = new ConfluentContentSchemaProvider(mockSchemaRegistryClient);
         KafkaTableHandle tableHandle = new KafkaTableHandle("default", TOPIC, TOPIC, ProtobufRowDecoder.NAME, ProtobufRowDecoder.NAME, Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(SUBJECT_NAME), ImmutableList.of(), TupleDomain.all());
-        assertThat(schemaProvider.getMessage(tableHandle)).contains(readerSchemaReference(schemaId));
+        Descriptor message = ((ConfluentProtobufSchema) mockSchemaRegistryClient.getSchemaById(schemaId)).getMessageDescriptor();
+        assertThat(schemaProvider.getMessage(tableHandle)).contains(readerSchemaReference(schemaId, message));
         assertThat(schemaProvider.getKey(tableHandle)).isEmpty();
+    }
+
+    @Test
+    public void testProtobufReaderIsTheSubjectMessage()
+            throws Exception
+    {
+        MockSchemaRegistryClient mockSchemaRegistryClient = new MockSchemaRegistryClient(ImmutableList.of(new AvroSchemaProvider(), new ConfluentProtobufSchemaProvider()));
+        String schema =
+                """
+                syntax = "proto3";
+                package shop;
+                message Header {
+                  string name = 1;
+                }
+                message Order {
+                  int64 id = 1;
+                  message Line {
+                    string sku = 1;
+                  }
+                }
+                """;
+        // a record name strategy names the subject after the message the records hold
+        int orderId = mockSchemaRegistryClient.register("shop.Order", new ConfluentProtobufSchema(schema, ImmutableList.of(), mockSchemaRegistryClient));
+        int lineId = mockSchemaRegistryClient.register(TOPIC + "-shop.Order.Line", new ConfluentProtobufSchema(schema, ImmutableList.of(), mockSchemaRegistryClient));
+        int headerId = mockSchemaRegistryClient.register(TOPIC + "-value", new ConfluentProtobufSchema(schema, ImmutableList.of(), mockSchemaRegistryClient));
+        ConfluentProtobufSchema parsed = (ConfluentProtobufSchema) mockSchemaRegistryClient.getSchemaById(orderId);
+        Descriptor order = parsed.getFileDescriptor().findMessageTypeByName("Order");
+
+        ConfluentContentSchemaProvider schemaProvider = new ConfluentContentSchemaProvider(mockSchemaRegistryClient);
+        assertThat(schemaProvider.getMessage(tableHandle("shop.Order"))).contains(readerSchemaReference(orderId, order));
+        assertThat(schemaProvider.getMessage(tableHandle(TOPIC + "-shop.Order.Line"))).contains(readerSchemaReference(lineId, order.findNestedTypeByName("Line")));
+        assertThat(schemaProvider.getMessage(tableHandle(TOPIC + "-value"))).contains(readerSchemaReference(headerId, parsed.getMessageDescriptor()));
+    }
+
+    private static KafkaTableHandle tableHandle(String messageSubject)
+    {
+        return new KafkaTableHandle("default", TOPIC, TOPIC, ProtobufRowDecoder.NAME, ProtobufRowDecoder.NAME, Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(messageSubject), ImmutableList.of(), TupleDomain.all());
     }
 
     private static String getAvroSchemaWithReference()

@@ -25,6 +25,7 @@ import java.io.IOException;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkState;
+import static io.trino.plugin.kafka.schema.confluent.ConfluentSchemaRegistryDynamicMessageProvider.readerSchemaReference;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
@@ -50,9 +51,9 @@ public class ConfluentContentSchemaProvider
         try {
             SchemaMetadata schemaMetadata = schemaRegistryClient.getLatestSchemaMetadata(subject.get());
             ParsedSchema schema = schemaRegistryClient.getSchemaBySubjectAndId(subject.get(), schemaMetadata.getId());
-            if (schema instanceof ConfluentProtobufSchema) {
+            if (schema instanceof ConfluentProtobufSchema protobufSchema) {
                 // the decoder fetches the schema from the registry, as its text alone does not compile when it has references
-                return Optional.of(ConfluentSchemaRegistryDynamicMessageProvider.readerSchemaReference(schemaMetadata.getId()));
+                return Optional.of(readerSchemaReference(schemaMetadata.getId(), protobufSchema.getMessageDescriptor(subject.get())));
             }
             return Optional.ofNullable(schema.rawSchema())
                     .map(Object::toString);
