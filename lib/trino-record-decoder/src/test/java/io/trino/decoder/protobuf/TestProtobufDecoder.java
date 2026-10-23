@@ -20,6 +20,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.io.Resources;
 import com.google.protobuf.Any;
+import com.google.protobuf.ByteString;
 import com.google.protobuf.Descriptors;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
@@ -75,6 +76,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.IntStream.range;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNoException;
 
 public class TestProtobufDecoder
 {
@@ -973,6 +975,312 @@ public class TestProtobufDecoder
         // integer types that share an encoding are the same field
         checkValue(decodedRow, countColumn, 5L);
         checkValue(decodedRow, totalColumn, 6L);
+    }
+
+    @Test
+    public void testWireCompatibleTypeChangesAreReadAsReaderType()
+            throws Exception
+    {
+        // the writer changed each field to another type with the same encoding, which reads the same bytes differently
+        Descriptor reader = messageDescriptor(
+                """
+                syntax = "proto3";
+                message schema {
+                  bool flag = 1;
+                  int32 small = 2;
+                  int64 large = 3;
+                  enum Color {
+                    RED = 0;
+                    GREEN = 1;
+                    BLUE = 2;
+                  }
+                  Color color = 4;
+                  int64 color_number = 5;
+                  string text = 6;
+                  bytes data = 7;
+                  sint64 delta = 8;
+                  repeated int64 counts = 9;
+                  map<string, int64> totals = 10;
+                  enum Size {
+                    SMALL = 0;
+                    LARGE = 1;
+                  }
+                  Size size = 11;
+                  sint32 narrow = 12;
+                }
+                """);
+        Descriptor writer = messageDescriptor(
+                """
+                syntax = "proto3";
+                message schema {
+                  int32 flag = 1;
+                  int64 small = 2;
+                  uint32 large = 3;
+                  int32 color = 4;
+                  enum Color {
+                    RED = 0;
+                    GREEN = 1;
+                    BLUE = 2;
+                  }
+                  Color color_number = 5;
+                  bytes text = 6;
+                  string data = 7;
+                  sint32 delta = 8;
+                  repeated int32 counts = 9;
+                  map<string, int32> totals = 10;
+                  enum Size {
+                    TINY = 0;
+                    HUGE = 1;
+                  }
+                  Size size = 11;
+                  sint64 narrow = 12;
+                }
+                """);
+        DecoderTestColumnHandle flagColumn = new DecoderTestColumnHandle(0, "flag", BOOLEAN, "flag", null, null, false, false, false);
+        DecoderTestColumnHandle smallColumn = new DecoderTestColumnHandle(1, "small", INTEGER, "small", null, null, false, false, false);
+        DecoderTestColumnHandle largeColumn = new DecoderTestColumnHandle(2, "large", BIGINT, "large", null, null, false, false, false);
+        DecoderTestColumnHandle colorColumn = new DecoderTestColumnHandle(3, "color", VARCHAR, "color", null, null, false, false, false);
+        DecoderTestColumnHandle colorNumberColumn = new DecoderTestColumnHandle(4, "color_number", BIGINT, "color_number", null, null, false, false, false);
+        DecoderTestColumnHandle textColumn = new DecoderTestColumnHandle(5, "text", VARCHAR, "text", null, null, false, false, false);
+        DecoderTestColumnHandle dataColumn = new DecoderTestColumnHandle(6, "data", VARBINARY, "data", null, null, false, false, false);
+        DecoderTestColumnHandle deltaColumn = new DecoderTestColumnHandle(7, "delta", BIGINT, "delta", null, null, false, false, false);
+        DecoderTestColumnHandle countsColumn = new DecoderTestColumnHandle(8, "counts", new ArrayType(BIGINT), "counts", null, null, false, false, false);
+        MapType totalsType = new MapType(VARCHAR, BIGINT, TESTING_TYPE_MANAGER.getTypeOperators());
+        DecoderTestColumnHandle totalsColumn = new DecoderTestColumnHandle(9, "totals", totalsType, "totals", null, null, false, false, false);
+        DecoderTestColumnHandle sizeColumn = new DecoderTestColumnHandle(10, "size", VARCHAR, "size", null, null, false, false, false);
+        DecoderTestColumnHandle narrowColumn = new DecoderTestColumnHandle(11, "narrow", INTEGER, "narrow", null, null, false, false, false);
+        ProtobufRowDecoder decoder = new ProtobufRowDecoder(
+                new EvolvedSchemaProvider(writer, Optional.of(reader)),
+                ImmutableSet.of(flagColumn, smallColumn, largeColumn, colorColumn, colorNumberColumn, textColumn, dataColumn, deltaColumn, countsColumn, totalsColumn, sizeColumn, narrowColumn),
+                TESTING_TYPE_MANAGER,
+                new FileDescriptorProvider());
+
+        Descriptor totalsEntry = writer.findFieldByName("totals").getMessageType();
+        byte[] record = DynamicMessage.newBuilder(writer)
+                .setField(writer.findFieldByName("flag"), 7)
+                .setField(writer.findFieldByName("small"), (1L << 32) + 5)
+                .setField(writer.findFieldByName("large"), (int) 3_000_000_000L)
+                .setField(writer.findFieldByName("color"), 2)
+                .setField(writer.findFieldByName("color_number"), writer.findEnumTypeByName("Color").findValueByName("BLUE"))
+                .setField(writer.findFieldByName("text"), ByteString.copyFromUtf8("héllo"))
+                .setField(writer.findFieldByName("data"), "bytes")
+                .setField(writer.findFieldByName("delta"), -5)
+                .addRepeatedField(writer.findFieldByName("counts"), 1)
+                .addRepeatedField(writer.findFieldByName("counts"), -2)
+                .addRepeatedField(writer.findFieldByName("totals"), DynamicMessage.newBuilder(totalsEntry)
+                        .setField(totalsEntry.findFieldByName("key"), "a")
+                        .setField(totalsEntry.findFieldByName("value"), -3)
+                        .build())
+                .setField(writer.findFieldByName("size"), writer.findEnumTypeByName("Size").findValueByName("HUGE"))
+                .setField(writer.findFieldByName("narrow"), (1L << 31) + 7)
+                .build()
+                .toByteArray();
+        Map<DecoderColumnHandle, FieldValueProvider> decodedRow = decoder.decodeRow(record).orElseThrow();
+
+        checkValue(decodedRow, flagColumn, true);
+        checkValue(decodedRow, smallColumn, 5);
+        checkValue(decodedRow, largeColumn, 3_000_000_000L);
+        checkValue(decodedRow, colorColumn, "BLUE");
+        checkValue(decodedRow, colorNumberColumn, 2);
+        checkValue(decodedRow, textColumn, "héllo");
+        checkValue(decodedRow, dataColumn, Slices.utf8Slice("bytes"));
+        checkValue(decodedRow, deltaColumn, -5);
+        Block counts = (Block) decodedRow.get(countsColumn).getObject();
+        assertThat(counts.getPositionCount()).isEqualTo(2);
+        assertThat(BIGINT.getLong(counts, 0)).isEqualTo(1);
+        assertThat(BIGINT.getLong(counts, 1)).isEqualTo(-2);
+        SqlMap totals = (SqlMap) decodedRow.get(totalsColumn).getObject();
+        assertThat(totals.getSize()).isEqualTo(1);
+        assertThat(BIGINT.getLong(totals.getRawValueBlock(), totals.getRawOffset())).isEqualTo(-3);
+        // an enum value renamed in the reader schema reads with its new name
+        checkValue(decodedRow, sizeColumn, "LARGE");
+        // a 32 bit field reads the low 32 bits of the zigzag encoded value
+        checkValue(decodedRow, narrowColumn, 7);
+
+        // these are the values protobuf reads with the reader schema
+        DynamicMessage readerMessage = DynamicMessage.parseFrom(reader, record);
+        assertThat(readerMessage.getField(reader.findFieldByName("flag"))).isEqualTo(true);
+        assertThat(readerMessage.getField(reader.findFieldByName("small"))).isEqualTo(5);
+        assertThat(readerMessage.getField(reader.findFieldByName("large"))).isEqualTo(3_000_000_000L);
+        assertThat(readerMessage.getField(reader.findFieldByName("color"))).hasToString("BLUE");
+        assertThat(readerMessage.getField(reader.findFieldByName("color_number"))).isEqualTo(2L);
+        assertThat(readerMessage.getField(reader.findFieldByName("delta"))).isEqualTo(-5L);
+        assertThat(readerMessage.getField(reader.findFieldByName("counts"))).isEqualTo(ImmutableList.of(1L, -2L));
+        assertThat(readerMessage.getField(reader.findFieldByName("size"))).hasToString("LARGE");
+        assertThat(readerMessage.getField(reader.findFieldByName("narrow"))).isEqualTo(7);
+    }
+
+    @Test
+    public void testIncompatibleMessageTypesAreNull()
+    {
+        Descriptor reader = messageDescriptor(
+                """
+                syntax = "proto3";
+                import "google/protobuf/timestamp.proto";
+                message schema {
+                  google.protobuf.Timestamp created = 1;
+                  message Detail {
+                    int64 seconds = 1;
+                  }
+                  Detail detail = 2;
+                  map<string, string> labels = 3;
+                  map<string, string> notes = 4;
+                }
+                """);
+        Descriptor writer = messageDescriptor(
+                """
+                syntax = "proto3";
+                import "google/protobuf/timestamp.proto";
+                message schema {
+                  message Instant {
+                    int64 seconds = 1;
+                  }
+                  Instant created = 1;
+                  google.protobuf.Timestamp detail = 2;
+                  map<int32, string> labels = 3;
+                  map<string, bytes> notes = 4;
+                }
+                """);
+        DecoderTestColumnHandle createdColumn = new DecoderTestColumnHandle(0, "created", TIMESTAMP_MICROS, "created", null, null, false, false, false);
+        DecoderTestColumnHandle detailColumn = new DecoderTestColumnHandle(1, "detail", RowType.from(ImmutableList.of(RowType.field("seconds", BIGINT))), "detail", null, null, false, false, false);
+        DecoderTestColumnHandle labelsColumn = new DecoderTestColumnHandle(2, "labels", new MapType(VARCHAR, VARCHAR, TESTING_TYPE_MANAGER.getTypeOperators()), "labels", null, null, false, false, false);
+        DecoderTestColumnHandle notesColumn = new DecoderTestColumnHandle(3, "notes", new MapType(VARCHAR, VARCHAR, TESTING_TYPE_MANAGER.getTypeOperators()), "notes", null, null, false, false, false);
+        ProtobufRowDecoder decoder = new ProtobufRowDecoder(
+                new EvolvedSchemaProvider(writer, Optional.of(reader)),
+                ImmutableSet.of(createdColumn, detailColumn, labelsColumn, notesColumn),
+                TESTING_TYPE_MANAGER,
+                new FileDescriptorProvider());
+
+        Descriptor instant = writer.findFieldByName("created").getMessageType();
+        Descriptor labelsEntry = writer.findFieldByName("labels").getMessageType();
+        Descriptor notesEntry = writer.findFieldByName("notes").getMessageType();
+        byte[] record = DynamicMessage.newBuilder(writer)
+                .setField(writer.findFieldByName("created"), DynamicMessage.newBuilder(instant).setField(instant.findFieldByName("seconds"), 1L).build())
+                .setField(writer.findFieldByName("detail"), Timestamp.newBuilder().setSeconds(2).build())
+                .addRepeatedField(writer.findFieldByName("labels"), DynamicMessage.newBuilder(labelsEntry)
+                        .setField(labelsEntry.findFieldByName("key"), 1)
+                        .setField(labelsEntry.findFieldByName("value"), "one")
+                        .build())
+                .addRepeatedField(writer.findFieldByName("notes"), DynamicMessage.newBuilder(notesEntry)
+                        .setField(notesEntry.findFieldByName("key"), "a")
+                        .setField(notesEntry.findFieldByName("value"), ByteString.copyFromUtf8("b"))
+                        .build())
+                .build()
+                .toByteArray();
+        Map<DecoderColumnHandle, FieldValueProvider> decodedRow = decoder.decodeRow(record).orElseThrow();
+
+        // a message type mapped to a column type of its own is not interchangeable with other message types
+        assertThat(decodedRow.get(createdColumn).isNull()).isTrue();
+        assertThat(decodedRow.get(detailColumn).isNull()).isTrue();
+        // the key and value of a map must be compatible like fields
+        assertThat(decodedRow.get(labelsColumn).isNull()).isTrue();
+        SqlMap notes = (SqlMap) decodedRow.get(notesColumn).getObject();
+        assertThat(VARCHAR.getSlice(notes.getRawValueBlock(), notes.getRawOffset()).toStringUtf8()).isEqualTo("b");
+    }
+
+    @Test
+    public void testRecordOfAnotherMessageTypeIsReadByName()
+    {
+        Descriptor reader = messageDescriptor(
+                """
+                syntax = "proto3";
+                message schema {
+                  string name = 1;
+                  int64 count = 2;
+                }
+                """);
+        Descriptor writer = ProtobufUtils.getFileDescriptor(
+                """
+                syntax = "proto3";
+                message other {
+                  int64 count = 1;
+                  string name = 2;
+                }
+                """).findMessageTypeByName("other");
+        DecoderTestColumnHandle nameColumn = new DecoderTestColumnHandle(0, "name", VARCHAR, "name", null, null, false, false, false);
+        DecoderTestColumnHandle countColumn = new DecoderTestColumnHandle(1, "count", BIGINT, "count", null, null, false, false, false);
+        ProtobufRowDecoder decoder = new ProtobufRowDecoder(
+                new EvolvedSchemaProvider(writer, Optional.of(reader)),
+                ImmutableSet.of(nameColumn, countColumn),
+                TESTING_TYPE_MANAGER,
+                new FileDescriptorProvider());
+
+        byte[] record = DynamicMessage.newBuilder(writer)
+                .setField(writer.findFieldByName("count"), 3L)
+                .setField(writer.findFieldByName("name"), "Trino")
+                .build()
+                .toByteArray();
+        Map<DecoderColumnHandle, FieldValueProvider> decodedRow = decoder.decodeRow(record).orElseThrow();
+
+        // field numbers identify fields only within a message type
+        checkValue(decodedRow, nameColumn, "Trino");
+        checkValue(decodedRow, countColumn, 3);
+    }
+
+    @Test
+    public void testUnsetFieldsWithPresenceAreNull()
+    {
+        Descriptor descriptor = messageDescriptor(
+                """
+                syntax = "proto2";
+                message schema {
+                  optional int64 count = 1;
+                  optional string label = 2 [default = "none"];
+                  required int32 id = 3;
+                  oneof choice {
+                    int64 number = 4;
+                    string word = 5;
+                  }
+                  repeated int64 values = 6;
+                }
+                """);
+        DecoderTestColumnHandle countColumn = new DecoderTestColumnHandle(0, "count", BIGINT, "count", null, null, false, false, false);
+        DecoderTestColumnHandle labelColumn = new DecoderTestColumnHandle(1, "label", VARCHAR, "label", null, null, false, false, false);
+        DecoderTestColumnHandle idColumn = new DecoderTestColumnHandle(2, "id", INTEGER, "id", null, null, false, false, false);
+        DecoderTestColumnHandle numberColumn = new DecoderTestColumnHandle(3, "number", BIGINT, "number", null, null, false, false, false);
+        DecoderTestColumnHandle wordColumn = new DecoderTestColumnHandle(4, "word", VARCHAR, "word", null, null, false, false, false);
+        DecoderTestColumnHandle valuesColumn = new DecoderTestColumnHandle(5, "values", new ArrayType(BIGINT), "values", null, null, false, false, false);
+        ProtobufRowDecoder decoder = new ProtobufRowDecoder(
+                new FixedSchemaDynamicMessageProvider(descriptor),
+                ImmutableSet.of(countColumn, labelColumn, idColumn, numberColumn, wordColumn, valuesColumn),
+                TESTING_TYPE_MANAGER,
+                new FileDescriptorProvider());
+
+        byte[] record = DynamicMessage.newBuilder(descriptor)
+                .setField(descriptor.findFieldByName("id"), 1)
+                .setField(descriptor.findFieldByName("word"), "w")
+                .build()
+                .toByteArray();
+        Map<DecoderColumnHandle, FieldValueProvider> decodedRow = decoder.decodeRow(record).orElseThrow();
+
+        // an unset field that tracks presence is NULL, even with a declared default value
+        assertThat(decodedRow.get(countColumn).isNull()).isTrue();
+        assertThat(decodedRow.get(labelColumn).isNull()).isTrue();
+        assertThat(decodedRow.get(numberColumn).isNull()).isTrue();
+        checkValue(decodedRow, idColumn, 1);
+        checkValue(decodedRow, wordColumn, "w");
+        // a repeated field has no presence: unset, it is empty
+        assertThat(((Block) decodedRow.get(valuesColumn).getObject()).getPositionCount()).isZero();
+    }
+
+    @Test
+    public void testDecoderWithoutColumnsDoesNotLookUpReaderSchema()
+    {
+        DynamicMessageProvider provider = new DynamicMessageProvider()
+        {
+            @Override
+            public DynamicMessage parseDynamicMessage(byte[] data)
+            {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public Optional<Descriptor> getReaderDescriptor()
+            {
+                throw new AssertionError("reader schema looked up");
+            }
+        };
+        assertThatNoException().isThrownBy(() -> new ProtobufRowDecoder(provider, ImmutableSet.of(), TESTING_TYPE_MANAGER, new FileDescriptorProvider()));
     }
 
     private static Descriptor messageDescriptor(String protoFile)

@@ -58,8 +58,11 @@ import static com.fasterxml.jackson.databind.SerializationFeature.ORDER_MAP_ENTR
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static io.trino.decoder.protobuf.ProtobufFieldMapping.findReaderField;
 import static io.trino.decoder.protobuf.ProtobufFieldMapping.findWriterField;
 import static io.trino.decoder.protobuf.ProtobufFieldMapping.getReaderFieldType;
+import static io.trino.decoder.protobuf.ProtobufFieldMapping.getReaderType;
+import static io.trino.decoder.protobuf.ProtobufFieldMapping.toReaderValue;
 import static io.trino.decoder.protobuf.ProtobufValueProvider.isUnsetPresenceField;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.GENERIC_USER_ERROR;
@@ -158,11 +161,12 @@ public class ProtobufColumnDecoder
     {
         Object value = message;
         Optional<Descriptor> valueDescriptor = Optional.of(message.getDescriptorForType());
-        Optional<Descriptor> readerType = readerDescriptor;
+        Optional<Descriptor> readerType = getReaderType(readerDescriptor, message.getDescriptorForType());
         for (String pathElement : Splitter.on('/').omitEmptyStrings().split(columnMapping)) {
+            Optional<FieldDescriptor> readerField = findReaderField(readerType, pathElement);
             FieldDescriptor fieldDescriptor = null;
             if (valueDescriptor.isPresent()) {
-                fieldDescriptor = findWriterField(valueDescriptor.get(), readerType, pathElement);
+                fieldDescriptor = findWriterField(valueDescriptor.get(), readerField, pathElement);
             }
             if (fieldDescriptor == null) {
                 // Search the message to see if this column is oneof type
@@ -178,9 +182,9 @@ public class ProtobufColumnDecoder
             if (isUnsetPresenceField((DynamicMessage) value, fieldDescriptor)) {
                 return new LocatedValue(null, Optional.empty());
             }
-            value = ((DynamicMessage) value).getField(fieldDescriptor);
+            value = toReaderValue(readerField, fieldDescriptor, ((DynamicMessage) value).getField(fieldDescriptor));
             valueDescriptor = getDescriptor(fieldDescriptor);
-            readerType = getReaderFieldType(readerType, pathElement);
+            readerType = getReaderFieldType(readerField);
         }
 
         if (valueDescriptor.isPresent() && valueDescriptor.get().getFullName().equals(ANY_TYPE_NAME)) {

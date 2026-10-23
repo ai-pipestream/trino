@@ -350,6 +350,59 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
     }
 
     @Test
+    public void testWidenedFieldsAndRenamedEnumValues()
+            throws Exception
+    {
+        String topic = "topic-widened-fields";
+        assertNotExists(topic);
+
+        Descriptor initial = getFileDescriptor(
+                """
+                syntax = "proto3";
+                message schema {
+                  int32 count = 1;
+                  enum Status {
+                    ACTIVE = 0;
+                    RETIRED = 1;
+                  }
+                  Status status = 2;
+                }
+                """).findMessageTypeByName(DEFAULT_MESSAGE);
+        DynamicMessage initialMessage = DynamicMessage.newBuilder(initial)
+                .setField(initial.findFieldByName("count"), -5)
+                .setField(initial.findFieldByName("status"), initial.findEnumTypeByName("Status").findValueByName("RETIRED"))
+                .build();
+        testingKafka.sendMessages(Stream.of(new ProducerRecord<>(topic, createKeySchema(0, getKeySchema()), initialMessage)), producerProperties());
+        waitUntilTableExists(topic);
+        assertQuery(format("SELECT count, status FROM %s", toDoubleQuoted(topic)), "VALUES (-5, 'RETIRED')");
+
+        Descriptor evolved = getFileDescriptor(
+                """
+                syntax = "proto3";
+                message schema {
+                  int64 count = 1;
+                  enum Status {
+                    ACTIVE = 0;
+                    INACTIVE = 1;
+                  }
+                  Status status = 2;
+                }
+                """).findMessageTypeByName(DEFAULT_MESSAGE);
+        DynamicMessage evolvedMessage = DynamicMessage.newBuilder(evolved)
+                .setField(evolved.findFieldByName("count"), 1L << 40)
+                .setField(evolved.findFieldByName("status"), evolved.findEnumTypeByName("Status").findValueByName("INACTIVE"))
+                .build();
+        testingKafka.sendMessages(Stream.of(new ProducerRecord<>(topic, createKeySchema(1, getKeySchema()), evolvedMessage)), producerProperties());
+
+        // records written before the change are read the way the latest schema reads their bytes
+        assertQueryEventually(
+                getSession(),
+                format("SELECT key, count, status FROM %s", toDoubleQuoted(topic)),
+                "VALUES (0, -5, 'INACTIVE'), (1, 1099511627776, 'INACTIVE')",
+                io.airlift.units.Duration.valueOf("5s"));
+    }
+
+    @Test
     public void testUnsupportedRecursiveDataTypes()
             throws Exception
     {

@@ -381,8 +381,11 @@ table description supplier are:
 - Some Protobuf specific types like `oneof` and `any` are supported and mapped to JSON.
 - Protobuf records are decoded with the schema they were written with, so a
   topic can hold records written with different versions of its schema. A field
-  is identified by its field number, so a renamed field keeps its column.
-  Columns whose field a record's schema does not define are `NULL`.
+  is identified by its field number, so a renamed field keeps its column, and
+  a field whose type changed to another type with the same encoding, such as
+  `int32` to `int64`, is read the way the latest schema reads it. Enum values
+  are identified by their number as well. Columns whose field a record's schema
+  does not define, or defines with an incompatible type, are `NULL`.
 - Protobuf schemas that reference other subjects are resolved through the
   schema registry. Imports of the Google well-known types
   (`google/protobuf/*.proto`), the Google common types (`google/type/*.proto`)
@@ -539,10 +542,12 @@ then the corresponding Trino row includes a column named
 
 A proto3 field declared with the `optional` keyword is mapped to a column of
 the field's type, like other fields. The column is `NULL` when the field is not
-set, while scalar fields without the `optional` keyword have their default
-value. A field of a message type, such as a `ROW` column or a `TIMESTAMP`
-column mapped from `google.protobuf.Timestamp`, is also `NULL` when it is not
-set, as opposed to holding an empty message.
+set, while proto3 scalar fields without the `optional` keyword have their
+default value. Every other field that tracks presence is also `NULL` when it
+is not set: a proto2 `optional` or `required` field, even one with a declared
+default value, a member of a `oneof`, and a field of a message type, such as a
+`ROW` column or a `TIMESTAMP` column mapped from `google.protobuf.Timestamp`,
+as opposed to holding an empty message.
 
 (kafka-sql-inserts)=
 ## Kafka inserts
@@ -1054,10 +1059,11 @@ The following field attributes are supported:
   original Protobuf schema, then a write operation fails.
 
 A `NULL` value leaves a field that tracks presence unset: a field declared
-`optional`, or a field of a message type. Reading the record back yields `NULL`
-for such a field. Other fields, including `repeated` and `map` fields and
-proto3 fields without the `optional` keyword, have no representation for
-`NULL`, and writing `NULL` to them fails. The same applies to `NULL` fields of
+`optional`, a member of a `oneof`, or a field of a message type. Reading the
+record back yields `NULL` for such a field. Other fields, including `repeated`
+and `map` fields and proto3 fields without the `optional` keyword, have no
+representation for `NULL`, and writing `NULL` to them fails, as does writing
+`NULL` to a proto2 `required` field. The same applies to `NULL` fields of
 a `ROW` value and to `NULL` elements of an `ARRAY` or `MAP` value.
 
 The following table lists supported Trino data types, which can be used in `type`
