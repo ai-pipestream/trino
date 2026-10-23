@@ -57,7 +57,20 @@ public class ConnectorHandleProtobufCodec
         requireNonNull(family, "family is null");
         requireNonNull(handle, "handle is null");
         ConnectorHandleCodec<T> codec = resolveCodec(catalogHandle, family, handle.getClass());
-        byte[] payload = codec.serialize(handle);
+        byte[] payload;
+        try {
+            payload = codec.serialize(handle);
+        }
+        catch (TrinoException e) {
+            throw e;
+        }
+        catch (RuntimeException e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, format(
+                    "Protobuf handle codec of catalog '%s' failed to encode %s handle %s",
+                    catalogHandle.getCatalogName(),
+                    family,
+                    handle.getClass().getName()), e);
+        }
         if (payload == null) {
             throw new TrinoException(GENERIC_INTERNAL_ERROR, format(
                     "Protobuf handle codec of catalog '%s' returned null for %s handle %s",
@@ -77,7 +90,19 @@ public class ConnectorHandleProtobufCodec
         requireNonNull(proto, "proto is null");
         CatalogHandle catalogHandle = parseCatalogHandle(proto.getCatalogHandle());
         ConnectorHandleCodec<T> codec = resolveCodec(catalogHandle, family, family.handleClass());
-        T handle = codec.deserialize(proto.getPayload().toByteArray());
+        T handle;
+        try {
+            handle = codec.deserialize(proto.getPayload().toByteArray());
+        }
+        catch (TrinoException e) {
+            throw e;
+        }
+        catch (RuntimeException e) {
+            throw new TrinoException(GENERIC_INTERNAL_ERROR, format(
+                    "Protobuf handle codec of catalog '%s' failed to decode a %s handle",
+                    catalogHandle.getCatalogName(),
+                    family), e);
+        }
         if (handle == null) {
             throw new TrinoException(GENERIC_INTERNAL_ERROR, format(
                     "Protobuf handle codec of catalog '%s' decoded a %s handle as null",
