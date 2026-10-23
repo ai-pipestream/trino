@@ -61,7 +61,7 @@ public class ConfluentProtobufRowEncoderFactory
         String subject = rowEncoderSpec.subject()
                 .orElseThrow(() -> new TrinoException(NOT_SUPPORTED, format("Inserting into the %s of table '%s' requires a schema registry subject", rowEncoderSpec.kafkaFieldType().name().toLowerCase(ENGLISH), rowEncoderSpec.topic())));
         int schemaId = getLatestSchemaId(subject);
-        Descriptor descriptor = getSchema(subject, schemaId).getMessageDescriptor();
+        Descriptor descriptor = getSchema(subject, schemaId).getMessageDescriptor(subject);
         return new FramingRowEncoder(schemaId, ConfluentProtobufWireFormat.messageIndexes(descriptor), new ProtobufRowEncoder(descriptor, session, rowEncoderSpec.columnHandles()));
     }
 

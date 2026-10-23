@@ -189,6 +189,31 @@ public class TestProtobufSchemaParser
     }
 
     @Test
+    public void testSubjectSelectsTheMessage()
+    {
+        String schema =
+                """
+                syntax = "proto3";
+                package shop;
+                message Header {
+                    string name = 1;
+                }
+                message Order {
+                    int64 id = 1;
+                    string customer = 2;
+                    message Line {
+                        string sku = 1;
+                        int32 quantity = 2;
+                    }
+                }
+                """;
+        assertThat(parse("orders-value", schema).fields()).extracting(KafkaTopicFieldDescription::name).containsExactly("name");
+        assertThat(parse("shop.Order", schema).fields()).extracting(KafkaTopicFieldDescription::name).containsExactly("id", "customer");
+        assertThat(parse("orders-shop.Order.Line", schema).fields()).extracting(KafkaTopicFieldDescription::name).containsExactly("sku", "quantity");
+        assertThat(parse("orders-shop.Missing", schema).fields()).extracting(KafkaTopicFieldDescription::name).containsExactly("name");
+    }
+
+    @Test
     public void testNonProtobufSchemaIsRejected()
     {
         ProtobufSchemaParser parser = new ProtobufSchemaParser(TESTING_TYPE_MANAGER, new ProtobufAnySupportConfig());
@@ -202,5 +227,11 @@ public class TestProtobufSchemaParser
     {
         ProtobufSchemaParser parser = new ProtobufSchemaParser(TESTING_TYPE_MANAGER, new ProtobufAnySupportConfig().setProtobufAnySupportEnabled(anySupportEnabled));
         return parser.parse(TestingConnectorSession.SESSION, "topic-value", new ConfluentProtobufSchema(schema, ImmutableList.of(), null));
+    }
+
+    private static KafkaTopicFieldGroup parse(String subject, String schema)
+    {
+        ProtobufSchemaParser parser = new ProtobufSchemaParser(TESTING_TYPE_MANAGER, new ProtobufAnySupportConfig());
+        return parser.parse(TestingConnectorSession.SESSION, subject, new ConfluentProtobufSchema(schema, ImmutableList.of(), null));
     }
 }

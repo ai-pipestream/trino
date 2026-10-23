@@ -75,7 +75,7 @@ public class ProtobufSchemaParser
     public KafkaTopicFieldGroup parse(ConnectorSession session, String subject, ParsedSchema parsedSchema)
     {
         checkArgument(parsedSchema instanceof ConfluentProtobufSchema, "Unexpected schema type for subject '%s': %s", subject, parsedSchema.schemaType());
-        Descriptor descriptor = ((ConfluentProtobufSchema) parsedSchema).getMessageDescriptor();
+        Descriptor descriptor = ((ConfluentProtobufSchema) parsedSchema).getMessageDescriptor(subject);
         return new KafkaTopicFieldGroup(
                 ProtobufRowDecoder.NAME,
                 Optional.empty(),

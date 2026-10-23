@@ -33,6 +33,8 @@ import io.trino.spi.TrinoException;
 import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Throwables.throwIfInstanceOf;
@@ -49,16 +51,16 @@ import static java.util.Objects.requireNonNull;
  * schema id and message indexes in the frame select the message type, which is fetched from
  * the schema registry and cached. Ids are immutable in the registry, so the cache has no TTL.
  * <p>
- * The reader schema, which the table columns were derived from, is the first message of the
- * schema whose id the data schema parameter names; see {@link #readerSchemaReference(int)}.
+ * The reader schema, which the table columns were derived from, is the message the data schema
+ * parameter names within a registry schema; see {@link #readerSchemaReference(int, Descriptor)}.
  */
 public class ConfluentSchemaRegistryDynamicMessageProvider
         implements DynamicMessageProvider
 {
-    private static final String READER_SCHEMA_REFERENCE_PREFIX = "schema-registry-id:";
+    private static final Pattern READER_SCHEMA_REFERENCE = Pattern.compile("schema-registry-id:(\\d+);message=([^;]+)");
 
     private final SchemaRegistryClient schemaRegistryClient;
-    private final Optional<Integer> readerSchemaId;
+    private final Optional<ReaderSchema> readerSchema;
     private final NonEvictableLoadingCache<MessageKey, Descriptor> descriptorCache;
 
     public ConfluentSchemaRegistryDynamicMessageProvider(SchemaRegistryClient schemaRegistryClient)
@@ -66,40 +68,30 @@ public class ConfluentSchemaRegistryDynamicMessageProvider
         this(schemaRegistryClient, Optional.empty());
     }
 
-    public ConfluentSchemaRegistryDynamicMessageProvider(SchemaRegistryClient schemaRegistryClient, Optional<Integer> readerSchemaId)
+    public ConfluentSchemaRegistryDynamicMessageProvider(SchemaRegistryClient schemaRegistryClient, Optional<String> readerSchemaReference)
     {
         this.schemaRegistryClient = requireNonNull(schemaRegistryClient, "schemaRegistryClient is null");
-        this.readerSchemaId = requireNonNull(readerSchemaId, "readerSchemaId is null");
+        this.readerSchema = requireNonNull(readerSchemaReference, "readerSchemaReference is null").map(ReaderSchema::parse);
         descriptorCache = buildNonEvictableCache(
                 CacheBuilder.newBuilder().maximumSize(1000),
                 CacheLoader.from(this::lookupDescriptor));
     }
 
     /**
-     * The data schema of a table whose columns were derived from the given registry schema. A
-     * protobuf schema is compiled together with its references, which only the registry has, so
-     * the table carries the schema's id rather than its text.
+     * The data schema of a table whose columns were derived from the given message of a registry
+     * schema. A protobuf schema is compiled together with its references, which only the registry
+     * has, so the table carries the schema's id and the message's name rather than the schema text.
      */
-    public static String readerSchemaReference(int schemaId)
+    public static String readerSchemaReference(int schemaId, Descriptor message)
     {
-        return READER_SCHEMA_REFERENCE_PREFIX + schemaId;
-    }
-
-    private static int parseReaderSchemaReference(String reference)
-    {
-        checkArgument(reference.startsWith(READER_SCHEMA_REFERENCE_PREFIX), "Data schema is not a schema registry reference: %s", reference);
-        try {
-            return Integer.parseInt(reference.substring(READER_SCHEMA_REFERENCE_PREFIX.length()));
-        }
-        catch (NumberFormatException e) {
-            throw new IllegalArgumentException(format("Data schema is not a schema registry reference: %s", reference), e);
-        }
+        return format("schema-registry-id:%s;message=%s", schemaId, message.getFullName());
     }
 
     @Override
     public Optional<Descriptor> getReaderDescriptor()
     {
-        return readerSchemaId.map(schemaId -> getDescriptor(new MessageKey(schemaId, ImmutableList.of(0))));
+        return readerSchema.map(reader -> getSchema(reader.schemaId()).findMessage(reader.messageName())
+                .orElseThrow(() -> new TrinoException(KAFKA_SCHEMA_ERROR, format("Schema id %s does not declare message %s", reader.schemaId(), reader.messageName()))));
     }
 
     @Override
@@ -128,24 +120,30 @@ public class ConfluentSchemaRegistryDynamicMessageProvider
 
     private Descriptor lookupDescriptor(MessageKey key)
     {
+        return ConfluentProtobufWireFormat.findMessage(getSchema(key.schemaId()).getFileDescriptor(), key.messageIndexes())
+                .orElseThrow(() -> new TrinoException(INVALID_PROTOBUF_MESSAGE, format("Message indexes %s do not exist in schema id %s", key.messageIndexes(), key.schemaId())));
+    }
+
+    // the registry client caches schemas by id, and a schema compiles its descriptors once
+    private ConfluentProtobufSchema getSchema(int schemaId)
+    {
         ParsedSchema schema;
         try {
-            schema = schemaRegistryClient.getSchemaById(key.schemaId());
+            schema = schemaRegistryClient.getSchemaById(schemaId);
         }
         catch (RestClientException e) {
             if (e.getStatus() == HTTP_NOT_FOUND) {
-                throw new TrinoException(KAFKA_SCHEMA_ERROR, format("Schema id %s does not exist in the schema registry", key.schemaId()), e);
+                throw new TrinoException(KAFKA_SCHEMA_ERROR, format("Schema id %s does not exist in the schema registry", schemaId), e);
             }
-            throw new TrinoException(KAFKA_SCHEMA_REGISTRY_ERROR, format("Failed to look up schema id %s in the schema registry: %s", key.schemaId(), e.getMessage()), e);
+            throw new TrinoException(KAFKA_SCHEMA_REGISTRY_ERROR, format("Failed to look up schema id %s in the schema registry: %s", schemaId, e.getMessage()), e);
         }
         catch (IOException e) {
-            throw new TrinoException(KAFKA_SCHEMA_REGISTRY_ERROR, format("Failed to look up schema id %s in the schema registry: %s", key.schemaId(), e.getMessage()), e);
+            throw new TrinoException(KAFKA_SCHEMA_REGISTRY_ERROR, format("Failed to look up schema id %s in the schema registry: %s", schemaId, e.getMessage()), e);
         }
         if (!(schema instanceof ConfluentProtobufSchema protobufSchema)) {
-            throw new TrinoException(KAFKA_SCHEMA_ERROR, format("Schema id %s is a %s schema, not a PROTOBUF schema", key.schemaId(), schema.schemaType()));
+            throw new TrinoException(KAFKA_SCHEMA_ERROR, format("Schema id %s is a %s schema, not a PROTOBUF schema", schemaId, schema.schemaType()));
         }
-        return ConfluentProtobufWireFormat.findMessage(protobufSchema.getFileDescriptor(), key.messageIndexes())
-                .orElseThrow(() -> new TrinoException(INVALID_PROTOBUF_MESSAGE, format("Message indexes %s do not exist in schema id %s", key.messageIndexes(), key.schemaId())));
+        return protobufSchema;
     }
 
     private record MessageKey(int schemaId, List<Integer> messageIndexes)
@@ -153,6 +151,21 @@ public class ConfluentSchemaRegistryDynamicMessageProvider
         private MessageKey
         {
             messageIndexes = ImmutableList.copyOf(requireNonNull(messageIndexes, "messageIndexes is null"));
+        }
+    }
+
+    private record ReaderSchema(int schemaId, String messageName)
+    {
+        private static ReaderSchema parse(String reference)
+        {
+            Matcher matcher = READER_SCHEMA_REFERENCE.matcher(reference);
+            checkArgument(matcher.matches(), "Data schema is not a schema registry reference: %s", reference);
+            try {
+                return new ReaderSchema(Integer.parseInt(matcher.group(1)), matcher.group(2));
+            }
+            catch (NumberFormatException e) {
+                throw new IllegalArgumentException(format("Data schema is not a schema registry reference: %s", reference), e);
+            }
         }
     }
 
@@ -170,7 +183,7 @@ public class ConfluentSchemaRegistryDynamicMessageProvider
         @Override
         public DynamicMessageProvider create(Optional<String> protoFile)
         {
-            return new ConfluentSchemaRegistryDynamicMessageProvider(schemaRegistryClient, protoFile.map(ConfluentSchemaRegistryDynamicMessageProvider::parseReaderSchemaReference));
+            return new ConfluentSchemaRegistryDynamicMessageProvider(schemaRegistryClient, protoFile);
         }
     }
 }

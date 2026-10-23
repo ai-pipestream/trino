@@ -121,6 +121,52 @@ public class TestConfluentProtobufSchema
     }
 
     @Test
+    public void testSubjectSelectsTheTableMessage()
+    {
+        ConfluentProtobufSchema schema = schema(
+                """
+                syntax = "proto3";
+                package shop;
+                message Header {
+                    string name = 1;
+                }
+                enum Status {
+                    UNKNOWN = 0;
+                }
+                message Order {
+                    int64 id = 1;
+                    map<string, string> attributes = 2;
+                    message Line {
+                        string sku = 1;
+                        message Discount {
+                            string code = 1;
+                        }
+                    }
+                }
+                """);
+        // a subject of the TopicNameStrategy does not name a message
+        assertThat(schema.getMessageDescriptor("orders-value").getFullName()).isEqualTo("shop.Header");
+        assertThat(schema.getMessageDescriptor("orders-key").getFullName()).isEqualTo("shop.Header");
+        // the RecordNameStrategy names the subject after the message
+        assertThat(schema.getMessageDescriptor("shop.Header").getFullName()).isEqualTo("shop.Header");
+        assertThat(schema.getMessageDescriptor("shop.Order").getFullName()).isEqualTo("shop.Order");
+        assertThat(schema.getMessageDescriptor("shop.Order.Line").getFullName()).isEqualTo("shop.Order.Line");
+        assertThat(schema.getMessageDescriptor("shop.Order.Line.Discount").getFullName()).isEqualTo("shop.Order.Line.Discount");
+        // the TopicRecordNameStrategy names it after the topic and the message
+        assertThat(schema.getMessageDescriptor("orders-shop.Order").getFullName()).isEqualTo("shop.Order");
+        assertThat(schema.getMessageDescriptor("orders-shop.Order.Line").getFullName()).isEqualTo("shop.Order.Line");
+        assertThat(schema.getMessageDescriptor("my-orders-shop.Order.Line.Discount").getFullName()).isEqualTo("shop.Order.Line.Discount");
+        // only the full name of a message identifies it
+        for (String subject : ImmutableList.of("shop.Missing", "orders-shop.Missing", "Order", "orders-Order", "shop.Order-value", "orders-xshop.Order", "orders-shop.Order.AttributesEntry")) {
+            assertThat(schema.getMessageDescriptor(subject).getFullName()).as(subject).isEqualTo("shop.Header");
+        }
+
+        assertThat(schema.findMessage("shop.Order.Line")).contains(schema.getMessageDescriptor("shop.Order.Line"));
+        assertThat(schema.findMessage("shop.Order.AttributesEntry")).isEmpty();
+        assertThat(schema.findMessage("Order")).isEmpty();
+    }
+
+    @Test
     public void testSchemaWithoutMessages()
     {
         ConfluentProtobufSchema schema = schema(

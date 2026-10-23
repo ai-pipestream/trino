@@ -36,6 +36,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkState;
 import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SCHEMA_ERROR;
@@ -137,7 +138,7 @@ public final class ConfluentProtobufSchema
     }
 
     /**
-     * The first message declared in the schema, which is the message the Confluent table description supplier maps to a table.
+     * The first message declared in the schema, which is the message of a table whose subject does not name one.
      */
     public Descriptor getMessageDescriptor()
     {
@@ -146,6 +147,48 @@ public final class ConfluentProtobufSchema
             throw new TrinoException(KAFKA_SCHEMA_ERROR, "Protobuf schema does not declare any message");
         }
         return messages.getFirst();
+    }
+
+    /**
+     * The message a subject's table maps to. The {@code RecordNameStrategy} names a subject after the
+     * message it holds ({@code <message full name>}) and the {@code TopicRecordNameStrategy} after the
+     * topic and the message ({@code <topic>-<message full name>}); such a subject maps to that message,
+     * which may be nested in another one. Any other subject, such as one of the {@code TopicNameStrategy},
+     * maps to the first message declared in the schema.
+     */
+    public Descriptor getMessageDescriptor(String subject)
+    {
+        requireNonNull(subject, "subject is null");
+        return messages()
+                .filter(message -> subject.equals(message.getFullName()) || subject.endsWith("-" + message.getFullName()))
+                .findFirst()
+                .orElseGet(this::getMessageDescriptor);
+    }
+
+    /**
+     * The message with the given full name, if the schema declares it.
+     */
+    public Optional<Descriptor> findMessage(String fullName)
+    {
+        requireNonNull(fullName, "fullName is null");
+        return messages()
+                .filter(message -> message.getFullName().equals(fullName))
+                .findFirst();
+    }
+
+    private Stream<Descriptor> messages()
+    {
+        return getFileDescriptor().getMessageTypes().stream()
+                .flatMap(ConfluentProtobufSchema::withNestedMessages);
+    }
+
+    private static Stream<Descriptor> withNestedMessages(Descriptor message)
+    {
+        // the entry type of a map field is not a message records are written with
+        if (message.getOptions().getMapEntry()) {
+            return Stream.empty();
+        }
+        return Stream.concat(Stream.of(message), message.getNestedTypes().stream().flatMap(ConfluentProtobufSchema::withNestedMessages));
     }
 
     private Map<String, String> resolveReferences()

@@ -150,6 +150,69 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
     }
 
     @Test
+    public void testNonFirstMessageWithRecordNameStrategy()
+            throws Exception
+    {
+        String topic = "topic-non-first-message";
+        assertNotExists(topic);
+
+        Descriptor descriptor = getFileDescriptor(getProtoFile("protobuf/multiple_messages.proto")).findMessageTypeByName("Order");
+        ImmutableList.Builder<ProducerRecord<DynamicMessage, DynamicMessage>> producerRecordBuilder = ImmutableList.builder();
+        for (long key = 0; key < 3; key++) {
+            producerRecordBuilder.add(new ProducerRecord<>(topic, createKeySchema(key, getKeySchema()), DynamicMessage.newBuilder(descriptor)
+                    .setField(descriptor.findFieldByName("id"), key * 10)
+                    .setField(descriptor.findFieldByName("customer"), "customer-" + key)
+                    .build()));
+        }
+        testingKafka.sendMessages(
+                producerRecordBuilder.build().stream(),
+                ImmutableMap.<String, String>builder()
+                        .putAll(producerProperties())
+                        .put(VALUE_SUBJECT_NAME_STRATEGY, RecordNameStrategy.class.getName())
+                        .buildOrThrow());
+        waitUntilTableExists(topic);
+
+        String table = format("\"%s&value-subject=io.trino.protobuf.Order\"", topic);
+        assertQuery(
+                format("SELECT key, id, customer FROM %s", table),
+                "VALUES (0, 0, 'customer-0'), (1, 10, 'customer-1'), (2, 20, 'customer-2')");
+
+        // rows are written with the subject's message as well; its map and enum fields do not track presence, so they need a value
+        assertUpdate(format("INSERT INTO %s (key, id, customer, attributes, status) VALUES (3, 30, 'customer-3', MAP(ARRAY['channel'], ARRAY['web']), 'SHIPPED')", table), 1);
+        assertQuery(
+                format("SELECT key, id, customer, attributes['channel'], status FROM %s WHERE id = 30", table),
+                "VALUES (3, 30, 'customer-3', 'web', 'SHIPPED')");
+    }
+
+    @Test
+    public void testNestedMessageWithTopicRecordNameStrategy()
+            throws Exception
+    {
+        String topic = "topic-nested-message";
+        assertNotExists(topic);
+
+        Descriptor descriptor = getFileDescriptor(getProtoFile("protobuf/multiple_messages.proto")).findMessageTypeByName("Order").findNestedTypeByName("Line");
+        ImmutableList.Builder<ProducerRecord<DynamicMessage, DynamicMessage>> producerRecordBuilder = ImmutableList.builder();
+        for (long key = 0; key < 3; key++) {
+            producerRecordBuilder.add(new ProducerRecord<>(topic, createKeySchema(key, getKeySchema()), DynamicMessage.newBuilder(descriptor)
+                    .setField(descriptor.findFieldByName("sku"), "sku-" + key)
+                    .setField(descriptor.findFieldByName("quantity"), (int) key + 1)
+                    .build()));
+        }
+        testingKafka.sendMessages(
+                producerRecordBuilder.build().stream(),
+                ImmutableMap.<String, String>builder()
+                        .putAll(producerProperties())
+                        .put(VALUE_SUBJECT_NAME_STRATEGY, TopicRecordNameStrategy.class.getName())
+                        .buildOrThrow());
+        waitUntilTableExists(topic);
+
+        assertQuery(
+                format("SELECT key, sku, quantity FROM \"%1$s&value-subject=%1$s-io.trino.protobuf.Order.Line\"", topic),
+                "VALUES (0, 'sku-0', 1), (1, 'sku-1', 2), (2, 'sku-2', 3)");
+    }
+
+    @Test
     public void testBasicTopicForInsert()
             throws Exception
     {
