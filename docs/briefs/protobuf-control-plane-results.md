@@ -1,4 +1,4 @@
-# Results: protobuf control plane (phases 1–3 slice)
+# Results: protobuf control plane (phases 1–3)
 
 Branch `experiment/protobuf-control-plane-impl` on the `ai-pipestream/trino`
 fork, based on the brief commit `824ea904f2` (master `e76d788b`).
@@ -29,11 +29,59 @@ local microbenchmark. Delivered, each as its own commit:
    transaction) and memory (table, column, split, output, insert,
    transaction) implement.
 
+4. Phase 3 completion (review follow-up, fork issues #15, #16, #17):
+   - `lib/trino-protobuf-handles`, a small library shared by the engine and
+     connectors: the `Domain` schema and `DomainProtoCodec` (values travel as
+     blocks through `BlockEncodingSerde`; the sorted-range-set
+     `DiscreteSetMarker` is carried so single-value and IN-list domains come
+     back exactly as built) and the `protobufHandleCodec` adapter that gives
+     every connector the same parsing, class checks and categorized errors.
+     The library's test type manager and block serde ship in its test jar
+     for connectors that cannot depend on `trino-main`.
+   - `ConnectorContext.getBlockEncodingSerde()` so connectors can encode
+     blocks; `ConnectorContextModule` binds it lazily.
+   - The engine resolves codecs through the real catalog manager
+     (`ConnectorServices.getHandleCodecProvider()`,
+     `io.trino.metadata.HandleFamily`, `ConnectorHandleProtobufCodec`) and
+     has its first production caller, `SplitProtoMapper`
+     (`Split`/`ScheduledSplit`/`SplitAssignment` schemas), ready for
+     `TaskUpdateRequest` in phase 5. Unknown catalogs, catalogs not loaded
+     on the node, absent codecs, corrupt payloads and misbehaving codecs each
+     raise a distinct categorized error; there is no JSON fallback path.
+   - Engine-owned connectors have real codecs: `information_schema`, the
+     per-catalog `system` tables (whose transaction handle nests the served
+     catalog's transaction handle through that catalog's own codec) and the
+     global `system` connector (transaction, split and the `exclude_columns`
+     and `sequence` table function handles).
+   - Hive: `HiveHandleCodecProvider` covers all nine families hive
+     implements (table, column, split, output, insert, table execute, merge,
+     transaction, partitioning incl. `HiveUpdateHandle`), mirroring the JSON
+     constructors field for field, metastore `Table`/`Partition` inside
+     `HivePageSinkMetadata` included. Codecs run under the plugin class
+     loader through new `ClassLoaderSafe*` wrappers in the plugin toolkit.
+   - tpch and memory now use the shared domain codec and adapter; the tpch
+     scalar-only domain encoding and its `NOT_SUPPORTED` path are gone, so an
+     array/row/map domain value round-trips like any other.
+   - `/v1/task` no longer negotiates: under `PROTOBUF` a request that cannot
+     accept `application/x-protobuf` gets 406 and a JSON `/fail` body gets
+     415; under `JSON` the protobuf forms are rejected the same way. The
+     fetchers send `Accept` explicitly.
+
 End-to-end evidence: `io.trino.tests.tpch.TestProtobufControlPlane` runs a
 multi-node `DistributedQueryRunner` with the switch set to `PROTOBUF` and
-asserts correct results for a scan, a join with dynamic filtering, and an
-aggregation. Task status polls, dynamic-filter fetches and fail requests
-exercise protobuf on real HTTP between coordinator and workers.
+asserts correct results for a scan, a join with dynamic filtering (and that a
+domain really was collected), a worker failure and an aggregation.
+`io.trino.server.TestTaskResourceEncoding` runs a query on a
+`TestingTrinoServer` under each encoding and asserts the response
+`Content-Type` of `/status` and `/dynamicfilters`, the 406 and 415 rejections,
+and that `/fail` accepts the configured encoding only.
+
+The brief's negative e2e test ("a connector without codecs fails loudly under
+PROTOBUF") still cannot exist on this branch: no handle crosses the wire until
+`TaskUpdateRequest` is protobuf (phase 5). Its unit form is
+`TestConnectorHandleProtobufCodec.testMissingCodecIsNotSupported`, which
+resolves through the real catalog manager and names catalog, family and
+class in the error.
 
 ## Microbenchmark (local, indicative only)
 
@@ -63,41 +111,61 @@ loops over `TaskStatusProtoMapper` / `JsonCodec<TaskStatus>` and
 
 ## Tests run for this branch
 
-- `TestTaskProtoMappers` (4), `TestProtobufResponseHandler` (2, includes the
-  JSON-content-type-rejected test), `TestInternalCommunicationConfig` (2).
-- `TestConnectorHandleProtobufCodec` (3, includes both negative tests).
-- `TestTpchHandleCodecProvider` (7), `TestMemoryHandleCodecProvider` (7).
-- Existing touched suites: `TestHttpRemoteTask` (11),
-  `TestTaskInfoFetcherInstanceMismatch` (3), `TestTpchMetadata` (9),
-  `TestMemoryMetadata` (14).
-- `TestProtobufControlPlane` distributed queries (4) under `PROTOBUF`.
-- `mvn verify -DskipTests` passes for `core/trino-main`, `core/trino-spi`,
-  `plugin/trino-tpch`, `plugin/trino-memory`, `testing/trino-tests`
-  (checkstyle, license, dependency analysis, airstyle, sortpom).
+- `lib/trino-protobuf-handles`: `TestDomainProtoCodec` (12, incl. a lying
+  discrete marker, duplicate discrete values, corrupt blocks, mismatched
+  inclusive flags, null in equatable values, unknown types),
+  `TestProtobufHandleCodec` (4).
+- `core/trino-main`: `TestConnectorHandleProtobufCodec` (12),
+  `TestSplitProtoMapper` (11), `TestSystemHandleCodecProvider` (9),
+  `TestInformationSchemaHandleCodecProvider` (7),
+  `TestGlobalSystemHandleCodecProvider` (5), `TestTaskProtoMappers` (15),
+  `TestTaskResourceEncoding` (6), `TestHttpRemoteTask`,
+  `TestProtobufResponseHandler`, `TestInternalCommunicationConfig`.
+- `plugin/trino-tpch`: `TestTpchHandleCodecProvider` (15).
+- `plugin/trino-memory`: `TestMemoryHandleCodecProvider` (12) and the full
+  `TestMemoryConnectorTest` (306, 81 skipped as on master).
+- `plugin/trino-hive`: `TestHiveHandleCodecProvider` (15), `TestHivePlugin`
+  (11), `TestHiveConnectorFactory` (1), `TestHiveSplit`, `TestHiveTableHandle`,
+  `TestHiveColumnHandle`.
+- `testing/trino-tests`: `TestProtobufControlPlane` (6) under `PROTOBUF`.
+- `mvn install -DskipTests` (license, dependency analysis, modernizer,
+  checkstyle, revapi on `trino-spi`) passes for `core/trino-spi`,
+  `lib/trino-protobuf-handles`, `lib/trino-plugin-toolkit`, `core/trino-main`,
+  `plugin/trino-tpch`, `plugin/trino-memory`, `plugin/trino-hive`;
+  `airstyle:check` and `sortpom:verify` pass for every touched module and the
+  root pom; `test-compile -P errorprone-compiler` passes for the same
+  modules.
 
-Not run: full `trino-main` test suite, tpch/memory connector test suites
-under the switch (they would still use JSON for `TaskUpdateRequest`/
-`TaskInfo`, which is expected at this phase), Error Prone profile beyond the
-default compile, and any multi-node/SF100 benchmark.
+Not run: full `trino-main` and hive test suites, any multi-node/SF100
+benchmark.
 
 ## Remaining work (brief phases 4–6)
 
 - Plan and expressions: `PlanFragment`, 45 `PlanNode` subtypes, 16 IR
   `Expression` subtypes, `Symbol`, `Type` signatures, partitioning schemes.
 - `TaskUpdateRequest` and `TaskInfo`: `SessionRepresentation`,
-  `SplitAssignment` (this is where the phase-3 handle codecs get wired in
-  through `ConnectorHandleProtobufCodec`), `OutputBuffers`, W3C trace context
-  for `Span`, operator stats and the polymorphic `Metric`/`OperatorInfo`
+  `SplitAssignment` (the protobuf form and mapper exist; the request message
+  that carries it does not yet), `OutputBuffers`, W3C trace context for
+  `Span`, operator stats and the polymorphic `Metric`/`OperatorInfo`
   families. Until then those endpoints stay JSON even with the switch on,
-  so "zero JSON on /v1/task" is not yet claimed.
-- Handle codecs for all other connectors, including hive (all 14 families it
-  implements). Note the brief said 13 families; `HandleJsonModule` at this
-  base registers 14 (table credentials) and the SPI covers all 14.
-- Known simplification: the tpch table-handle codec encodes `Domain` values
-  as native scalars and rejects non-scalar (array/row/map) domain values with
-  `NOT_SUPPORTED`. The engine `DomainProtoMapper` has no such limitation (it
-  uses block bytes), but connectors have no `BlockEncodingSerde` in
-  `ConnectorContext`; giving them one is a phase-4 decision.
+  so "zero JSON on /v1/task" is not yet claimed. `POST /{taskId}/fail` is
+  exercised end to end only by `TestTaskResourceEncoding`; no query path on
+  this branch triggers it (it is driven by `SqlQueryExecution.failTask`,
+  e.g. a memory kill).
+- Exchange handles: `SpoolingExchangeInput` and `ExchangeSourceHandle` are
+  owned by the `ExchangeManager` plugin, not a connector, so they need their
+  own codec hook on the exchange SPI; `SplitProtoMapper` rejects them with
+  `NOT_SUPPORTED` today, which means fault-tolerant execution requires the
+  JSON control plane.
+- `JsonTableFunctionHandle` (global system `json_table`) carries a plan of
+  IR expressions and waits for the phase-4 expression schema.
+  `RemoteTransactionHandle` has no connector either.
+- Handle codecs for every other connector; hive, tpch, memory and the
+  engine-owned connectors are done.
+- `SortedRangeSet` decoded from protobuf is rebuilt through the SPI
+  constructors, so a set the sender marked `NON_DISCRETE` comes back as
+  `UNKNOWN` and is classified again on first use. Preserving it would need a
+  public SPI constructor that takes the marker.
 - Low-volume internal endpoints still on JSON: `/v1/announce`, `/v1/info`,
   `/v1/status`, `/v1/memory`, `/v1/node`.
 - Phase-6 benchmark on 1 coordinator + at least 3 workers, TPC-H/TPC-DS
