@@ -15,6 +15,8 @@ package io.trino.plugin.base;
 
 import com.google.inject.Binder;
 import com.google.inject.Module;
+import com.google.inject.Provides;
+import com.google.inject.Singleton;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.trace.Tracer;
 import io.trino.spi.BlocksHashFactory;
@@ -24,6 +26,7 @@ import io.trino.spi.NodeVersion;
 import io.trino.spi.PageIndexerFactory;
 import io.trino.spi.PageSorter;
 import io.trino.spi.VersionEmbedder;
+import io.trino.spi.block.BlockEncodingSerde;
 import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.ConnectorExpressionEvaluator;
@@ -61,5 +64,13 @@ public class ConnectorContextModule
         binder.bind(PageIndexerFactory.class).toInstance(context.getPageIndexerFactory());
         binder.bind(BlocksHashFactory.class).toInstance(context.getBlocksHashFactory());
         binder.bind(ConnectorExpressionEvaluator.class).toInstance(context.getExpressionEvaluator());
+    }
+
+    // Resolved on first use: a ConnectorContext that predates the accessor only fails the connectors that encode blocks.
+    @Provides
+    @Singleton
+    public BlockEncodingSerde blockEncodingSerde()
+    {
+        return context.getBlockEncodingSerde();
     }
 }

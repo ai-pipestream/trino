@@ -33,6 +33,7 @@ import io.trino.spi.BlocksHashFactory;
 import io.trino.spi.PageIndexerFactory;
 import io.trino.spi.PageSorter;
 import io.trino.spi.VersionEmbedder;
+import io.trino.spi.block.BlockEncodingSerde;
 import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.catalog.CatalogProperties;
 import io.trino.spi.classloader.ThreadContextClassLoader;
@@ -71,6 +72,7 @@ public class DefaultCatalogFactory
     private final OpenTelemetry openTelemetry;
     private final TransactionManager transactionManager;
     private final TypeManager typeManager;
+    private final BlockEncodingSerde blockEncodingSerde;
     private final BlocksHashFactory blocksHashFactory;
 
     private final boolean schedulerIncludeCoordinator;
@@ -93,6 +95,7 @@ public class DefaultCatalogFactory
             OpenTelemetry openTelemetry,
             TransactionManager transactionManager,
             TypeManager typeManager,
+            BlockEncodingSerde blockEncodingSerde,
             FlatHashStrategyCompiler flatHashStrategyCompiler,
             NodeSchedulerConfig nodeSchedulerConfig,
             OptimizerConfig optimizerConfig,
@@ -110,6 +113,7 @@ public class DefaultCatalogFactory
         this.openTelemetry = requireNonNull(openTelemetry, "openTelemetry is null");
         this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
+        this.blockEncodingSerde = requireNonNull(blockEncodingSerde, "blockEncodingSerde is null");
         this.blocksHashFactory = requireNonNull(flatHashStrategyCompiler, "flatHashStrategyCompiler is null").createBlocksHashFactory();
         this.schedulerIncludeCoordinator = nodeSchedulerConfig.isIncludeCoordinator();
         this.maxPrefetchedInformationSchemaPrefixes = optimizerConfig.getMaxPrefetchedInformationSchemaPrefixes();
@@ -205,6 +209,7 @@ public class DefaultCatalogFactory
                 new DefaultNodeManager(currentNode, nodeManager, schedulerIncludeCoordinator),
                 versionEmbedder,
                 typeManager,
+                blockEncodingSerde,
                 new InternalMetadataProvider(metadata, typeManager),
                 pageSorter,
                 pageIndexerFactory,

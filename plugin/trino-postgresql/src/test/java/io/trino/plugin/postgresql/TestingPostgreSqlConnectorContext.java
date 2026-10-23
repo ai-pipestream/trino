@@ -31,6 +31,7 @@ import io.trino.spi.NodeManager;
 import io.trino.spi.PageIndexerFactory;
 import io.trino.spi.PageSorter;
 import io.trino.spi.VersionEmbedder;
+import io.trino.spi.block.BlockEncodingSerde;
 import io.trino.spi.connector.ConnectorContext;
 import io.trino.spi.connector.MetadataProvider;
 import io.trino.spi.type.TypeManager;
@@ -38,6 +39,7 @@ import io.trino.spi.type.TypeOperators;
 import io.trino.type.InternalTypeManager;
 import io.trino.util.EmbedVersion;
 
+import static io.trino.metadata.InternalBlockEncodingSerde.TESTING_BLOCK_ENCODING_SERDE;
 import static io.trino.node.TestingInternalNodeManager.CURRENT_NODE;
 import static io.trino.spi.connector.MetadataProvider.NOOP_METADATA_PROVIDER;
 
@@ -83,6 +85,12 @@ public class TestingPostgreSqlConnectorContext
     public VersionEmbedder getVersionEmbedder()
     {
         return versionEmbedder;
+    }
+
+    @Override
+    public BlockEncodingSerde getBlockEncodingSerde()
+    {
+        return TESTING_BLOCK_ENCODING_SERDE;
     }
 
     @Override

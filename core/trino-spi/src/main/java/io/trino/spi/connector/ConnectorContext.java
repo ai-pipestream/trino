@@ -22,6 +22,7 @@ import io.trino.spi.PageIndexerFactory;
 import io.trino.spi.PageSorter;
 import io.trino.spi.Unstable;
 import io.trino.spi.VersionEmbedder;
+import io.trino.spi.block.BlockEncodingSerde;
 import io.trino.spi.cache.ConnectorCacheFactory;
 import io.trino.spi.function.FunctionBundleFactory;
 import io.trino.spi.type.TypeManager;
@@ -69,6 +70,17 @@ public interface ConnectorContext
     }
 
     default TypeManager getTypeManager()
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * Serializes Trino blocks to their binary form and back. Connectors that
+     * carry Trino values inside their own serialized state, such as the domain
+     * values of a pushed-down constraint in a protobuf handle codec, use it so
+     * every type is encoded the way the engine encodes it.
+     */
+    default BlockEncodingSerde getBlockEncodingSerde()
     {
         throw new UnsupportedOperationException();
     }
