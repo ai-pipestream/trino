@@ -1085,11 +1085,11 @@ public final class ProtobufValueDecoders
             }
             Map<Object, Object> map = new HashMap<>(keys.size());
             for (int i = 0; i < keys.size(); i++) {
+                // Keys are compared as decoded, and some types decode to a rendered form in which two distinct
+                // server keys become equal: the two 01:30 values of a zone's fall-back hour render to the same
+                // timestamp with time zone text, and datetimes rounded to milliseconds for a legacy client can
+                // coincide. The json decoder merges such entries, last value winning, so do the same here
                 map.put(keys.get(i), values.get(i));
-                // the server never writes two equal keys, so a duplicate is a corrupt segment, not an entry to drop
-                if (map.size() != i + 1) {
-                    throw new ProtobufFormatException("Map has duplicate key: " + keys.get(i));
-                }
             }
             return unmodifiableMap(map);
         }
