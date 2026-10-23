@@ -602,6 +602,9 @@ public class TaskResource
             return true;
         }
         MediaType produced = encoding == ControlPlaneEncoding.PROTOBUF ? APPLICATION_X_PROTOBUF_TYPE : MediaType.APPLICATION_JSON_TYPE;
+        // the most specific media range that matches decides, so "*/*, application/x-protobuf;q=0" excludes protobuf (RFC 9110, section 12.5.1)
+        int bestSpecificity = -1;
+        double bestQuality = 0;
         for (String entry : Splitter.on(',').trimResults().omitEmptyStrings().split(accept)) {
             MediaType acceptable;
             try {
@@ -610,11 +613,31 @@ public class TaskResource
             catch (IllegalArgumentException _) {
                 continue;
             }
-            if (acceptable.isCompatible(produced) && !"0".equals(acceptable.getParameters().get("q"))) {
-                return true;
+            if (!acceptable.isCompatible(produced)) {
+                continue;
+            }
+            int specificity = acceptable.isWildcardType() ? 0 : acceptable.isWildcardSubtype() ? 1 : 2;
+            if (specificity > bestSpecificity) {
+                bestSpecificity = specificity;
+                bestQuality = quality(acceptable);
             }
         }
-        return false;
+        return bestQuality > 0;
+    }
+
+    private static double quality(MediaType mediaType)
+    {
+        String quality = mediaType.getParameters().get("q");
+        if (quality == null) {
+            return 1;
+        }
+        try {
+            return Double.parseDouble(quality);
+        }
+        catch (NumberFormatException _) {
+            // an unparsable weight is treated like an unparsable media range
+            return 0;
+        }
     }
 
     private void requireRequestEncoding(ControlPlaneEncoding requestEncoding)

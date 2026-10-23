@@ -111,6 +111,16 @@ public class TestTaskResourceEncoding
         assertThat(TaskResource.isAcceptable("application/json", ControlPlaneEncoding.PROTOBUF)).isFalse();
         assertThat(TaskResource.isAcceptable("application/x-protobuf;q=0", ControlPlaneEncoding.PROTOBUF)).isFalse();
         assertThat(TaskResource.isAcceptable("text/plain, not a media type", ControlPlaneEncoding.PROTOBUF)).isFalse();
+        // a zero weight may carry up to three decimals
+        assertThat(TaskResource.isAcceptable("application/x-protobuf;q=0.0", ControlPlaneEncoding.PROTOBUF)).isFalse();
+        assertThat(TaskResource.isAcceptable("application/x-protobuf; q=0.000", ControlPlaneEncoding.PROTOBUF)).isFalse();
+        assertThat(TaskResource.isAcceptable("application/x-protobuf;q=0.001", ControlPlaneEncoding.PROTOBUF)).isTrue();
+        assertThat(TaskResource.isAcceptable("application/x-protobuf;q=abc", ControlPlaneEncoding.PROTOBUF)).isFalse();
+        // the most specific matching range decides, whatever the order
+        assertThat(TaskResource.isAcceptable("*/*, application/x-protobuf;q=0", ControlPlaneEncoding.PROTOBUF)).isFalse();
+        assertThat(TaskResource.isAcceptable("application/x-protobuf;q=0, application/*", ControlPlaneEncoding.PROTOBUF)).isFalse();
+        assertThat(TaskResource.isAcceptable("*/*;q=0, application/x-protobuf", ControlPlaneEncoding.PROTOBUF)).isTrue();
+        assertThat(TaskResource.isAcceptable("*/*;q=0", ControlPlaneEncoding.PROTOBUF)).isFalse();
 
         assertThat(TaskResource.isAcceptable("application/json; charset=utf-8", ControlPlaneEncoding.JSON)).isTrue();
         assertThat(TaskResource.isAcceptable("application/x-protobuf", ControlPlaneEncoding.JSON)).isFalse();
