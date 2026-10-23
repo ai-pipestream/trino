@@ -1004,6 +1004,44 @@ public class TestProtoFileDescriptorBuilder
         assertThat(DynamicMessage.parseFrom(reserved, message.toByteArray())).isEqualTo(message);
     }
 
+    @Test
+    public void testReservedNumbersAndNamesAreNotReusable()
+    {
+        // protoc rejects every one of these
+        Map<String, String> declarations = ImmutableMap.<String, String>builder()
+                .put("message Reserved { reserved 2, 15 to 20; int32 field = 17; }", "Field 'field' in message 'Reserved' in protobuf schema 'reserved.proto' uses reserved number 17")
+                .put("message Reserved { reserved 2; int32 field = 2; }", "Field 'field' in message 'Reserved' in protobuf schema 'reserved.proto' uses reserved number 2")
+                .put("message Reserved { reserved 1000 to max; int32 last = 536870911; }", "Field 'last' in message 'Reserved' in protobuf schema 'reserved.proto' uses reserved number 536870911")
+                .put("message Reserved { reserved \"old_name\"; string old_name = 1; }", "Field 'old_name' in message 'Reserved' in protobuf schema 'reserved.proto' uses a reserved name")
+                .put("message Reserved { reserved 3; oneof choice { int32 number = 3; } }", "Field 'number' in message 'Reserved' in protobuf schema 'reserved.proto' uses reserved number 3")
+                .put("message Outer { message Inner { reserved 4 to 6; int64 id = 5; } }", "Field 'id' in message 'Inner' in protobuf schema 'reserved.proto' uses reserved number 5")
+                .put("enum Status { reserved 5; STATUS_UNSPECIFIED = 0; FIVE = 5; }", "Value 'FIVE' in enum 'Status' in protobuf schema 'reserved.proto' uses reserved number 5")
+                .put("enum Status { reserved \"LEGACY\"; STATUS_UNSPECIFIED = 0; LEGACY = 1; }", "Value 'LEGACY' in enum 'Status' in protobuf schema 'reserved.proto' uses a reserved name")
+                .put("message Outer { enum Status { reserved 1 to 3; STATUS_UNSPECIFIED = 0; TWO = 2; } }", "Value 'TWO' in enum 'Status' in protobuf schema 'reserved.proto' uses reserved number 2")
+                .buildOrThrow();
+        declarations.forEach((declaration, message) ->
+                assertThatThrownBy(() -> build("reserved.proto", "syntax = \"proto3\";\n" + declaration))
+                        .as(declaration)
+                        .isInstanceOf(TrinoException.class)
+                        .hasMessage(message)
+                        .satisfies(e -> assertThat(((TrinoException) e).getErrorCode()).isEqualTo(INVALID_PROTO_FILE.toErrorCode())));
+
+        // numbers next to a reserved range, and names that differ in case, are free
+        FileDescriptor file = build("reserved.proto",
+                """
+                syntax = "proto3";
+                message Reserved {
+                  reserved 2, 15 to 20, 1000 to max;
+                  reserved "old_name";
+                  int32 before = 14;
+                  int32 after = 21;
+                  int32 last = 999;
+                  string Old_Name = 1;
+                }
+                """);
+        assertThat(file.findMessageTypeByName("Reserved").getFields()).extracting(FieldDescriptor::getNumber).containsExactly(14, 21, 999, 1);
+    }
+
     private static FieldDescriptor mapValue(Descriptor message, String field)
     {
         return message.findFieldByName(field).getMessageType().findFieldByName("value");
