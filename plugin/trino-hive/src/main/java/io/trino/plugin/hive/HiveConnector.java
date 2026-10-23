@@ -21,6 +21,7 @@ import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorMetadata;
 import io.trino.plugin.base.session.SessionPropertiesProvider;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorAccessControl;
+import io.trino.spi.connector.ConnectorHandleCodecProvider;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorNodePartitioningProvider;
 import io.trino.spi.connector.ConnectorPageSinkProvider;
@@ -66,6 +67,7 @@ public class HiveConnector
 
     private final HiveTransactionManager transactionManager;
     private final boolean singleStatementWritesOnly;
+    private final ConnectorHandleCodecProvider handleCodecProvider;
 
     public HiveConnector(
             Injector injector,
@@ -85,6 +87,7 @@ public class HiveConnector
             List<PropertyMetadata<?>> analyzeProperties,
             Optional<ConnectorAccessControl> accessControl,
             boolean singleStatementWritesOnly,
+            ConnectorHandleCodecProvider handleCodecProvider,
             ClassLoader classLoader)
     {
         this.injector = requireNonNull(injector, "injector is null");
@@ -106,6 +109,7 @@ public class HiveConnector
         this.analyzeProperties = ImmutableList.copyOf(requireNonNull(analyzeProperties, "analyzeProperties is null"));
         this.accessControl = requireNonNull(accessControl, "accessControl is null");
         this.singleStatementWritesOnly = singleStatementWritesOnly;
+        this.handleCodecProvider = requireNonNull(handleCodecProvider, "handleCodecProvider is null");
         this.classLoader = requireNonNull(classLoader, "classLoader is null");
     }
 
@@ -187,6 +191,12 @@ public class HiveConnector
     public ConnectorAccessControl getAccessControl()
     {
         return accessControl.orElseThrow(UnsupportedOperationException::new);
+    }
+
+    @Override
+    public Optional<ConnectorHandleCodecProvider> getHandleCodecProvider()
+    {
+        return Optional.of(handleCodecProvider);
     }
 
     @Override

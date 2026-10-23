@@ -26,6 +26,7 @@ import io.trino.metastore.HiveMetastore;
 import io.trino.plugin.base.ConnectorContextModule;
 import io.trino.plugin.base.TypeDeserializerModule;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorAccessControl;
+import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorHandleCodecProvider;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSinkProvider;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorPageSourceProvider;
 import io.trino.plugin.base.classloader.ClassLoaderSafeConnectorSplitManager;
@@ -146,6 +147,7 @@ public class HiveConnectorFactory
                     hiveAnalyzeProperties.getAnalyzeProperties(),
                     hiveAccessControl,
                     injector.getInstance(HiveConfig.class).isSingleStatementWritesOnly(),
+                    new ClassLoaderSafeConnectorHandleCodecProvider(injector.getInstance(HiveHandleCodecProvider.class), classLoader),
                     classLoader);
         }
     }

@@ -1,0 +1,339 @@
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
+syntax = "proto3";
+
+package io.trino.plugin.hive;
+
+option java_package = "io.trino.plugin.hive.protobuf";
+option java_multiple_files = true;
+
+import "io/trino/protobuf/handles/v1/domain.proto";
+
+// Connector-owned handle payloads for protobuf control-plane encoding. Each
+// message mirrors the JSON form of the Hive handle it names: the same fields
+// travel, the same optional fields may be absent. The engine wraps these
+// bytes in its ConnectorHandle message.
+
+enum HiveColumnType {
+  HIVE_COLUMN_TYPE_UNSPECIFIED = 0;
+  PARTITION_KEY = 1;
+  REGULAR = 2;
+  SYNTHESIZED = 3;
+}
+
+message HiveColumnProjectionInfo {
+  repeated int32 dereference_indices = 1;
+  repeated string dereference_names = 2;
+  string hive_type = 3;
+  string type_id = 4;
+}
+
+message HiveColumnHandle {
+  string base_column_name = 1;
+  int32 base_hive_column_index = 2;
+  string base_hive_type = 3;
+  string base_type_id = 4;
+  HiveColumnProjectionInfo projection = 5;
+  HiveColumnType column_type = 6;
+  optional string comment = 7;
+}
+
+// TupleDomain keyed by HiveColumnHandle.
+message HiveTupleDomain {
+  io.trino.protobuf.handles.v1.TupleDomainKind kind = 1;
+  repeated HiveColumnDomain column_domains = 2;
+}
+
+message HiveColumnDomain {
+  HiveColumnHandle column = 1;
+  io.trino.protobuf.handles.v1.Domain domain = 2;
+}
+
+enum BucketingVersion {
+  BUCKETING_VERSION_UNSPECIFIED = 0;
+  BUCKETING_V1 = 1;
+  BUCKETING_V2 = 2;
+}
+
+// HivePartitioningHandle, or its HiveUpdateHandle subclass when update is set.
+message HivePartitioningHandle {
+  BucketingVersion bucketing_version = 1;
+  int32 bucket_count = 2;
+  repeated string hive_bucket_types = 3;
+  bool use_partitioned_bucketing = 4;
+  bool update = 5;
+}
+
+enum SortOrder {
+  SORT_ORDER_UNSPECIFIED = 0;
+  ASCENDING = 1;
+  DESCENDING = 2;
+}
+
+message SortingColumn {
+  string column_name = 1;
+  SortOrder order = 2;
+}
+
+message HiveTablePartitioning {
+  bool active = 1;
+  repeated HiveColumnHandle columns = 2;
+  HivePartitioningHandle partitioning_handle = 3;
+  int32 table_bucket_count = 4;
+  repeated SortingColumn sorted_by = 5;
+  bool for_write = 6;
+}
+
+message HiveBucketFilter {
+  repeated int32 buckets_to_keep = 1;
+}
+
+enum AcidOperation {
+  ACID_OPERATION_UNSPECIFIED = 0;
+  NONE = 1;
+  CREATE_TABLE = 2;
+  INSERT = 3;
+  MERGE = 4;
+}
+
+message AcidTransaction {
+  AcidOperation operation = 1;
+  int64 transaction_id = 2;
+  int64 write_id = 3;
+}
+
+message PartitionValues {
+  repeated string values = 1;
+}
+
+message AnalyzePartitionValues {
+  repeated PartitionValues partitions = 1;
+}
+
+message HiveTableHandle {
+  string schema_name = 1;
+  string table_name = 2;
+  repeated HiveColumnHandle partition_columns = 3;
+  repeated HiveColumnHandle data_columns = 4;
+  HiveTupleDomain compact_effective_predicate = 5;
+  HiveTupleDomain enforced_constraint = 6;
+  HiveTablePartitioning table_partitioning = 7;
+  HiveBucketFilter bucket_filter = 8;
+  AnalyzePartitionValues analyze_partition_values = 9;
+  AcidTransaction transaction = 10;
+}
+
+message Schema {
+  string serialization_library_name = 1;
+  bool full_acid_table = 2;
+  map<string, string> serde_properties = 3;
+}
+
+message HivePartitionKey {
+  string name = 1;
+  string value = 2;
+}
+
+message BucketConversion {
+  BucketingVersion bucketing_version = 1;
+  int32 table_bucket_count = 2;
+  int32 partition_bucket_count = 3;
+  repeated HiveColumnHandle bucket_column_handles = 4;
+}
+
+message BucketValidation {
+  BucketingVersion bucketing_version = 1;
+  int32 bucket_count = 2;
+  repeated HiveColumnHandle bucket_columns = 3;
+}
+
+message OriginalFileInfo {
+  string name = 1;
+  int64 file_size = 2;
+}
+
+message AcidInfo {
+  string partition_location = 1;
+  repeated string delete_delta_directories = 2;
+  repeated OriginalFileInfo original_files = 3;
+  int32 bucket_id = 4;
+  bool orc_acid_version_validated = 5;
+}
+
+message HiveSplit {
+  string partition_name = 1;
+  string path = 2;
+  int64 start = 3;
+  int64 length = 4;
+  int64 estimated_file_size = 5;
+  int64 file_modified_time = 6;
+  Schema schema = 7;
+  repeated HivePartitionKey partition_keys = 8;
+  optional int32 read_bucket_number = 9;
+  optional int32 table_bucket_number = 10;
+  bool force_local_scheduling = 11;
+  map<int32, string> hive_column_coercions = 12;
+  BucketConversion bucket_conversion = 13;
+  BucketValidation bucket_validation = 14;
+  AcidInfo acid_info = 15;
+  int64 split_weight = 16;
+}
+
+// io.trino.metastore.StorageFormat; a view has none of the three.
+message StorageFormat {
+  optional string serde = 1;
+  optional string input_format = 2;
+  optional string output_format = 3;
+}
+
+message HiveBucketProperty {
+  repeated string bucketed_by = 1;
+  int32 bucket_count = 2;
+  repeated SortingColumn sorted_by = 3;
+}
+
+message Storage {
+  StorageFormat storage_format = 1;
+  optional string location = 2;
+  HiveBucketProperty bucket_property = 3;
+  bool skewed = 4;
+  map<string, string> serde_parameters = 5;
+}
+
+message Column {
+  string name = 1;
+  string type = 2;
+  optional string comment = 3;
+  map<string, string> properties = 4;
+}
+
+message Table {
+  string database_name = 1;
+  string table_name = 2;
+  optional string owner = 3;
+  string table_type = 4;
+  Storage storage = 5;
+  repeated Column data_columns = 6;
+  repeated Column partition_columns = 7;
+  map<string, string> parameters = 8;
+  optional string view_original_text = 9;
+  optional string view_expanded_text = 10;
+  optional int64 write_id = 11;
+}
+
+message Partition {
+  string database_name = 1;
+  string table_name = 2;
+  repeated string values = 3;
+  Storage storage = 4;
+  repeated Column columns = 5;
+  map<string, string> parameters = 6;
+}
+
+// One entry of HivePageSinkMetadata.modifiedPartitions; an absent partition
+// records a partition that does not exist yet.
+message ModifiedPartition {
+  repeated string partition_values = 1;
+  Partition partition = 2;
+}
+
+message HivePageSinkMetadata {
+  string schema_name = 1;
+  string table_name = 2;
+  Table table = 3;
+  repeated ModifiedPartition modified_partitions = 4;
+}
+
+enum WriteMode {
+  WRITE_MODE_UNSPECIFIED = 0;
+  STAGE_AND_MOVE_TO_TARGET_DIRECTORY = 1;
+  DIRECT_TO_TARGET_NEW_DIRECTORY = 2;
+  DIRECT_TO_TARGET_EXISTING_DIRECTORY = 3;
+}
+
+message LocationHandle {
+  string target_path = 1;
+  string write_path = 2;
+  WriteMode write_mode = 3;
+}
+
+message BucketInfo {
+  repeated string bucketed_by = 1;
+  BucketingVersion bucketing_version = 2;
+  int32 bucket_count = 3;
+  repeated SortingColumn sorted_by = 4;
+}
+
+enum HiveStorageFormat {
+  HIVE_STORAGE_FORMAT_UNSPECIFIED = 0;
+  ORC = 1;
+  PARQUET = 2;
+  AVRO = 3;
+  RCBINARY = 4;
+  RCTEXT = 5;
+  SEQUENCEFILE = 6;
+  SEQUENCEFILE_PROTOBUF = 7;
+  JSON = 8;
+  OPENX_JSON = 9;
+  TEXTFILE = 10;
+  CSV = 11;
+  REGEX = 12;
+  ESRI = 13;
+  ESRI_GEO_JSON = 14;
+}
+
+// The fields HiveInsertTableHandle, HiveOutputTableHandle and
+// HiveTableExecuteHandle share through HiveWritableTableHandle.
+message HiveWritableTableHandle {
+  string schema_name = 1;
+  string table_name = 2;
+  repeated HiveColumnHandle input_columns = 3;
+  HivePageSinkMetadata page_sink_metadata = 4;
+  LocationHandle location_handle = 5;
+  BucketInfo bucket_info = 6;
+  HiveStorageFormat table_storage_format = 7;
+  HiveStorageFormat partition_storage_format = 8;
+  AcidTransaction transaction = 9;
+  bool retries_enabled = 10;
+}
+
+message HiveInsertTableHandle {
+  HiveWritableTableHandle writable = 1;
+}
+
+message HiveOutputTableHandle {
+  HiveWritableTableHandle writable = 1;
+  repeated string partitioned_by = 2;
+  string table_owner = 3;
+  map<string, string> additional_table_parameters = 4;
+  bool external = 5;
+}
+
+message HiveTableExecuteHandle {
+  HiveWritableTableHandle writable = 1;
+  string procedure_name = 2;
+  optional string write_declaration_id = 3;
+  optional int64 max_scanned_file_size = 4;
+}
+
+message HiveMergeTableHandle {
+  HiveTableHandle table_handle = 1;
+  HiveInsertTableHandle insert_handle = 2;
+}
+
+message HiveTransactionHandle {
+  bool auto_commit = 1;
+  string uuid = 2;
+}
