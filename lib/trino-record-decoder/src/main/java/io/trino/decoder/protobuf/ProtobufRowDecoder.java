@@ -13,6 +13,7 @@
  */
 package io.trino.decoder.protobuf;
 
+import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.DynamicMessage;
 import io.trino.decoder.DecoderColumnHandle;
 import io.trino.decoder.FieldValueProvider;
@@ -37,11 +38,12 @@ public class ProtobufRowDecoder
 
     public ProtobufRowDecoder(DynamicMessageProvider dynamicMessageProvider, Set<DecoderColumnHandle> columns, TypeManager typeManager, DescriptorProvider descriptorProvider)
     {
-        this.dynamicMessageProvider = requireNonNull(dynamicMessageProvider, "dynamicMessageSupplier is null");
+        this.dynamicMessageProvider = requireNonNull(dynamicMessageProvider, "dynamicMessageProvider is null");
+        Optional<Descriptor> readerDescriptor = dynamicMessageProvider.getReaderDescriptor();
         this.columnDecoders = columns.stream()
                 .collect(toImmutableMap(
                         identity(),
-                        column -> new ProtobufColumnDecoder(column, typeManager, descriptorProvider)));
+                        column -> new ProtobufColumnDecoder(column, typeManager, descriptorProvider, readerDescriptor)));
     }
 
     @Override

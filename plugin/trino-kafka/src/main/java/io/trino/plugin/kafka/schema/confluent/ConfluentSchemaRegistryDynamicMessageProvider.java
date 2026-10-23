@@ -34,6 +34,7 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Optional;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Throwables.throwIfInstanceOf;
 import static io.trino.cache.SafeCaches.buildNonEvictableCache;
 import static io.trino.decoder.protobuf.ProtobufErrorCode.INVALID_PROTOBUF_MESSAGE;
@@ -47,19 +48,58 @@ import static java.util.Objects.requireNonNull;
  * Decodes records in the Confluent wire format with the schema they were written with: the
  * schema id and message indexes in the frame select the message type, which is fetched from
  * the schema registry and cached. Ids are immutable in the registry, so the cache has no TTL.
+ * <p>
+ * The reader schema, which the table columns were derived from, is the first message of the
+ * schema whose id the data schema parameter names; see {@link #readerSchemaReference(int)}.
  */
 public class ConfluentSchemaRegistryDynamicMessageProvider
         implements DynamicMessageProvider
 {
+    private static final String READER_SCHEMA_REFERENCE_PREFIX = "schema-registry-id:";
+
     private final SchemaRegistryClient schemaRegistryClient;
+    private final Optional<Integer> readerSchemaId;
     private final NonEvictableLoadingCache<MessageKey, Descriptor> descriptorCache;
 
     public ConfluentSchemaRegistryDynamicMessageProvider(SchemaRegistryClient schemaRegistryClient)
     {
+        this(schemaRegistryClient, Optional.empty());
+    }
+
+    public ConfluentSchemaRegistryDynamicMessageProvider(SchemaRegistryClient schemaRegistryClient, Optional<Integer> readerSchemaId)
+    {
         this.schemaRegistryClient = requireNonNull(schemaRegistryClient, "schemaRegistryClient is null");
+        this.readerSchemaId = requireNonNull(readerSchemaId, "readerSchemaId is null");
         descriptorCache = buildNonEvictableCache(
                 CacheBuilder.newBuilder().maximumSize(1000),
                 CacheLoader.from(this::lookupDescriptor));
+    }
+
+    /**
+     * The data schema of a table whose columns were derived from the given registry schema. A
+     * protobuf schema is compiled together with its references, which only the registry has, so
+     * the table carries the schema's id rather than its text.
+     */
+    public static String readerSchemaReference(int schemaId)
+    {
+        return READER_SCHEMA_REFERENCE_PREFIX + schemaId;
+    }
+
+    private static int parseReaderSchemaReference(String reference)
+    {
+        checkArgument(reference.startsWith(READER_SCHEMA_REFERENCE_PREFIX), "Data schema is not a schema registry reference: %s", reference);
+        try {
+            return Integer.parseInt(reference.substring(READER_SCHEMA_REFERENCE_PREFIX.length()));
+        }
+        catch (NumberFormatException e) {
+            throw new IllegalArgumentException(format("Data schema is not a schema registry reference: %s", reference), e);
+        }
+    }
+
+    @Override
+    public Optional<Descriptor> getReaderDescriptor()
+    {
+        return readerSchemaId.map(schemaId -> getDescriptor(new MessageKey(schemaId, ImmutableList.of(0))));
     }
 
     @Override
@@ -130,7 +170,7 @@ public class ConfluentSchemaRegistryDynamicMessageProvider
         @Override
         public DynamicMessageProvider create(Optional<String> protoFile)
         {
-            return new ConfluentSchemaRegistryDynamicMessageProvider(schemaRegistryClient);
+            return new ConfluentSchemaRegistryDynamicMessageProvider(schemaRegistryClient, protoFile.map(ConfluentSchemaRegistryDynamicMessageProvider::parseReaderSchemaReference));
         }
     }
 }

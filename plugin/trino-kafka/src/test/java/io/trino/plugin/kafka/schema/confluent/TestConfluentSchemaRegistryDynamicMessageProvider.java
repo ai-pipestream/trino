@@ -54,6 +54,7 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -63,6 +64,7 @@ import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SCHEMA_ERROR;
 import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SCHEMA_REGISTRY_ERROR;
 import static io.trino.plugin.kafka.schema.confluent.ConfluentProtobufWireFormat.frame;
 import static io.trino.plugin.kafka.schema.confluent.ConfluentProtobufWireFormat.messageIndexes;
+import static io.trino.plugin.kafka.schema.confluent.ConfluentSchemaRegistryDynamicMessageProvider.readerSchemaReference;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VarcharType.createUnboundedVarcharType;
@@ -343,6 +345,75 @@ public class TestConfluentSchemaRegistryDynamicMessageProvider
         assertThat(newRow.get(col2).getLong()).isEqualTo(2L);
         SqlRow newDetailRow = (SqlRow) newRow.get(detail).getObject();
         assertThat(BIGINT.getLong(newDetailRow.getRawFieldBlock(1), newDetailRow.getRawIndex())).isEqualTo(9L);
+    }
+
+    @Test
+    public void testRenamedFieldsAreReadByNumber()
+            throws Exception
+    {
+        MockSchemaRegistryClient client = createClient();
+        int oldId = client.register("topic-value", schema(client,
+                """
+                syntax = "proto3";
+                message schema {
+                    string col_1 = 1;
+                    message Detail {
+                        string note = 1;
+                    }
+                    Detail detail = 2;
+                }
+                """));
+        int newId = client.register("topic-value", schema(client,
+                """
+                syntax = "proto3";
+                message schema {
+                    string name = 1;
+                    message Detail {
+                        string text = 1;
+                    }
+                    Detail info = 2;
+                }
+                """));
+
+        // the table columns and the data schema come from the latest schema, which renamed every field
+        RowType infoType = RowType.rowType(RowType.field("text", createUnboundedVarcharType()));
+        KafkaColumnHandle name = new KafkaColumnHandle("name", VARCHAR, "name", null, null, false, false, false);
+        KafkaColumnHandle info = new KafkaColumnHandle("info", infoType, "info", null, null, false, false, false);
+        KafkaColumnHandle text = new KafkaColumnHandle("text", VARCHAR, "info/text", null, null, false, false, false);
+        RowDecoder decoder = new ProtobufRowDecoderFactory(new ConfluentSchemaRegistryDynamicMessageProvider.Factory(client), TESTING_TYPE_MANAGER, new DummyDescriptorProvider())
+                .create(TestingConnectorSession.SESSION, new RowDecoderSpec(ProtobufRowDecoder.NAME, ImmutableMap.of("dataSchema", readerSchemaReference(newId)), ImmutableSet.of(name, info, text)));
+
+        Descriptor oldDescriptor = ((ConfluentProtobufSchema) client.getSchemaById(oldId)).getMessageDescriptor();
+        Descriptor oldDetail = oldDescriptor.findFieldByName("detail").getMessageType();
+        DynamicMessage oldMessage = DynamicMessage.newBuilder(oldDescriptor)
+                .setField(oldDescriptor.findFieldByName("col_1"), "old")
+                .setField(oldDescriptor.findFieldByName("detail"), DynamicMessage.newBuilder(oldDetail).setField(oldDetail.findFieldByName("note"), "written before the rename").build())
+                .build();
+        Map<DecoderColumnHandle, FieldValueProvider> oldRow = decoder.decodeRow(frame(oldId, ImmutableList.of(0), oldMessage.toByteArray())).orElseThrow();
+        assertThat(oldRow.get(name).getSlice().toStringUtf8()).isEqualTo("old");
+        assertThat(oldRow.get(text).getSlice().toStringUtf8()).isEqualTo("written before the rename");
+        SqlRow oldInfo = (SqlRow) oldRow.get(info).getObject();
+        assertThat(createUnboundedVarcharType().getSlice(oldInfo.getRawFieldBlock(0), oldInfo.getRawIndex()).toStringUtf8()).isEqualTo("written before the rename");
+    }
+
+    @Test
+    public void testReaderSchema()
+            throws Exception
+    {
+        MockSchemaRegistryClient client = createClient();
+        int schemaId = client.register("topic-value", schema(client, SCHEMA));
+        ConfluentSchemaRegistryDynamicMessageProvider.Factory factory = new ConfluentSchemaRegistryDynamicMessageProvider.Factory(client);
+
+        assertThat(factory.create(Optional.empty()).getReaderDescriptor()).isEmpty();
+        assertThat(factory.create(Optional.of(readerSchemaReference(schemaId))).getReaderDescriptor())
+                .contains(((ConfluentProtobufSchema) client.getSchemaById(schemaId)).getMessageDescriptor());
+        assertTrinoException(
+                () -> factory.create(Optional.of(readerSchemaReference(12345))).getReaderDescriptor(),
+                KAFKA_SCHEMA_ERROR,
+                "Schema id 12345 does not exist in the schema registry");
+        assertThatThrownBy(() -> factory.create(Optional.of(SCHEMA)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageStartingWith("Data schema is not a schema registry reference: syntax");
     }
 
     @Test

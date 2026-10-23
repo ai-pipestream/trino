@@ -16,9 +16,11 @@ package io.trino.plugin.kafka.schema.confluent;
 import com.google.common.collect.ImmutableList;
 import io.confluent.kafka.schemaregistry.ParsedSchema;
 import io.confluent.kafka.schemaregistry.avro.AvroSchema;
+import io.confluent.kafka.schemaregistry.avro.AvroSchemaProvider;
 import io.confluent.kafka.schemaregistry.client.MockSchemaRegistryClient;
 import io.confluent.kafka.schemaregistry.client.rest.entities.SchemaReference;
 import io.trino.decoder.avro.AvroRowDecoderFactory;
+import io.trino.decoder.protobuf.ProtobufRowDecoder;
 import io.trino.plugin.kafka.KafkaTableHandle;
 import io.trino.spi.TrinoException;
 import io.trino.spi.predicate.TupleDomain;
@@ -28,6 +30,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Optional;
 
+import static io.trino.plugin.kafka.schema.confluent.ConfluentSchemaRegistryDynamicMessageProvider.readerSchemaReference;
 import static java.lang.String.format;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -66,6 +69,28 @@ public class TestConfluentContentSchemaProvider
 
         ConfluentContentSchemaProvider avroConfluentSchemaProvider = new ConfluentContentSchemaProvider(mockSchemaRegistryClient);
         assertThat(avroConfluentSchemaProvider.readSchema(Optional.empty(), Optional.of(SUBJECT_NAME)).map(schema -> new Parser().parse(schema))).isPresent();
+    }
+
+    @Test
+    public void testProtobufSchemaIsReferencedById()
+            throws Exception
+    {
+        MockSchemaRegistryClient mockSchemaRegistryClient = new MockSchemaRegistryClient(ImmutableList.of(new AvroSchemaProvider(), new ConfluentProtobufSchemaProvider()));
+        int schemaId = mockSchemaRegistryClient.register(SUBJECT_NAME, new ConfluentProtobufSchema(
+                """
+                syntax = "proto3";
+                message schema {
+                  string col_1 = 1;
+                }
+                """,
+                ImmutableList.of(),
+                mockSchemaRegistryClient));
+
+        // a protobuf schema compiles only with its registry references, so the table refers to the schema by id
+        ConfluentContentSchemaProvider schemaProvider = new ConfluentContentSchemaProvider(mockSchemaRegistryClient);
+        KafkaTableHandle tableHandle = new KafkaTableHandle("default", TOPIC, TOPIC, ProtobufRowDecoder.NAME, ProtobufRowDecoder.NAME, Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(SUBJECT_NAME), ImmutableList.of(), TupleDomain.all());
+        assertThat(schemaProvider.getMessage(tableHandle)).contains(readerSchemaReference(schemaId));
+        assertThat(schemaProvider.getKey(tableHandle)).isEmpty();
     }
 
     private static String getAvroSchemaWithReference()
