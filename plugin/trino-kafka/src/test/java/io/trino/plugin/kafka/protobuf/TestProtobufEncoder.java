@@ -14,10 +14,16 @@
 package io.trino.plugin.kafka.protobuf;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.Timestamp;
+import io.trino.decoder.DecoderColumnHandle;
+import io.trino.decoder.FieldValueProvider;
+import io.trino.decoder.protobuf.FileDescriptorProvider;
+import io.trino.decoder.protobuf.FixedSchemaDynamicMessageProvider;
+import io.trino.decoder.protobuf.ProtobufRowDecoder;
 import io.trino.plugin.kafka.KafkaColumnHandle;
 import io.trino.plugin.kafka.encoder.EncoderColumnHandle;
 import io.trino.plugin.kafka.encoder.RowEncoder;
@@ -40,6 +46,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static io.airlift.slice.Slices.utf8Slice;
@@ -584,6 +591,45 @@ public class TestProtobufEncoder
             valueBuilder.appendNull();
         });
         assertNullRejected(descriptor, createEncoderColumnHandle("attributes", attributesType, "attributes"), mapBlockBuilder.build(), "NULL map value not allowed for protobuf field 'schema.attributes'");
+    }
+
+    @Test
+    public void testNullValuesOfProto2Fields()
+    {
+        Descriptor descriptor = getFileDescriptor(
+                """
+                syntax = "proto2";
+                message schema {
+                  required string name = 1;
+                  optional int64 count = 2 [default = 7];
+                  oneof choice {
+                    int64 number = 3;
+                    string word = 4;
+                  }
+                }
+                """).findMessageTypeByName(DEFAULT_MESSAGE);
+        EncoderColumnHandle nameColumn = createEncoderColumnHandle("name", VARCHAR, "name");
+        KafkaColumnHandle countColumn = new KafkaColumnHandle("count", BIGINT, "count", null, null, false, false, false);
+        KafkaColumnHandle numberColumn = new KafkaColumnHandle("number", BIGINT, "number", null, null, false, false, false);
+
+        // optional fields and oneof members are left unset, and read back as NULL
+        RowEncoder encoder = new ProtobufRowEncoder(descriptor, TestingConnectorSession.SESSION, ImmutableList.of(nameColumn, countColumn, numberColumn));
+        encoder.appendColumnValue(nativeValueBlock(VARCHAR, utf8Slice("Trino")), 0);
+        encoder.appendColumnValue(nullBlock(BIGINT), 0);
+        encoder.appendColumnValue(nullBlock(BIGINT), 0);
+        byte[] record = encoder.toByteArray();
+        assertThat(record).isEqualTo(DynamicMessage.newBuilder(descriptor).setField(descriptor.findFieldByName("name"), "Trino").build().toByteArray());
+        Map<DecoderColumnHandle, FieldValueProvider> decodedRow = new ProtobufRowDecoder(
+                new FixedSchemaDynamicMessageProvider(descriptor),
+                ImmutableSet.of(countColumn, numberColumn),
+                TESTING_TYPE_MANAGER,
+                new FileDescriptorProvider())
+                .decodeRow(record)
+                .orElseThrow();
+        assertThat(decodedRow.values()).allMatch(FieldValueProvider::isNull);
+
+        // a message without a required field cannot be built
+        assertNullRejected(descriptor, nameColumn, nullBlock(VARCHAR), "NULL value not allowed for required protobuf field 'schema.name'");
     }
 
     private static void assertNullRejected(Descriptor descriptor, EncoderColumnHandle column, Block block, String message)

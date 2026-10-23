@@ -26,10 +26,10 @@ public interface DynamicMessageProvider
     DynamicMessage parseDynamicMessage(byte[] data);
 
     /**
-     * The message type the table columns were derived from. Fields of a parsed message are
-     * looked up by the number this type assigns to the column's field, so a field keeps its
-     * column across renames, as it keeps its identity on the wire. Without a reader type, fields
-     * are looked up by name.
+     * The message type the table columns were derived from. Fields of a parsed message of this
+     * type are looked up by the number this type assigns to the column's field, so a field keeps
+     * its column across renames, as it keeps its identity on the wire. Without a reader type, and
+     * in messages of another type, fields are looked up by name.
      */
     default Optional<Descriptor> getReaderDescriptor()
     {

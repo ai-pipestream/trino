@@ -58,8 +58,10 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.decoder.DecoderErrorCode.DECODER_CONVERSION_NOT_SUPPORTED;
+import static io.trino.decoder.protobuf.ProtobufFieldMapping.findReaderField;
 import static io.trino.decoder.protobuf.ProtobufFieldMapping.findWriterField;
 import static io.trino.decoder.protobuf.ProtobufFieldMapping.getReaderFieldType;
+import static io.trino.decoder.protobuf.ProtobufFieldMapping.toReaderValue;
 import static io.trino.spi.block.MapValueBuilder.buildMapValue;
 import static io.trino.spi.block.RowValueBuilder.buildRowValue;
 import static io.trino.spi.type.StandardTypes.JSON;
@@ -269,25 +271,33 @@ public class ProtobufValueProvider
                 .collect(toImmutableList());
         Type keyType = type.getKeyType();
         Type valueType = type.getValueType();
-        // the reader type is the map entry message, whose value field is number 2
-        Optional<Descriptor> valueReaderType = readerType
-                .map(entryType -> entryType.findFieldByNumber(2))
-                .filter(field -> field.getJavaType() == FieldDescriptor.JavaType.MESSAGE)
-                .map(FieldDescriptor::getMessageType);
+        // the reader type is the map entry message, whose key and value fields are numbers 1 and 2
+        Optional<FieldDescriptor> keyReaderField = readerType.map(entryType -> entryType.findFieldByNumber(1));
+        Optional<FieldDescriptor> valueReaderField = readerType.map(entryType -> entryType.findFieldByNumber(2));
 
         if (parentBlockBuilder != null) {
-            ((MapBlockBuilder) parentBlockBuilder).buildEntry((keyBuilder, valueBuilder) -> buildMap(columnName, dynamicMessages, valueReaderType, keyType, valueType, keyBuilder, valueBuilder));
+            ((MapBlockBuilder) parentBlockBuilder).buildEntry((keyBuilder, valueBuilder) -> buildMap(columnName, dynamicMessages, keyReaderField, valueReaderField, keyType, valueType, keyBuilder, valueBuilder));
             return null;
         }
-        return buildMapValue(type, dynamicMessages.size(), (keyBuilder, valueBuilder) -> buildMap(columnName, dynamicMessages, valueReaderType, keyType, valueType, keyBuilder, valueBuilder));
+        return buildMapValue(type, dynamicMessages.size(), (keyBuilder, valueBuilder) -> buildMap(columnName, dynamicMessages, keyReaderField, valueReaderField, keyType, valueType, keyBuilder, valueBuilder));
     }
 
-    private void buildMap(String columnName, Collection<DynamicMessage> dynamicMessages, Optional<Descriptor> valueReaderType, Type keyType, Type valueType, BlockBuilder keyBuilder, BlockBuilder valueBuilder)
+    private void buildMap(
+            String columnName,
+            Collection<DynamicMessage> dynamicMessages,
+            Optional<FieldDescriptor> keyReaderField,
+            Optional<FieldDescriptor> valueReaderField,
+            Type keyType,
+            Type valueType,
+            BlockBuilder keyBuilder,
+            BlockBuilder valueBuilder)
     {
         for (DynamicMessage dynamicMessage : dynamicMessages) {
-            if (dynamicMessage.getField(dynamicMessage.getDescriptorForType().findFieldByNumber(1)) != null) {
-                serializeObject(keyBuilder, dynamicMessage.getField(getFieldDescriptor(dynamicMessage, 1)), Optional.empty(), keyType, columnName);
-                serializeObject(valueBuilder, dynamicMessage.getField(getFieldDescriptor(dynamicMessage, 2)), valueReaderType, valueType, columnName);
+            FieldDescriptor keyField = getFieldDescriptor(dynamicMessage, 1);
+            FieldDescriptor valueField = getFieldDescriptor(dynamicMessage, 2);
+            if (dynamicMessage.getField(keyField) != null) {
+                serializeObject(keyBuilder, toReaderValue(keyReaderField, keyField, dynamicMessage.getField(keyField)), Optional.empty(), keyType, columnName);
+                serializeObject(valueBuilder, toReaderValue(valueReaderField, valueField, dynamicMessage.getField(valueField)), getReaderFieldType(valueReaderField), valueType, columnName);
             }
         }
     }
@@ -316,7 +326,8 @@ public class ProtobufValueProvider
             Field field = fields.get(i);
             checkState(field.getName().isPresent(), "field name not found");
             String fieldName = field.getName().get();
-            FieldDescriptor fieldDescriptor = findWriterField(record.getDescriptorForType(), readerType, fieldName);
+            Optional<FieldDescriptor> readerField = findReaderField(readerType, fieldName);
+            FieldDescriptor fieldDescriptor = findWriterField(record.getDescriptorForType(), readerField, fieldName);
             if (fieldDescriptor == null || isUnsetPresenceField(record, fieldDescriptor)) {
                 // the record was written with a schema that does not have this field, or the field is not set
                 fieldBuilders.get(i).appendNull();
@@ -324,8 +335,8 @@ public class ProtobufValueProvider
             }
             serializeObject(
                     fieldBuilders.get(i),
-                    record.getField(fieldDescriptor),
-                    getReaderFieldType(readerType, fieldName),
+                    toReaderValue(readerField, fieldDescriptor, record.getField(fieldDescriptor)),
+                    getReaderFieldType(readerField),
                     field.getType(),
                     columnName);
         }
@@ -360,15 +371,11 @@ public class ProtobufValueProvider
 
     /**
      * A field that tracks presence is {@code NULL} when it is not set, rather than the default value
-     * of its type: a proto3 field declared {@code optional}, and a field of a message type, for which
-     * being unset differs from holding an empty message.
+     * of its type: a field declared {@code optional} or {@code required}, a member of a {@code oneof}
+     * and a field of a message type, for which being unset differs from holding an empty message.
      */
     static boolean isUnsetPresenceField(DynamicMessage message, FieldDescriptor fieldDescriptor)
     {
-        if (fieldDescriptor.isRepeated()) {
-            return false;
-        }
-        boolean proto3Optional = fieldDescriptor.getContainingOneof() != null && fieldDescriptor.getRealContainingOneof() == null;
-        return (proto3Optional || fieldDescriptor.getJavaType() == FieldDescriptor.JavaType.MESSAGE) && !message.hasField(fieldDescriptor);
+        return fieldDescriptor.hasPresence() && !message.hasField(fieldDescriptor);
     }
 }

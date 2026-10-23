@@ -146,6 +146,10 @@ public class ProtobufRowEncoder
 
     private static void checkNullAllowed(FieldDescriptor fieldDescriptor)
     {
+        if (fieldDescriptor.isRequired()) {
+            // a message without a required field cannot be built
+            throw new TrinoException(CONSTRAINT_VIOLATION, format("NULL value not allowed for required protobuf field '%s'", fieldDescriptor.getFullName()));
+        }
         if (fieldDescriptor.hasPresence()) {
             return;
         }

@@ -39,7 +39,8 @@ public class ProtobufRowDecoder
     public ProtobufRowDecoder(DynamicMessageProvider dynamicMessageProvider, Set<DecoderColumnHandle> columns, TypeManager typeManager, DescriptorProvider descriptorProvider)
     {
         this.dynamicMessageProvider = requireNonNull(dynamicMessageProvider, "dynamicMessageProvider is null");
-        Optional<Descriptor> readerDescriptor = dynamicMessageProvider.getReaderDescriptor();
+        // looking the reader schema up can take a schema registry request, which a decoder without columns does not need
+        Optional<Descriptor> readerDescriptor = columns.isEmpty() ? Optional.empty() : dynamicMessageProvider.getReaderDescriptor();
         this.columnDecoders = columns.stream()
                 .collect(toImmutableMap(
                         identity(),
