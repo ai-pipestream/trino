@@ -31,7 +31,9 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.Int128;
 import io.trino.spi.type.LongTimestamp;
+import io.trino.spi.type.MapType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.TypeOperators;
 import org.junit.jupiter.api.Test;
 
 import java.io.UncheckedIOException;
@@ -54,6 +56,7 @@ import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_NANOS;
+import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static java.lang.Float.floatToRawIntBits;
@@ -163,6 +166,35 @@ public class TestDomainProtoCodec
     }
 
     @Test
+    public void testUnorderedDiscreteValuesAreSorted()
+    {
+        Domain values = Domain.multipleValues(BIGINT, List.of(1L, 3L));
+        io.trino.protobuf.handles.v1.Domain proto = codec.toProto(values);
+        io.trino.protobuf.handles.v1.Domain unordered = proto.toBuilder()
+                .setSortedRanges(proto.getSortedRanges().toBuilder()
+                        .setBounds(serialize(BIGINT, 3L, 3L, 1L, 1L)))
+                .build();
+        Domain decoded = codec.fromProto(unordered);
+        assertThat(decoded).isEqualTo(values);
+        assertThat(((SortedRangeSet) decoded.getValues()).getDiscreteSetMarker()).isEqualTo(DISCRETE);
+    }
+
+    @Test
+    public void testNaNInDiscreteSetIsRejected()
+    {
+        io.trino.protobuf.handles.v1.Domain proto = codec.toProto(Domain.singleValue(DOUBLE, 1.0));
+        assertThat(proto.getSortedRanges().getDiscreteSetMarker()).isEqualTo(DiscreteSetMarker.DISCRETE);
+        io.trino.protobuf.handles.v1.Domain nan = proto.toBuilder()
+                .setSortedRanges(proto.getSortedRanges().toBuilder()
+                        .setBounds(serialize(DOUBLE, Double.NaN, Double.NaN)))
+                .build();
+        assertThatThrownBy(() -> codec.fromProto(nan))
+                .isInstanceOf(TrinoException.class)
+                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()))
+                .hasMessageContaining("NaN");
+    }
+
+    @Test
     public void testSortedRangesWireShape()
     {
         io.trino.protobuf.handles.v1.Domain proto = codec.toProto(Domain.create(ValueSet.ofRanges(
@@ -219,7 +251,83 @@ public class TestDomainProtoCodec
                 .setAllOrNone(AllOrNoneValueSet.newBuilder().setAll(true))
                 .build();
         assertThatThrownBy(() -> codec.fromProto(unknown))
+                .isInstanceOf(TrinoException.class)
                 .hasMessageContaining("no_such_type");
+    }
+
+    @Test
+    public void testBlockOfAnotherTypeIsRejected()
+    {
+        // the bounds of a bigint domain encoded as a varchar block
+        io.trino.protobuf.handles.v1.Domain proto = codec.toProto(Domain.singleValue(BIGINT, 1L));
+        io.trino.protobuf.handles.v1.Domain varcharBounds = proto.toBuilder()
+                .setSortedRanges(proto.getSortedRanges().toBuilder()
+                        .setBounds(serialize(VARCHAR, utf8Slice("a"), utf8Slice("a"))))
+                .build();
+        assertThatThrownBy(() -> codec.fromProto(varcharBounds))
+                .isInstanceOf(TrinoException.class)
+                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()))
+                .hasMessageContaining("of type bigint carries a VariableWidthBlock instead of a LongArrayBlock");
+
+        io.trino.protobuf.handles.v1.Domain equatable = codec.toProto(Domain.singleValue(BIGINT_MAP, mapOf(1, 2)));
+        io.trino.protobuf.handles.v1.Domain bigintValues = equatable.toBuilder()
+                .setEquatableValues(equatable.getEquatableValues().toBuilder()
+                        .setValues(serialize(BIGINT, 1L)))
+                .build();
+        assertThatThrownBy(() -> codec.fromProto(bigintValues))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("carries a LongArrayBlock instead of a MapBlock");
+    }
+
+    @Test
+    public void testNestedBlockOfAnotherTypeIsRejected()
+    {
+        // a map block whose keys and values are varchar where the domain type says bigint: the outer
+        // block class matches, so the mismatch surfaces while the nested values are read
+        Type varcharMap = new MapType(VARCHAR, VARCHAR, new TypeOperators());
+        BlockBuilder builder = varcharMap.createBlockBuilder(null, 1);
+        ((MapBlockBuilder) builder).buildEntry((keyBuilder, valueBuilder) -> {
+            VARCHAR.writeSlice(keyBuilder, utf8Slice("k"));
+            VARCHAR.writeSlice(valueBuilder, utf8Slice("v"));
+        });
+        DynamicSliceOutput output = new DynamicSliceOutput(64);
+        SERDE.writeBlock(output, builder.build());
+        io.trino.protobuf.handles.v1.Domain proto = codec.toProto(Domain.singleValue(BIGINT_MAP, mapOf(1, 2)));
+        io.trino.protobuf.handles.v1.Domain nestedMismatch = proto.toBuilder()
+                .setEquatableValues(proto.getEquatableValues().toBuilder()
+                        .setValues(ByteString.copyFrom(output.slice().getBytes())))
+                .build();
+        assertThatThrownBy(() -> codec.fromProto(nestedMismatch))
+                .isInstanceOf(TrinoException.class)
+                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()))
+                .hasMessageContaining("domain of type map(bigint, bigint)");
+    }
+
+    @Test
+    public void testTrailingBytesAfterBlockAreRejected()
+    {
+        io.trino.protobuf.handles.v1.Domain proto = codec.toProto(Domain.singleValue(BIGINT, 1L));
+        io.trino.protobuf.handles.v1.Domain trailing = proto.toBuilder()
+                .setSortedRanges(proto.getSortedRanges().toBuilder()
+                        .setBounds(proto.getSortedRanges().getBounds().concat(ByteString.copyFrom(new byte[] {0, 0, 0}))))
+                .build();
+        assertThatThrownBy(() -> codec.fromProto(trailing))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("has 3 bytes after its block");
+    }
+
+    @Test
+    public void testInvalidTypeIdIsCategorized()
+    {
+        for (String typeId : List.of("", "varchar(-1)", "map(bigint")) {
+            io.trino.protobuf.handles.v1.Domain invalid = io.trino.protobuf.handles.v1.Domain.newBuilder()
+                    .setTypeId(typeId)
+                    .setAllOrNone(AllOrNoneValueSet.newBuilder().setAll(true))
+                    .build();
+            assertThatThrownBy(() -> codec.fromProto(invalid))
+                    .isInstanceOf(TrinoException.class)
+                    .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()));
+        }
     }
 
     @Test
@@ -268,15 +376,26 @@ public class TestDomainProtoCodec
             SortedRangeSet decodedRanges = (SortedRangeSet) decoded.getValues();
             assertThat(decodedRanges.getOrderedRanges()).isEqualTo(ranges.getOrderedRanges());
             if (ranges.getDiscreteSetMarker() == DISCRETE) {
-                // discrete sets come back exactly as the sender built them, block layout included
+                // discrete sets come back marked discrete; the block layout is whatever the block serde wrote,
+                // exactly as on the JSON control plane
                 assertThat(decodedRanges.getDiscreteSetMarker()).isEqualTo(DISCRETE);
-                assertThat(decodedRanges.getSortedRanges().getClass()).isEqualTo(ranges.getSortedRanges().getClass());
             }
             assertThat(decodedRanges.isDiscreteSet()).isEqualTo(ranges.isDiscreteSet());
         }
         if (domain.getValues() instanceof EquatableValueSet values) {
             assertThat(((EquatableValueSet) decoded.getValues()).getEntries()).isEqualTo(values.getEntries());
         }
+    }
+
+    private static ByteString serialize(Type type, Object... values)
+    {
+        BlockBuilder builder = type.createBlockBuilder(null, values.length);
+        for (Object value : values) {
+            writeNativeValue(type, builder, value);
+        }
+        DynamicSliceOutput output = new DynamicSliceOutput(64);
+        SERDE.writeBlock(output, builder.build());
+        return ByteString.copyFrom(output.slice().getBytes());
     }
 
     private static Object mapOf(long... keysAndValues)
