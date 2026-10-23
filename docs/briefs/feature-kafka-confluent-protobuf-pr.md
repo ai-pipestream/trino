@@ -40,6 +40,13 @@ using only Apache-licensed dependencies:
   Confluent wire format. Tables whose topic has no key subject write records
   with a null key; tables without a value subject reject `INSERT`, since a
   null value would be a tombstone.
+* New `kafka.confluent-schema-registry.basic-auth.*` and
+  `kafka.confluent-schema-registry.ssl.*` properties configure basic
+  authentication, a trust store, a client key store and host name
+  verification for the registry connection, for Avro and protobuf alike.
+  The connector now always passes the endpoint identification algorithm to
+  the client, which otherwise accepts any certificate host name as soon as
+  any client property is set.
 * The Confluent protobuf libraries remain test dependencies only;
   `TestNoConfluentProtobufDependency` scans the connector's classes to make
   sure nothing references them.
@@ -62,10 +69,13 @@ Behavior changes worth calling out for reviewers:
 
 * Fixes trinodb/trino#20204 (schema evolution with nested messages).
 * Related to trinodb/trino#23736 (Confluent licensed JARs for protobuf).
-* Basic auth to the schema registry needs `basic.auth.credentials.source`
-  in the client properties, which the connector does not expose today; this
-  is unchanged by this PR (the REST test shows the provider works through
-  the client with it set). A follow-up could add a config property.
+* Before this change the registry client received only the cache TTL
+  property. The Confluent client builds its TLS context from the
+  `schema.registry.ssl.*` properties whenever any property is set, and
+  installs an accept-all host name verifier unless
+  `ssl.endpoint.identification.algorithm` is among them, so HTTPS registries
+  were reached without host name verification. The new security config
+  always sets the algorithm (`https` by default).
 
 Commits (each builds on its own):
 
@@ -76,6 +86,7 @@ Commits (each builds on its own):
 5. Drop Confluent protobuf provider from Kafka
 6. Support INSERT into Confluent protobuf tables
 7. Document protobuf support without extra JARs
+8. Add schema registry auth and TLS configuration
 
 The review commits on top of these (map entries, known imports, proto3
 optional presence, enum and key-only INSERT fixes, docs) are to be folded
@@ -92,8 +103,12 @@ Tests:
   byte-for-byte comparison with Confluent's `MessageIndexes`),
   `TestConfluentProtobufSchema`, `TestConfluentSchemaRegistryDynamicMessageProvider`,
   `TestConfluentProtobufRowEncoderFactory`, `TestConfluentProtobufSchemaRegistryRest`
-  (in-process HTTP registry with basic auth: decode with references, encode
-  with the latest schema, 401, 404, dangling reference, registry down),
+  (in-process HTTP and HTTPS registries: decode with references, encode
+  with the latest schema, basic auth from the security config, 401, 404,
+  dangling reference, registry down, TLS with and without a trust store,
+  host name verification and disabling it),
+  `TestConfluentSchemaRegistrySecurityConfig` (defaults, mappings, client
+  property names, validation),
   `TestProtobufSchemaParser`, `TestNoConfluentProtobufDependency`, protobuf
   cases in `TestConfluentSchemaRegistryTableDescriptionSupplier`, and new
   Docker cases in `TestKafkaProtobufWithSchemaRegistryMinimalFunctionality`
@@ -111,6 +126,10 @@ Tests:
 * Support protobuf schemas in the Confluent table description supplier
   without copying Confluent licensed JAR files into the plugin directory,
   including schema references, schema evolution and `INSERT`. ({issue}`23736`)
+* Add `kafka.confluent-schema-registry.basic-auth.*` and
+  `kafka.confluent-schema-registry.ssl.*` configuration properties for
+  authentication and TLS to the Confluent schema registry, and verify the
+  registry host name by default.
 * Fix query failure when a protobuf record was written with a schema that
   lacks a field of a `ROW` column. ({issue}`20204`)
 * {{breaking}} Map protobuf fields declared `optional` in proto3 schemas of the
