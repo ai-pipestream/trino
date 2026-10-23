@@ -13,9 +13,12 @@
  */
 package io.trino.server.protobuf;
 
+import jakarta.ws.rs.core.MediaType;
+
 public final class ProtobufMediaTypes
 {
     public static final String APPLICATION_X_PROTOBUF = "application/x-protobuf";
+    public static final MediaType APPLICATION_X_PROTOBUF_TYPE = new MediaType("application", "x-protobuf");
 
     private ProtobufMediaTypes() {}
 }

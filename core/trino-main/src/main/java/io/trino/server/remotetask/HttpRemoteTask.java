@@ -108,6 +108,7 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static io.airlift.http.client.FullJsonResponseHandler.createFullJsonResponseHandler;
+import static io.airlift.http.client.HeaderNames.ACCEPT;
 import static io.airlift.http.client.HeaderNames.CONTENT_TYPE;
 import static io.airlift.http.client.HttpStatus.OK;
 import static io.airlift.http.client.HttpUriBuilder.uriBuilderFrom;
@@ -1003,6 +1004,8 @@ public final class HttpRemoteTask
             return preparePost()
                     .setUri(uriBuilder.build())
                     .setHeader(CONTENT_TYPE, APPLICATION_X_PROTOBUF)
+                    // the TaskInfo response has no protobuf schema yet
+                    .setHeader(ACCEPT, MediaType.JSON_UTF_8.toString())
                     .setBodyGenerator(createStaticBodyGenerator(FailTaskRequestProtoMapper.toByteArray(failTaskRequest)))
                     .setSpanBuilder(createSpanBuilder("task-fail", span))
                     .build();
@@ -1010,6 +1013,7 @@ public final class HttpRemoteTask
         return preparePost()
                 .setUri(uriBuilder.build())
                 .setHeader(CONTENT_TYPE, MediaType.JSON_UTF_8.toString())
+                .setHeader(ACCEPT, MediaType.JSON_UTF_8.toString())
                 .setBodyGenerator(createStaticBodyGenerator(failTaskRequestCodec.toJsonBytes(failTaskRequest)))
                 .setSpanBuilder(createSpanBuilder("task-fail", span))
                 .build();

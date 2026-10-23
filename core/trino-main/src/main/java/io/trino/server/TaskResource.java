@@ -13,6 +13,8 @@
  */
 package io.trino.server;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -25,6 +27,7 @@ import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.trino.Session;
 import io.trino.connector.CatalogHandle;
+import io.trino.execution.DynamicFiltersCollector.VersionedDynamicFilterDomains;
 import io.trino.execution.FailureInjector;
 import io.trino.execution.FailureInjector.InjectedFailure;
 import io.trino.execution.SqlTaskManager;
@@ -51,6 +54,7 @@ import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.ServiceUnavailableException;
+import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.container.AsyncResponse;
 import jakarta.ws.rs.container.Suspended;
 import jakarta.ws.rs.core.Context;
@@ -85,7 +89,9 @@ import static io.trino.server.InternalHeaders.TRINO_PAGE_TOKEN;
 import static io.trino.server.InternalHeaders.TRINO_TASK_FAILED;
 import static io.trino.server.InternalHeaders.TRINO_TASK_INSTANCE_ID;
 import static io.trino.server.protobuf.ProtobufMediaTypes.APPLICATION_X_PROTOBUF;
+import static io.trino.server.protobuf.ProtobufMediaTypes.APPLICATION_X_PROTOBUF_TYPE;
 import static io.trino.server.security.ResourceSecurity.AccessType.INTERNAL_ONLY;
+import static jakarta.ws.rs.core.HttpHeaders.ACCEPT;
 import static jakarta.ws.rs.core.Response.status;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -243,10 +249,11 @@ public class TaskResource
             @PathParam("taskId") TaskId taskId,
             @HeaderParam(TRINO_CURRENT_VERSION) Long currentVersion,
             @HeaderParam(TRINO_MAX_WAIT) Duration maxWait,
+            @HeaderParam(ACCEPT) String accept,
             @Suspended AsyncResponse asyncResponse)
     {
         requireNonNull(taskId, "taskId is null");
-        if (failRequestIfInvalid(asyncResponse)) {
+        if (failRequestIfInvalid(asyncResponse) || failRequestIfNotAcceptable(accept, asyncResponse)) {
             return;
         }
 
@@ -286,11 +293,12 @@ public class TaskResource
     public void acknowledgeAndGetNewDynamicFilterDomains(
             @PathParam("taskId") TaskId taskId,
             @HeaderParam(TRINO_CURRENT_VERSION) Long currentDynamicFiltersVersion,
+            @HeaderParam(ACCEPT) String accept,
             @Suspended AsyncResponse asyncResponse)
     {
         requireNonNull(taskId, "taskId is null");
         requireNonNull(currentDynamicFiltersVersion, "currentDynamicFiltersVersion is null");
-        if (failRequestIfInvalid(asyncResponse)) {
+        if (failRequestIfInvalid(asyncResponse) || failRequestIfNotAcceptable(accept, asyncResponse)) {
             return;
         }
 
@@ -298,14 +306,15 @@ public class TaskResource
             return;
         }
 
+        VersionedDynamicFilterDomains dynamicFilterDomains = taskManager.acknowledgeAndGetNewDynamicFilterDomains(taskId, currentDynamicFiltersVersion);
         if (controlPlaneEncoding == ControlPlaneEncoding.PROTOBUF) {
             asyncResponse.resume(Response.ok()
                     .type(APPLICATION_X_PROTOBUF)
-                    .entity(dynamicFilterDomainsProtoMapper.toByteArray(taskManager.acknowledgeAndGetNewDynamicFilterDomains(taskId, currentDynamicFiltersVersion)))
+                    .entity(dynamicFilterDomainsProtoMapper.toByteArray(dynamicFilterDomains))
                     .build());
             return;
         }
-        asyncResponse.resume(taskManager.acknowledgeAndGetNewDynamicFilterDomains(taskId, currentDynamicFiltersVersion));
+        asyncResponse.resume(Response.ok(dynamicFilterDomains, MediaType.APPLICATION_JSON_TYPE).build());
     }
 
     @DELETE
@@ -332,6 +341,8 @@ public class TaskResource
         return taskInfo;
     }
 
+    // The request body must be in the configured control plane encoding; the
+    // other encoding is rejected with 415 rather than accepted as a fallback.
     @POST
     @Path("{taskId}/fail")
     @Consumes(MediaType.APPLICATION_JSON)
@@ -342,12 +353,12 @@ public class TaskResource
     {
         requireNonNull(taskId, "taskId is null");
         requireNonNull(failTaskRequest, "failTaskRequest is null");
+        requireRequestEncoding(ControlPlaneEncoding.JSON);
         return taskManager.failTask(taskId, failTaskRequest.getFailureInfo().toException());
     }
 
     // Protobuf variant of failTask. The TaskInfo response stays JSON until
-    // TaskInfo gets a protobuf schema (phase 5 of the experiment); the
-    // FailTaskRequest body itself never falls back to JSON.
+    // TaskInfo gets a protobuf schema (phase 5 of the experiment).
     @POST
     @Path("{taskId}/fail")
     @Consumes(APPLICATION_X_PROTOBUF)
@@ -357,7 +368,9 @@ public class TaskResource
             byte[] failTaskRequestBytes)
     {
         requireNonNull(taskId, "taskId is null");
-        FailTaskRequest failTaskRequest = FailTaskRequestProtoMapper.parseFrom(requireNonNull(failTaskRequestBytes, "failTaskRequestBytes is null"));
+        requireNonNull(failTaskRequestBytes, "failTaskRequestBytes is null");
+        requireRequestEncoding(ControlPlaneEncoding.PROTOBUF);
+        FailTaskRequest failTaskRequest = FailTaskRequestProtoMapper.parseFrom(failTaskRequestBytes);
         return taskManager.failTask(taskId, failTaskRequest.getFailureInfo().toException());
     }
 
@@ -561,7 +574,57 @@ public class TaskResource
                     .entity(TaskStatusProtoMapper.toByteArray(taskStatus))
                     .build();
         }
-        return Response.ok(taskStatus).build();
+        return Response.ok(taskStatus, MediaType.APPLICATION_JSON_TYPE).build();
+    }
+
+    /**
+     * The control plane does not negotiate formats: a node answers in the
+     * configured encoding only, and a request that cannot accept it gets 406
+     * instead of the other encoding.
+     */
+    private boolean failRequestIfNotAcceptable(String accept, AsyncResponse asyncResponse)
+    {
+        if (isAcceptable(accept, controlPlaneEncoding)) {
+            return false;
+        }
+        asyncResponse.resume(Response.status(Status.NOT_ACCEPTABLE)
+                .type(MediaType.TEXT_PLAIN_TYPE)
+                .entity("Task control plane encoding is %s; the request accepts only %s".formatted(controlPlaneEncoding, accept))
+                .build());
+        return true;
+    }
+
+    @VisibleForTesting
+    static boolean isAcceptable(String accept, ControlPlaneEncoding encoding)
+    {
+        if (accept == null || accept.isBlank()) {
+            // no Accept header means any representation is acceptable
+            return true;
+        }
+        MediaType produced = encoding == ControlPlaneEncoding.PROTOBUF ? APPLICATION_X_PROTOBUF_TYPE : MediaType.APPLICATION_JSON_TYPE;
+        for (String entry : Splitter.on(',').trimResults().omitEmptyStrings().split(accept)) {
+            MediaType acceptable;
+            try {
+                acceptable = MediaType.valueOf(entry);
+            }
+            catch (IllegalArgumentException _) {
+                continue;
+            }
+            if (acceptable.isCompatible(produced) && !"0".equals(acceptable.getParameters().get("q"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void requireRequestEncoding(ControlPlaneEncoding requestEncoding)
+    {
+        if (controlPlaneEncoding != requestEncoding) {
+            throw new WebApplicationException(Response.status(Status.UNSUPPORTED_MEDIA_TYPE)
+                    .type(MediaType.TEXT_PLAIN_TYPE)
+                    .entity("Task control plane encoding is %s; the request body is %s".formatted(controlPlaneEncoding, requestEncoding))
+                    .build());
+        }
     }
 
     private static boolean shouldSummarize(UriInfo uriInfo)

@@ -39,6 +39,7 @@ import java.util.function.Supplier;
 import static com.google.common.net.MediaType.JSON_UTF_8;
 import static com.google.common.util.concurrent.Futures.addCallback;
 import static io.airlift.http.client.FullJsonResponseHandler.createFullJsonResponseHandler;
+import static io.airlift.http.client.HeaderNames.ACCEPT;
 import static io.airlift.http.client.HeaderNames.CONTENT_TYPE;
 import static io.airlift.http.client.HttpUriBuilder.uriBuilderFrom;
 import static io.airlift.http.client.Request.Builder.prepareGet;
@@ -169,6 +170,7 @@ class DynamicFiltersFetcher
         Request request = prepareGet()
                 .setUri(uriBuilderFrom(taskUri).appendPath("dynamicfilters").build())
                 .setHeader(CONTENT_TYPE, controlPlaneEncoding == ControlPlaneEncoding.PROTOBUF ? APPLICATION_X_PROTOBUF : JSON_UTF_8.toString())
+                .setHeader(ACCEPT, controlPlaneEncoding == ControlPlaneEncoding.PROTOBUF ? APPLICATION_X_PROTOBUF : JSON_UTF_8.toString())
                 .setHeader(TRINO_CURRENT_VERSION_HEADER, Long.toString(localDynamicFiltersVersion))
                 .setHeader(TRINO_MAX_WAIT_HEADER, refreshMaxWait.toString())
                 .setSpanBuilder(spanBuilderFactory.get())
