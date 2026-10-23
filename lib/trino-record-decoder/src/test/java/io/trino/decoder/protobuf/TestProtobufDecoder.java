@@ -48,6 +48,7 @@ import java.net.URI;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import static io.trino.decoder.protobuf.ProtobufRowDecoderFactory.DEFAULT_MESSAGE;
@@ -710,6 +711,292 @@ public class TestProtobufDecoder
         checkValue(decodedRow, numberColumn, enumData);
         checkValue(decodedRow, timestampColumn, sqlTimestamp.getEpochMicros());
         checkValue(decodedRow, bytesColumn, Slices.wrappedBuffer(bytesData));
+    }
+
+    @Test
+    public void testUnsetMessageFieldsAreNull()
+    {
+        Descriptor descriptor = messageDescriptor(
+                """
+                syntax = "proto3";
+                import "google/protobuf/timestamp.proto";
+                message schema {
+                  message Detail {
+                    string note = 1;
+                    google.protobuf.Timestamp created = 2;
+                  }
+                  Detail detail = 1;
+                  google.protobuf.Timestamp updated = 2;
+                  message Wrapper {
+                    Detail detail = 1;
+                  }
+                  Wrapper wrapper = 3;
+                }
+                """);
+        RowType detailType = RowType.from(ImmutableList.of(RowType.field("note", VARCHAR), RowType.field("created", TIMESTAMP_MICROS)));
+        DecoderTestColumnHandle detailColumn = new DecoderTestColumnHandle(0, "detail", detailType, "detail", null, null, false, false, false);
+        DecoderTestColumnHandle noteColumn = new DecoderTestColumnHandle(1, "note", VARCHAR, "detail/note", null, null, false, false, false);
+        DecoderTestColumnHandle updatedColumn = new DecoderTestColumnHandle(2, "updated", TIMESTAMP_MICROS, "updated", null, null, false, false, false);
+        DecoderTestColumnHandle wrapperColumn = new DecoderTestColumnHandle(3, "wrapper", RowType.from(ImmutableList.of(RowType.field("detail", detailType))), "wrapper", null, null, false, false, false);
+        ProtobufRowDecoder decoder = new ProtobufRowDecoder(
+                new FixedSchemaDynamicMessageProvider(descriptor),
+                ImmutableSet.of(detailColumn, noteColumn, updatedColumn, wrapperColumn),
+                TESTING_TYPE_MANAGER,
+                new FileDescriptorProvider());
+
+        // a message field that is not set is NULL, as a column, through a flattened column and within a row
+        Descriptor wrapperDescriptor = descriptor.findFieldByName("wrapper").getMessageType();
+        Map<DecoderColumnHandle, FieldValueProvider> unset = decoder.decodeRow(DynamicMessage.newBuilder(descriptor)
+                        .setField(descriptor.findFieldByName("wrapper"), DynamicMessage.getDefaultInstance(wrapperDescriptor))
+                        .build()
+                        .toByteArray())
+                .orElseThrow();
+        assertThat(unset.get(detailColumn).isNull()).isTrue();
+        assertThat(unset.get(noteColumn).isNull()).isTrue();
+        assertThat(unset.get(updatedColumn).isNull()).isTrue();
+        SqlRow wrapper = (SqlRow) unset.get(wrapperColumn).getObject();
+        assertThat(wrapper.getRawFieldBlock(0).isNull(wrapper.getRawIndex())).isTrue();
+
+        // an empty message is a value: its fields have their default values
+        Descriptor detailDescriptor = descriptor.findFieldByName("detail").getMessageType();
+        Map<DecoderColumnHandle, FieldValueProvider> empty = decoder.decodeRow(DynamicMessage.newBuilder(descriptor)
+                        .setField(descriptor.findFieldByName("detail"), DynamicMessage.getDefaultInstance(detailDescriptor))
+                        .setField(descriptor.findFieldByName("updated"), Timestamp.getDefaultInstance())
+                        .build()
+                        .toByteArray())
+                .orElseThrow();
+        SqlRow detail = (SqlRow) empty.get(detailColumn).getObject();
+        assertThat(VARCHAR.getSlice(detail.getRawFieldBlock(0), detail.getRawIndex()).toStringUtf8()).isEmpty();
+        assertThat(detail.getRawFieldBlock(1).isNull(detail.getRawIndex())).isTrue();
+        checkValue(empty, noteColumn, "");
+        checkValue(empty, updatedColumn, 0L);
+    }
+
+    @Test
+    public void testRenamedFieldsAreReadByNumber()
+    {
+        // the table columns come from the reader schema, the record was written with a schema that renamed every field
+        Descriptor reader = messageDescriptor(
+                """
+                syntax = "proto3";
+                message schema {
+                  string name = 1;
+                  int64 count = 2;
+                  message Detail {
+                    string note = 1;
+                    int64 weight = 2;
+                  }
+                  Detail detail = 3;
+                  repeated Detail details = 4;
+                  map<string, Detail> detail_map = 5;
+                }
+                """);
+        Descriptor writer = messageDescriptor(
+                """
+                syntax = "proto3";
+                message schema {
+                  string title = 1;
+                  int64 total = 2;
+                  message Info {
+                    string text = 1;
+                    int64 mass = 2;
+                  }
+                  Info info = 3;
+                  repeated Info infos = 4;
+                  map<string, Info> info_map = 5;
+                }
+                """);
+        RowType detailType = RowType.from(ImmutableList.of(RowType.field("note", VARCHAR), RowType.field("weight", BIGINT)));
+        DecoderTestColumnHandle nameColumn = new DecoderTestColumnHandle(0, "name", VARCHAR, "name", null, null, false, false, false);
+        DecoderTestColumnHandle countColumn = new DecoderTestColumnHandle(1, "count", BIGINT, "count", null, null, false, false, false);
+        DecoderTestColumnHandle detailColumn = new DecoderTestColumnHandle(2, "detail", detailType, "detail", null, null, false, false, false);
+        DecoderTestColumnHandle weightColumn = new DecoderTestColumnHandle(3, "weight", BIGINT, "detail/weight", null, null, false, false, false);
+        DecoderTestColumnHandle detailsColumn = new DecoderTestColumnHandle(4, "details", new ArrayType(detailType), "details", null, null, false, false, false);
+        DecoderTestColumnHandle detailMapColumn = new DecoderTestColumnHandle(5, "detail_map", new MapType(VARCHAR, detailType, TESTING_TYPE_MANAGER.getTypeOperators()), "detail_map", null, null, false, false, false);
+        ProtobufRowDecoder decoder = new ProtobufRowDecoder(
+                new EvolvedSchemaProvider(writer, Optional.of(reader)),
+                ImmutableSet.of(nameColumn, countColumn, detailColumn, weightColumn, detailsColumn, detailMapColumn),
+                TESTING_TYPE_MANAGER,
+                new FileDescriptorProvider());
+
+        Descriptor info = writer.findFieldByName("info").getMessageType();
+        DynamicMessage infoMessage = DynamicMessage.newBuilder(info)
+                .setField(info.findFieldByName("text"), "renamed")
+                .setField(info.findFieldByName("mass"), 42L)
+                .build();
+        Descriptor entry = writer.findFieldByName("info_map").getMessageType();
+        DynamicMessage message = DynamicMessage.newBuilder(writer)
+                .setField(writer.findFieldByName("title"), "Trino")
+                .setField(writer.findFieldByName("total"), 7L)
+                .setField(writer.findFieldByName("info"), infoMessage)
+                .addRepeatedField(writer.findFieldByName("infos"), infoMessage)
+                .addRepeatedField(writer.findFieldByName("info_map"), DynamicMessage.newBuilder(entry)
+                        .setField(entry.findFieldByName("key"), "first")
+                        .setField(entry.findFieldByName("value"), infoMessage)
+                        .build())
+                .build();
+        Map<DecoderColumnHandle, FieldValueProvider> decodedRow = decoder.decodeRow(message.toByteArray()).orElseThrow();
+
+        checkValue(decodedRow, nameColumn, "Trino");
+        checkValue(decodedRow, countColumn, 7L);
+        checkValue(decodedRow, weightColumn, 42L);
+        assertDetail((SqlRow) decodedRow.get(detailColumn).getObject());
+        Block details = (Block) decodedRow.get(detailsColumn).getObject();
+        assertThat(details.getPositionCount()).isEqualTo(1);
+        assertDetail(detailType.getObject(details, 0));
+        SqlMap detailMap = (SqlMap) decodedRow.get(detailMapColumn).getObject();
+        assertThat(detailMap.getSize()).isEqualTo(1);
+        assertThat(VARCHAR.getSlice(detailMap.getRawKeyBlock(), detailMap.getRawOffset()).toStringUtf8()).isEqualTo("first");
+        assertDetail(detailType.getObject(detailMap.getRawValueBlock(), detailMap.getRawOffset()));
+    }
+
+    private static void assertDetail(SqlRow detail)
+    {
+        assertThat(VARCHAR.getSlice(detail.getRawFieldBlock(0), detail.getRawIndex()).toStringUtf8()).isEqualTo("renamed");
+        assertThat(BIGINT.getLong(detail.getRawFieldBlock(1), detail.getRawIndex())).isEqualTo(42L);
+    }
+
+    @Test
+    public void testFieldNumberIdentifiesTheField()
+    {
+        // the writer has fields of the same names under other numbers: on the wire those are different fields
+        Descriptor reader = messageDescriptor(
+                """
+                syntax = "proto3";
+                message schema {
+                  string name = 1;
+                  int64 count = 2;
+                  message Detail {
+                    string note = 1;
+                  }
+                  Detail detail = 3;
+                }
+                """);
+        Descriptor writer = messageDescriptor(
+                """
+                syntax = "proto3";
+                message schema {
+                  string name = 1;
+                  int64 count = 7;
+                  message Detail {
+                    string note = 8;
+                  }
+                  Detail detail = 3;
+                }
+                """);
+        RowType detailType = RowType.from(ImmutableList.of(RowType.field("note", VARCHAR)));
+        DecoderTestColumnHandle nameColumn = new DecoderTestColumnHandle(0, "name", VARCHAR, "name", null, null, false, false, false);
+        DecoderTestColumnHandle countColumn = new DecoderTestColumnHandle(1, "count", BIGINT, "count", null, null, false, false, false);
+        DecoderTestColumnHandle detailColumn = new DecoderTestColumnHandle(2, "detail", detailType, "detail", null, null, false, false, false);
+        DecoderTestColumnHandle noteColumn = new DecoderTestColumnHandle(3, "note", VARCHAR, "detail/note", null, null, false, false, false);
+        Set<DecoderColumnHandle> columns = ImmutableSet.of(nameColumn, countColumn, detailColumn, noteColumn);
+
+        Descriptor writerDetail = writer.findFieldByName("detail").getMessageType();
+        byte[] record = DynamicMessage.newBuilder(writer)
+                .setField(writer.findFieldByName("name"), "Trino")
+                .setField(writer.findFieldByName("count"), 7L)
+                .setField(writer.findFieldByName("detail"), DynamicMessage.newBuilder(writerDetail).setField(writerDetail.findFieldByName("note"), "n").build())
+                .build()
+                .toByteArray();
+
+        Map<DecoderColumnHandle, FieldValueProvider> byNumber = new ProtobufRowDecoder(new EvolvedSchemaProvider(writer, Optional.of(reader)), columns, TESTING_TYPE_MANAGER, new FileDescriptorProvider())
+                .decodeRow(record)
+                .orElseThrow();
+        checkValue(byNumber, nameColumn, "Trino");
+        assertThat(byNumber.get(countColumn).isNull()).isTrue();
+        assertThat(byNumber.get(noteColumn).isNull()).isTrue();
+        SqlRow detail = (SqlRow) byNumber.get(detailColumn).getObject();
+        assertThat(detail.getRawFieldBlock(0).isNull(detail.getRawIndex())).isTrue();
+
+        // without a reader schema, the names identify the fields
+        Map<DecoderColumnHandle, FieldValueProvider> byName = new ProtobufRowDecoder(new EvolvedSchemaProvider(writer, Optional.empty()), columns, TESTING_TYPE_MANAGER, new FileDescriptorProvider())
+                .decodeRow(record)
+                .orElseThrow();
+        checkValue(byName, nameColumn, "Trino");
+        checkValue(byName, countColumn, 7L);
+        checkValue(byName, noteColumn, "n");
+    }
+
+    @Test
+    public void testFieldNumberReusedWithAnotherEncodingIsNull()
+    {
+        Descriptor reader = messageDescriptor(
+                """
+                syntax = "proto3";
+                message schema {
+                  string name = 1;
+                  message Detail {
+                    string note = 1;
+                  }
+                  Detail detail = 2;
+                  repeated string tags = 3;
+                  int64 count = 4;
+                  int64 total = 5;
+                }
+                """);
+        Descriptor writer = messageDescriptor(
+                """
+                syntax = "proto3";
+                message schema {
+                  int64 name = 1;
+                  string detail = 2;
+                  string tags = 3;
+                  int32 count = 4;
+                  uint64 total = 5;
+                }
+                """);
+        DecoderTestColumnHandle nameColumn = new DecoderTestColumnHandle(0, "name", VARCHAR, "name", null, null, false, false, false);
+        DecoderTestColumnHandle detailColumn = new DecoderTestColumnHandle(1, "detail", RowType.from(ImmutableList.of(RowType.field("note", VARCHAR))), "detail", null, null, false, false, false);
+        DecoderTestColumnHandle tagsColumn = new DecoderTestColumnHandle(2, "tags", new ArrayType(VARCHAR), "tags", null, null, false, false, false);
+        DecoderTestColumnHandle countColumn = new DecoderTestColumnHandle(3, "count", BIGINT, "count", null, null, false, false, false);
+        DecoderTestColumnHandle totalColumn = new DecoderTestColumnHandle(4, "total", BIGINT, "total", null, null, false, false, false);
+        ProtobufRowDecoder decoder = new ProtobufRowDecoder(
+                new EvolvedSchemaProvider(writer, Optional.of(reader)),
+                ImmutableSet.of(nameColumn, detailColumn, tagsColumn, countColumn, totalColumn),
+                TESTING_TYPE_MANAGER,
+                new FileDescriptorProvider());
+
+        byte[] record = DynamicMessage.newBuilder(writer)
+                .setField(writer.findFieldByName("name"), 1L)
+                .setField(writer.findFieldByName("detail"), "d")
+                .setField(writer.findFieldByName("tags"), "t")
+                .setField(writer.findFieldByName("count"), 5)
+                .setField(writer.findFieldByName("total"), 6L)
+                .build()
+                .toByteArray();
+        Map<DecoderColumnHandle, FieldValueProvider> decodedRow = decoder.decodeRow(record).orElseThrow();
+
+        // a field whose number now carries another kind of value is not the column's field
+        assertThat(decodedRow.get(nameColumn).isNull()).isTrue();
+        assertThat(decodedRow.get(detailColumn).isNull()).isTrue();
+        assertThat(decodedRow.get(tagsColumn).isNull()).isTrue();
+        // integer types that share an encoding are the same field
+        checkValue(decodedRow, countColumn, 5L);
+        checkValue(decodedRow, totalColumn, 6L);
+    }
+
+    private static Descriptor messageDescriptor(String protoFile)
+    {
+        return ProtobufUtils.getFileDescriptor(protoFile).findMessageTypeByName(DEFAULT_MESSAGE);
+    }
+
+    /**
+     * Parses records with a schema other than the one the columns were derived from.
+     */
+    private record EvolvedSchemaProvider(Descriptor writerDescriptor, Optional<Descriptor> readerDescriptor)
+            implements DynamicMessageProvider
+    {
+        @Override
+        public DynamicMessage parseDynamicMessage(byte[] data)
+        {
+            return new FixedSchemaDynamicMessageProvider(writerDescriptor).parseDynamicMessage(data);
+        }
+
+        @Override
+        public Optional<Descriptor> getReaderDescriptor()
+        {
+            return readerDescriptor;
+        }
     }
 
     private Timestamp getTimestamp(SqlTimestamp sqlTimestamp)

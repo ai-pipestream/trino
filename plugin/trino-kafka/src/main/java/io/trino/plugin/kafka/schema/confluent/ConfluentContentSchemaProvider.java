@@ -50,6 +50,10 @@ public class ConfluentContentSchemaProvider
         try {
             SchemaMetadata schemaMetadata = schemaRegistryClient.getLatestSchemaMetadata(subject.get());
             ParsedSchema schema = schemaRegistryClient.getSchemaBySubjectAndId(subject.get(), schemaMetadata.getId());
+            if (schema instanceof ConfluentProtobufSchema) {
+                // the decoder fetches the schema from the registry, as its text alone does not compile when it has references
+                return Optional.of(ConfluentSchemaRegistryDynamicMessageProvider.readerSchemaReference(schemaMetadata.getId()));
+            }
             return Optional.ofNullable(schema.rawSchema())
                     .map(Object::toString);
         }

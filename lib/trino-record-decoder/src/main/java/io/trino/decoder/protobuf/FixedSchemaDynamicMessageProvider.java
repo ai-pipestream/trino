@@ -45,6 +45,12 @@ public class FixedSchemaDynamicMessageProvider
         }
     }
 
+    @Override
+    public Optional<Descriptor> getReaderDescriptor()
+    {
+        return Optional.of(descriptor);
+    }
+
     public static class Factory
             implements DynamicMessageProvider.Factory
     {
