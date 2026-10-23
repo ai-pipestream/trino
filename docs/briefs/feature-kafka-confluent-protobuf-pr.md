@@ -30,9 +30,14 @@ using only Apache-licensed dependencies:
   schema names the registry id of the schema the columns were derived from,
   and the decoder maps each column's field to the writer field with the same
   number and encoding, at the top level and within `ROW`, `ARRAY` and `MAP`
-  columns. A renamed field keeps its column; fields that an older writer
-  schema lacks, or that it encodes differently under the same number,
-  decode as `NULL` (fixes trinodb/trino#20204).
+  columns, and converts its value the way protobuf reads it with the reader
+  type (`int32` to `int64`, `int64` to `int32`, `bool`, enums by number,
+  zigzag and `string`/`bytes` changes). A renamed field or enum value keeps
+  its column and name; fields that an older writer schema lacks, that it
+  encodes differently under the same number, or that change between
+  `google.protobuf.Timestamp` or `Any` and another message type decode as
+  `NULL` (fixes trinodb/trino#20204). Records of another message type than
+  the table's are matched by name.
   The message index path is resolved the way Confluent's deserializer does,
   counting the map entry messages that registered schema text declares
   explicitly, and such explicit entries are read as maps.
@@ -47,11 +52,12 @@ using only Apache-licensed dependencies:
   with a null key; tables without a value subject reject `INSERT`, since a
   null value would be a tombstone.
 * The protobuf encoder writes `NULL` as an unset field when the field tracks
-  presence (`optional` or message typed), for columns, flattened columns and
-  `ROW` fields alike, and rejects it with `CONSTRAINT_VIOLATION` and a
-  message naming the field for the others (proto3 scalars without
-  `optional`, `repeated` and `map` fields, `ARRAY` elements and `MAP`
-  values). Previously every `NULL` failed with `GENERIC_INTERNAL_ERROR`.
+  presence (`optional`, `oneof` member or message typed), for columns,
+  flattened columns and `ROW` fields alike, and rejects it with
+  `CONSTRAINT_VIOLATION` and a message naming the field for the others
+  (proto3 scalars without `optional`, proto2 `required` fields, `repeated`
+  and `map` fields, `ARRAY` elements and `MAP` values). Previously every
+  `NULL` failed with `GENERIC_INTERNAL_ERROR`.
 * New `kafka.confluent-schema-registry.basic-auth.*` and
   `kafka.confluent-schema-registry.ssl.*` properties configure basic
   authentication, a trust store, a client key store and host name
@@ -79,6 +85,10 @@ Behavior changes worth calling out for reviewers:
   1970-01-01 no longer stands in for a field that was never set. This is
   what makes `INSERT` of `NULL` into such a field round-trip. Applies to the
   file-based protobuf decoder as well.
+* The same holds for every field that tracks presence: an unset proto2
+  `optional` field (even with a declared default) and an unset `oneof`
+  member decode as `NULL` instead of the default value, matching the
+  encoder, which leaves such fields unset for `NULL`.
 * File-based protobuf tables (`FileTableDescriptionSupplier`) gain the same
   descriptor builder; oneof fields no longer get dropped from their
   descriptors.
@@ -119,14 +129,18 @@ Tests:
   map entry naming, groups, duplicates, package-less files, proto2 defaults
   including escaped bytes and special float values, reserved declarations)
   and `TestProtobufDecoder` (including renamed fields read by number, a
-  number reused with another encoding, and name lookup without a reader
-  schema); `verify -P ci` and the error-prone compile pass.
+  number reused with another encoding, name lookup without a reader
+  schema, wire-compatible type changes checked against protobuf's own
+  parse with the reader schema, incompatible message and map types, records
+  of another message type, proto2 and oneof presence, and a decoder without
+  columns); `verify -P ci` and the error-prone compile pass.
 * `plugin/trino-kafka`: `TestConfluentProtobufWireFormat` (including a
   byte-for-byte comparison with Confluent's `MessageIndexes`),
   `TestConfluentProtobufSchema`, `TestConfluentSchemaRegistryDynamicMessageProvider`
   (including the reader schema reference and a rename evolution),
   `TestConfluentContentSchemaProvider`, `TestProtobufEncoder` (`NULL` left
-  unset or rejected per field),
+  unset or rejected per field, proto2 `required`, `optional` and `oneof`
+  fields read back as `NULL`),
   `TestConfluentProtobufRowEncoderFactory`, `TestConfluentProtobufSchemaRegistryRest`
   (in-process HTTP and HTTPS registries: decode with references, encode
   with the latest schema, basic auth from the security config, 401, 404,
@@ -141,7 +155,8 @@ Tests:
   cases in `TestConfluentSchemaRegistryTableDescriptionSupplier`, and new
   Docker cases in `TestKafkaProtobufWithSchemaRegistryMinimalFunctionality`
   (INSERT round trip, INSERT without key subject, schema references, nested
-  schema evolution, renamed fields read by number).
+  schema evolution, renamed fields read by number, a widened field and a
+  renamed enum value).
 
 ## Release notes
 
@@ -163,10 +178,14 @@ Tests:
   `disabled` to restore the previous behavior.
 * Fix query failure when a protobuf record was written with a schema that
   lacks a field of a `ROW` column. ({issue}`20204`)
-* Fix `NULL` results for protobuf records written before a field was renamed
-  in the Confluent table description supplier.
+* Fix `NULL` results for protobuf records written before a field was renamed,
+  and old names for records written before an enum value was renamed, in the
+  Confluent table description supplier.
 * Allow `INSERT` of `NULL` into protobuf fields that track presence, and fail
   with a clear error instead of an internal error for the others.
+* {{breaking}} Return `NULL` for protobuf fields that track presence and are not
+  set, such as message typed fields, proto2 `optional` fields and `oneof`
+  members, instead of an empty message or the field's default value.
 * {{breaking}} Map protobuf fields declared `optional` in proto3 schemas of the
   Confluent table description supplier to columns of the field's type, instead
   of `JSON` columns named after their synthetic oneof.
