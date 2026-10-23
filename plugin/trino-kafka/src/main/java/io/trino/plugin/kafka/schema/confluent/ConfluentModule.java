@@ -52,19 +52,21 @@ import io.trino.plugin.kafka.schema.TableDescriptionSupplier;
 import io.trino.spi.HostAddress;
 import io.trino.spi.TrinoException;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
-import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.inject.Scopes.SINGLETON;
 import static com.google.inject.multibindings.MapBinder.newMapBinder;
 import static com.google.inject.multibindings.Multibinder.newSetBinder;
 import static io.airlift.bootstrap.ClosingBinder.closingBinder;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 import static io.trino.plugin.kafka.encoder.EncoderModule.encoderFactory;
+import static io.trino.spi.StandardErrorCode.CONFIGURATION_INVALID;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
+import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
 public class ConfluentModule
@@ -114,10 +116,18 @@ public class ConfluentModule
                 .map(HostAddress::getHostText)
                 .collect(toImmutableList());
 
-        Map<String, ?> schemaRegistryClientProperties = propertiesProviders.stream()
-                .map(SchemaRegistryClientPropertiesProvider::getSchemaRegistryClientProperties)
-                .flatMap(properties -> properties.entrySet().stream())
-                .collect(toImmutableMap(Map.Entry::getKey, Map.Entry::getValue));
+        Map<String, Object> schemaRegistryClientProperties = new HashMap<>();
+        Map<String, String> propertySources = new HashMap<>();
+        for (SchemaRegistryClientPropertiesProvider provider : propertiesProviders) {
+            String source = provider.getClass().getName();
+            provider.getSchemaRegistryClientProperties().forEach((name, value) -> {
+                String otherSource = propertySources.putIfAbsent(name, source);
+                if (otherSource != null) {
+                    throw new TrinoException(CONFIGURATION_INVALID, format("Schema registry client property '%s' is set by both %s and %s", name, otherSource, source));
+                }
+                schemaRegistryClientProperties.put(name, value);
+            });
+        }
 
         return new ClassLoaderSafeSchemaRegistryClient(
                 new CachedSchemaRegistryClient(
