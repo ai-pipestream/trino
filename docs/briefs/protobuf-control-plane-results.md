@@ -111,11 +111,12 @@ loops over `TaskStatusProtoMapper` / `JsonCodec<TaskStatus>` and
 
 ## Tests run for this branch
 
-- `lib/trino-protobuf-handles`: `TestDomainProtoCodec` (12, incl. a lying
+- `lib/trino-protobuf-handles`: `TestDomainProtoCodec` (18, incl. a lying
   discrete marker, duplicate discrete values, corrupt blocks, mismatched
-  inclusive flags, null in equatable values, unknown types),
-  `TestProtobufHandleCodec` (4).
-- `core/trino-main`: `TestConnectorHandleProtobufCodec` (12),
+  inclusive flags, null in equatable values, unknown and invalid types,
+  blocks of the wrong class, trailing bytes, unordered values and NaN),
+  `TestProtobufHandleCodec` (5).
+- `core/trino-main`: `TestConnectorHandleProtobufCodec` (13),
   `TestSplitProtoMapper` (11), `TestSystemHandleCodecProvider` (9),
   `TestInformationSchemaHandleCodecProvider` (7),
   `TestGlobalSystemHandleCodecProvider` (5), `TestTaskProtoMappers` (15),
@@ -124,7 +125,8 @@ loops over `TaskStatusProtoMapper` / `JsonCodec<TaskStatus>` and
 - `plugin/trino-tpch`: `TestTpchHandleCodecProvider` (15).
 - `plugin/trino-memory`: `TestMemoryHandleCodecProvider` (12) and the full
   `TestMemoryConnectorTest` (306, 81 skipped as on master).
-- `plugin/trino-hive`: `TestHiveHandleCodecProvider` (15), `TestHivePlugin`
+- `plugin/trino-hive`: `TestHiveHandleCodecProvider` (15),
+  `TestHiveHandleCodecsForPlannedQueries` (4), `TestHivePlugin`
   (11), `TestHiveConnectorFactory` (1), `TestHiveSplit`, `TestHiveTableHandle`,
   `TestHiveColumnHandle`.
 - `testing/trino-tests`: `TestProtobufControlPlane` (6) under `PROTOBUF`.
@@ -136,8 +138,55 @@ loops over `TaskStatusProtoMapper` / `JsonCodec<TaskStatus>` and
   root pom; `test-compile -P errorprone-compiler` passes for the same
   modules.
 
+After the review fixes, `mvn install -DskipTests` with all checks passes
+for the same modules plus `lib/trino-hive-formats`, and the effective pom of
+`plugin/trino-kafka` no longer carries the main proto directories (its
+build could not be repeated in the review container, which had no access to
+the Confluent repository that day). Error Prone, `sortpom:verify` on the
+root and the suites above pass again.
+
 Not run: full `trino-main` and hive test suites, any multi-node/SF100
 benchmark.
+
+## Review fixes
+
+An adversarial review of phase 3 found and fixed the following.
+
+- Build: the root pom put the protoc source and include directories into
+  `pluginManagement`, so every module that runs protoc inherited
+  `src/main/proto`. `trino-hive-formats` has no such directory and failed to
+  build; the earlier verification missed it because that module came from a
+  stale local repository. The directories now sit in each module's own
+  execution, and the root keeps only the version and protoc artifact.
+- `DomainProtoCodec` rejected bad input with raw `ClassCastException` and
+  `IllegalArgumentException`: a block of the wrong class for the type, an
+  invalid type id, and trailing bytes after the block (which were silently
+  ignored). Each now fails as a `TrinoException` that names the type.
+- Decoding a large discrete set was slower than JSON, because every value
+  was rebuilt as a `Range`. A set that is verifiably normalized (every
+  range a single inclusive value, no null, no NaN, strictly ascending) now
+  goes straight to `SortedRangeSet.fromJson` with the `DISCRETE` marker,
+  as the JSON deserializer does. Anything else still takes the checked
+  path. On the 4-core review machine, decoding
+  `VersionedDynamicFilterDomains` with 10,000 bigint values went from about
+  5.0 ms to 1.0 ms, and with 1,000,000 values from 221 ms to 81 ms; JSON
+  took 1.7–4.4 ms and 150–350 ms across runs. Single runs, directional only.
+- `ProtobufHandleCodec` and `ConnectorHandleProtobufCodec` let a handle
+  constructor's or a connector codec's `NullPointerException`,
+  `ClassCastException` and the like escape unwrapped. They are now wrapped
+  in a `TrinoException` that names the catalog, family and class, and a
+  `TrinoException` passes through unchanged.
+- `/v1/task` content negotiation ignored `q=0` with any other spelling than
+  `q=0` and let a broad `*/*` override a specific `q=0`. It now takes the
+  most specific matching range and its quality, per RFC 9110 section
+  12.5.1.
+- `TestClassLoaderSafeWrappers` did not cover the two new wrappers.
+- New `TestHiveHandleCodecsForPlannedQueries`: plans real queries on a hive
+  catalog for a cluster, then round-trips every table, column, split,
+  transaction, insert, output, table-execute, merge and partitioning handle
+  in every fragment, including bucketed and partitioned tables, synthesized
+  columns, `$partitions`, `information_schema`, `system.runtime`, CTAS,
+  `INSERT`, `OPTIMIZE`, `ANALYZE` and `DELETE`.
 
 ## Remaining work (brief phases 4–6)
 
@@ -162,10 +211,17 @@ benchmark.
   `RemoteTransactionHandle` has no connector either.
 - Handle codecs for every other connector; hive, tpch, memory and the
   engine-owned connectors are done.
-- `SortedRangeSet` decoded from protobuf is rebuilt through the SPI
-  constructors, so a set the sender marked `NON_DISCRETE` comes back as
-  `UNKNOWN` and is classified again on first use. Preserving it would need a
-  public SPI constructor that takes the marker.
+- A `SortedRangeSet` that is not a normalized discrete set is rebuilt from
+  its ranges, so a set the sender marked `NON_DISCRETE` comes back as
+  `UNKNOWN` and is classified again on first use. The marker is only a
+  cache. Keeping it would mean trusting it from the wire through
+  `SortedRangeSet.fromJson`, which the codec only does for `DISCRETE` sets
+  that it has checked itself.
+- Protobuf handle decoding resolves codecs through the catalog, so when
+  `TaskUpdateRequest` moves to protobuf (phase 5) the worker must decode it
+  after `ensureCatalogsLoaded`, not inside a JAX-RS reader as the JSON path
+  does today.
+- The lakehouse connector uses hive handles but declares no codec provider.
 - Low-volume internal endpoints still on JSON: `/v1/announce`, `/v1/info`,
   `/v1/status`, `/v1/memory`, `/v1/node`.
 - Phase-6 benchmark on 1 coordinator + at least 3 workers, TPC-H/TPC-DS
