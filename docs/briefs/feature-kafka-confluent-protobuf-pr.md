@@ -27,8 +27,10 @@ using only Apache-licensed dependencies:
   different schema versions and with message types other than the first one
   in the file. Columns are matched to the fields of the writer schema by
   field number, the identity of a field on the wire: the table's data
-  schema names the registry id of the schema the columns were derived from,
-  and the decoder maps each column's field to the writer field with the same
+  schema names the registry id of the schema the columns were derived from
+  and the message within it, resolved when the table is described, so a
+  schema registered later does not change what a running query reads, and
+  the decoder maps each column's field to the writer field with the same
   number and encoding, at the top level and within `ROW`, `ARRAY` and `MAP`
   columns, and converts its value the way protobuf reads it with the reader
   type (`int32` to `int64`, `int64` to `int32`, `bool`, enums by number,
@@ -46,6 +48,12 @@ using only Apache-licensed dependencies:
   from the Apache licensed `proto-google-common-protos`), and
   `confluent/meta.proto` and `confluent/type/decimal.proto`, whose messages
   Trino declares with the same names and field numbers.
+* A subject of the `RecordNameStrategy` or `TopicRecordNameStrategy` names
+  the message its records hold, which can be declared after other messages
+  or nested in one of them. The table columns, the reader schema and the rows
+  written by `INSERT` follow that message; any other subject, such as one of
+  the `TopicNameStrategy`, keeps the first message of the schema, which was
+  the only choice before.
 * `INSERT` into Confluent protobuf tables is supported: rows are encoded with
   the latest schema of the key and message subjects and framed in the
   Confluent wire format. Tables whose topic has no key subject write records
@@ -65,6 +73,13 @@ using only Apache-licensed dependencies:
   The connector now always passes the endpoint identification algorithm to
   the client, which otherwise accepts any certificate host name as soon as
   any client property is set.
+* The descriptor builder rejects fields, `oneof` members and enum values
+  that use a number or name their message or enum reserves, as `protoc`
+  does.
+* A schema registry client property set by both the connector and an
+  embedder's `SchemaRegistryClientPropertiesProvider` fails startup with
+  `CONFIGURATION_INVALID` naming the property and both providers, instead
+  of a duplicate key error.
 * The Confluent protobuf libraries remain test dependencies only;
   `TestNoConfluentProtobufDependency` scans the connector's classes to make
   sure nothing references them.
@@ -118,16 +133,19 @@ Commits (each builds on its own):
 
 The review commits on top of these (map entries, known imports, proto3
 optional presence, enum and key-only INSERT fixes, docs, field number
-mapping, `NULL` encoding) are to be folded into the commits above before the
-PR is opened; the PR is to be opened as a single commit.
+mapping, `NULL` encoding, the subject's message, reserved numbers and names,
+duplicate client properties, the reader schema pinned at table description
+time) are to be folded into the commits above before the PR is opened; the
+PR is to be opened as a single commit.
 
 Tests:
 
-* `lib/trino-record-decoder`: `TestProtoFileDescriptorBuilder` (28 cases:
+* `lib/trino-record-decoder`: `TestProtoFileDescriptorBuilder` (29 cases:
   scalars, labels, enums, oneofs, maps, proto3 optional, well-known types,
   imports, public imports, transitive visibility, cycles, name resolution,
   map entry naming, groups, duplicates, package-less files, proto2 defaults
-  including escaped bytes and special float values, reserved declarations)
+  including escaped bytes and special float values, reserved declarations
+  and fields that reuse reserved numbers or names)
   and `TestProtobufDecoder` (including renamed fields read by number, a
   number reused with another encoding, name lookup without a reader
   schema, wire-compatible type changes checked against protobuf's own
@@ -150,13 +168,15 @@ Tests:
   through all properties providers),
   `TestConfluentSchemaRegistrySecurityConfig` (defaults, mappings, client
   property names, validation), connector startup with the registry
-  properties in `TestKafkaPlugin`,
+  properties in `TestKafkaPlugin`, `TestConfluentModule` (client properties
+  of all providers combined, a property set twice rejected),
   `TestProtobufSchemaParser`, `TestNoConfluentProtobufDependency`, protobuf
   cases in `TestConfluentSchemaRegistryTableDescriptionSupplier`, and new
   Docker cases in `TestKafkaProtobufWithSchemaRegistryMinimalFunctionality`
   (INSERT round trip, INSERT without key subject, schema references, nested
   schema evolution, renamed fields read by number, a widened field and a
-  renamed enum value).
+  renamed enum value, a non-first message with the `RecordNameStrategy`
+  including INSERT, and a nested message with the `TopicRecordNameStrategy`).
 
 ## Release notes
 
@@ -178,6 +198,9 @@ Tests:
   `disabled` to restore the previous behavior.
 * Fix query failure when a protobuf record was written with a schema that
   lacks a field of a `ROW` column. ({issue}`20204`)
+* Fix columns and `INSERT` of Confluent protobuf tables whose subject names a
+  message other than the first one in the schema, as the `RecordNameStrategy`
+  and `TopicRecordNameStrategy` do, including nested messages.
 * Fix `NULL` results for protobuf records written before a field was renamed,
   and old names for records written before an enum value was renamed, in the
   Confluent table description supplier.
