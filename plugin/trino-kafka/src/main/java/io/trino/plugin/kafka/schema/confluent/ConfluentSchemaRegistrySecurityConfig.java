@@ -240,4 +240,17 @@ public class ConfluentSchemaRegistrySecurityConfig
     {
         return getTruststoreLocation().isEmpty() || getTruststorePassword().isPresent();
     }
+
+    // the client fails to start on a store password without the store, and ignores a key password without a key store
+    @AssertTrue(message = "kafka.confluent-schema-registry.ssl.keystore.location must be set when kafka.confluent-schema-registry.ssl.keystore.password or kafka.confluent-schema-registry.ssl.key.password is given")
+    public boolean isKeystoreLocationValid()
+    {
+        return getKeystoreLocation().isPresent() || (getKeystorePassword().isEmpty() && getKeyPassword().isEmpty());
+    }
+
+    @AssertTrue(message = "kafka.confluent-schema-registry.ssl.truststore.location must be set when kafka.confluent-schema-registry.ssl.truststore.password is given")
+    public boolean isTruststoreLocationValid()
+    {
+        return getTruststoreLocation().isPresent() || getTruststorePassword().isEmpty();
+    }
 }
