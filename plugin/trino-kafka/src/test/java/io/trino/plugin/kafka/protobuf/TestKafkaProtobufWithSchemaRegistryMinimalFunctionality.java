@@ -166,8 +166,10 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
         assertCount(topic, MESSAGE_COUNT * 2 + 1);
         assertQuery(format("SELECT key, col_1, col_2, col_3 FROM %s WHERE key = 1000", toDoubleQuoted(topic)), "VALUES (1000, 'Trino', 14, 1.4)");
 
-        // NULL values cannot be written
-        assertQueryFails(format("INSERT INTO %s (key, col_1, col_2, col_3) VALUES (1001, NULL, 1, 1.0)", toDoubleQuoted(topic)), ".*Protobuf doesn't support serializing null values.*");
+        // a proto3 field that is not optional has no value for NULL
+        assertQueryFails(
+                format("INSERT INTO %s (key, col_1, col_2, col_3) VALUES (1001, NULL, 1, 1.0)", toDoubleQuoted(topic)),
+                "NULL value not allowed for protobuf field 'schema.col_1', which does not track presence; declare it optional to allow NULL");
     }
 
     @Test
@@ -291,6 +293,59 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
                 getSession(),
                 format("SELECT key, col_1, col_2, detail.note, detail.weight FROM %s", toDoubleQuoted(topic)),
                 "VALUES (0, 'first', NULL, 'old', NULL), (1, 'second', 'added', 'new', 7)",
+                io.airlift.units.Duration.valueOf("5s"));
+    }
+
+    @Test
+    public void testRenamedFieldsAreReadByNumber()
+            throws Exception
+    {
+        String topic = "topic-renamed-fields";
+        assertNotExists(topic);
+
+        Descriptor initial = getFileDescriptor(
+                """
+                syntax = "proto3";
+                message schema {
+                  string col_1 = 1;
+                  message Detail {
+                    string note = 1;
+                  }
+                  Detail detail = 2;
+                }
+                """).findMessageTypeByName(DEFAULT_MESSAGE);
+        Descriptor initialDetail = initial.findFieldByName("detail").getMessageType();
+        DynamicMessage initialMessage = DynamicMessage.newBuilder(initial)
+                .setField(initial.findFieldByName("col_1"), "first")
+                .setField(initial.findFieldByName("detail"), DynamicMessage.newBuilder(initialDetail).setField(initialDetail.findFieldByName("note"), "old").build())
+                .build();
+        testingKafka.sendMessages(Stream.of(new ProducerRecord<>(topic, createKeySchema(0, getKeySchema()), initialMessage)), producerProperties());
+        waitUntilTableExists(topic);
+        assertQuery(format("SELECT col_1, detail.note FROM %s", toDoubleQuoted(topic)), "VALUES ('first', 'old')");
+
+        Descriptor renamed = getFileDescriptor(
+                """
+                syntax = "proto3";
+                message schema {
+                  string name = 1;
+                  message Detail {
+                    string text = 1;
+                  }
+                  Detail info = 2;
+                }
+                """).findMessageTypeByName(DEFAULT_MESSAGE);
+        Descriptor renamedInfo = renamed.findFieldByName("info").getMessageType();
+        DynamicMessage renamedMessage = DynamicMessage.newBuilder(renamed)
+                .setField(renamed.findFieldByName("name"), "second")
+                .setField(renamed.findFieldByName("info"), DynamicMessage.newBuilder(renamedInfo).setField(renamedInfo.findFieldByName("text"), "new").build())
+                .build();
+        testingKafka.sendMessages(Stream.of(new ProducerRecord<>(topic, createKeySchema(1, getKeySchema()), renamedMessage)), producerProperties());
+
+        // a field keeps its number across renames, so records written before the rename show up in the renamed columns
+        assertQueryEventually(
+                getSession(),
+                format("SELECT key, name, info.text FROM %s", toDoubleQuoted(topic)),
+                "VALUES (0, 'first', 'old'), (1, 'second', 'new')",
                 io.airlift.units.Duration.valueOf("5s"));
     }
 
