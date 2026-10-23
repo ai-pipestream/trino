@@ -2234,15 +2234,6 @@
                     <configuration>
                         <protocArtifact>com.google.protobuf:protoc:${dep.protobuf.version}</protocArtifact>
                         <protocVersion>${dep.protobuf.version}</protocVersion>
-                        <addSources>main</addSources>
-                        <includeMavenTypes>direct</includeMavenTypes>
-                        <inputDirectories>
-                            <include>src/main/proto</include>
-                        </inputDirectories>
-                        <includeDirectories>
-                            <include>src/main/proto</include>
-                        </includeDirectories>
-                        <outputDirectory>target/generated-sources/protobuf</outputDirectory>
                     </configuration>
                 </plugin>
                 <plugin>

@@ -69,9 +69,6 @@
             <plugin>
                 <groupId>com.github.os72</groupId>
                 <artifactId>protoc-jar-maven-plugin</artifactId>
-                <configuration>
-                    <addProtoSources>inputs</addProtoSources>
-                </configuration>
                 <executions>
                     <execution>
                         <id>generate-sources</id>
@@ -79,6 +76,18 @@
                             <goal>run</goal>
                         </goals>
                         <phase>generate-sources</phase>
+                        <configuration>
+                            <addProtoSources>inputs</addProtoSources>
+                            <addSources>main</addSources>
+                            <includeMavenTypes>direct</includeMavenTypes>
+                            <inputDirectories>
+                                <include>src/main/proto</include>
+                            </inputDirectories>
+                            <includeDirectories>
+                                <include>src/main/proto</include>
+                            </includeDirectories>
+                            <outputDirectory>target/generated-sources/protobuf</outputDirectory>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
