@@ -179,7 +179,8 @@ Tests:
   (INSERT round trip, INSERT without key subject, schema references, nested
   schema evolution, renamed fields read by number, a widened field and a
   renamed enum value, a non-first message with the `RecordNameStrategy`
-  including INSERT, and a nested message with the `TopicRecordNameStrategy`).
+  including INSERT, and a nested message with the `TopicRecordNameStrategy`
+  including INSERT).
 
 ## Release notes
 
