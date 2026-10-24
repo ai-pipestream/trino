@@ -229,6 +229,21 @@ public final class ProtobufEncodingUtils
             boolean supportsVariant,
             boolean supportsVariantBinary) {}
 
+    /**
+     * The json encoding renders map keys with {@code toString()} of their full precision value, also for a
+     * client without {@code PARAMETRIC_DATETIME}, so keys are sent unrounded; rounding them would make
+     * distinct keys equal and drop entries the json encoding keeps
+     */
+    private static Capabilities keyCapabilities(Capabilities capabilities)
+    {
+        return new Capabilities(
+                true,
+                capabilities.supportsParametricInterval(),
+                capabilities.supportsNumber(),
+                capabilities.supportsVariant(),
+                capabilities.supportsVariantBinary());
+    }
+
     private static TypeEncoder createTypeEncoder(Type type, Capabilities capabilities, JsonMapper jsonMapper)
     {
         return switch (type) {
@@ -258,7 +273,7 @@ public final class ProtobufEncodingUtils
             case ArrayType arrayType -> new ArrayEncoder(arrayType, createTypeEncoder(arrayType.getElementType(), capabilities, jsonMapper));
             case MapType mapType -> new MapEncoder(
                     mapType,
-                    createTypeEncoder(mapType.getKeyType(), capabilities, jsonMapper),
+                    createTypeEncoder(mapType.getKeyType(), keyCapabilities(capabilities), jsonMapper),
                     createTypeEncoder(mapType.getValueType(), capabilities, jsonMapper),
                     !capabilities.supportsParametricInterval() && containsDayTimeInterval(mapType.getKeyType()));
             case RowType rowType -> new RowEncoder(rowType, rowType.getFieldTypes().stream()
