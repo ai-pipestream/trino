@@ -116,3 +116,50 @@ Added by the cross-model review; the numbers above were not re-measured.
 - **Streaming.** The compressed decoders read and decompress the whole
   segment before decoding it (`CompressedQueryDataDecoder`), so row by row
   streaming only applies to uncompressed `protobuf` segments.
+
+## Type-rich table (follow-up to the review notes)
+
+`BenchmarkQueryDataEncoding` now takes a `table` parameter: `lineitem` as
+before, and `rich`, a synthetic deterministic table of 1,048,576 rows and
+12 columns (`bigint`, `decimal(19,4)`, `decimal(10,2)`, `timestamp(6)`,
+`timestamp(3) with time zone` across five zones, nullable `double`,
+`varchar(100)`, nullable `boolean`, `date`, `array(bigint)`,
+`map(varchar, bigint)`, `uuid`), in 8 segments of 131,072 rows.
+
+Encoded sizes are exact and do not depend on the machine:
+
+| Encoding | Encoded size | Bytes per row | Relative to `json+zstd` |
+|---|---:|---:|---:|
+| `json` | 268,053,058 | 255.6 | 3.84× |
+| `json+zstd` | 69,712,141 | 66.5 | 1.00× |
+| `json+lz4` | 116,954,843 | 111.5 | 1.68× |
+| `protobuf` | 212,702,806 | 202.9 | 3.05× |
+| `protobuf+zstd` | 64,632,280 | 61.6 | 0.93× |
+| `protobuf+lz4` | 98,241,831 | 93.7 | 1.41× |
+
+On a type-rich table protobuf is smaller than JSON in every variant
+(21% uncompressed, 7% with zstd, 16% with lz4), where lineitem had it
+larger. The review's suspicion was right: the lineitem size result does
+not generalize.
+
+Timings were taken once on a shared development machine (not the
+4 vCPU container above; 1 fork, 1 warmup and 3 measurement iterations
+of 3 s, `-Xmx8g`), whole table per operation:
+
+| Encoding | Encode (ms) | Decode (ms) |
+|---|---:|---:|
+| `json` | 914 ± 423 | 427 ± 143 |
+| `json+zstd` | 1,613 ± 902 | 592 ± 76 |
+| `json+lz4` | 1,255 ± 389 | 489 ± 94 |
+| `protobuf` | 266 ± 26 | 709 ± 54 |
+| `protobuf+zstd` | 737 ± 194 | 866 ± 175 |
+| `protobuf+lz4` | 495 ± 79 | 778 ± 4 |
+
+Encoding is 2.2–3.4× faster for protobuf, in line with lineitem.
+Decoding points the other way on this table: values the client renders
+as text (decimals, timestamps) are already formatted in JSON, while
+protobuf formats them on the client, and nested values go through the
+per-value message layout. A second decode-only run on the same machine
+was too noisy to publish (intervals wider than the scores), so treat
+the decode direction as an open question to settle on the quiet
+benchmark container with several forks, not as a result.
