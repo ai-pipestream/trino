@@ -398,8 +398,9 @@ schema registry. You must also configure the additional properties in the follow
 
 :::{note}
 The supported data formats are AVRO and PROTOBUF. Inserts are supported only for
-PROTOBUF tables with a value subject: rows are encoded with the latest schema
-registered for the subject and written in the Confluent wire format. Records of
+PROTOBUF tables with a value subject: rows are encoded with the schema that the
+table columns are taken from, the latest schema registered for the subject when
+the query starts, and written in the Confluent wire format. Records of
 a table without a key subject are written with a `null` key. `NULL` column
 values are handled as described for the [Protobuf encoder](kafka-protobuf-encoding).
 :::
