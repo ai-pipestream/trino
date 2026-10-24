@@ -14,6 +14,7 @@
 package io.trino.client.spooling.encoding.protobuf;
 
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.net.InetAddresses;
 import io.trino.client.ClientTypeSignature;
@@ -33,7 +34,6 @@ import java.net.UnknownHostException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -144,7 +144,6 @@ import static java.lang.Math.toIntExact;
 import static java.lang.String.format;
 import static java.util.Collections.unmodifiableList;
 import static java.util.Collections.unmodifiableMap;
-import static java.util.Objects.requireNonNull;
 
 /**
  * Decodes {@code Value} messages of the protobuf spooled segment format into the same Java
@@ -164,7 +163,6 @@ public final class ProtobufValueDecoders
     // java.time and Trino limits of zone offsets
     private static final int MAX_OFFSET_SECONDS = 18 * 60 * 60;
     private static final int MAX_TIME_ZONE_OFFSET_MINUTES = 14 * 60;
-    private static final DateTimeFormatter TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss");
     private static final long[] POWERS_OF_TEN = {
             1L,
             10L,
@@ -652,26 +650,43 @@ public final class ProtobufValueDecoders
 
     private static final class DecimalValue
     {
-        private final BigInteger unscaled;
+        private final long unscaledLong;
+        // null when the unscaled value is unscaledLong
+        private final BigInteger unscaledBig;
         private final int scale;
 
-        private DecimalValue(BigInteger unscaled, int scale)
+        private DecimalValue(long unscaledLong, BigInteger unscaledBig, int scale)
         {
-            this.unscaled = requireNonNull(unscaled, "unscaled is null");
+            this.unscaledLong = unscaledLong;
+            this.unscaledBig = unscaledBig;
             this.scale = scale;
+        }
+
+        BigInteger unscaled()
+        {
+            return unscaledBig == null ? BigInteger.valueOf(unscaledLong) : unscaledBig;
+        }
+
+        String unscaledText()
+        {
+            return unscaledBig == null ? Long.toString(unscaledLong) : unscaledBig.toString();
         }
     }
 
     private static DecimalValue readDecimal(ProtobufWireReader reader)
     {
-        BigInteger unscaled = null;
+        boolean hasUnscaled = false;
+        long unscaledLong = 0;
+        BigInteger unscaledBig = null;
         int scale = 0;
         while (reader.hasRemaining()) {
             int tag = reader.readTag();
             switch (fieldNumber(tag)) {
                 case DECIMAL_UNSCALED_LONG:
                     expectWireType(tag, WIRETYPE_VARINT);
-                    unscaled = BigInteger.valueOf(reader.readSint64());
+                    unscaledLong = reader.readSint64();
+                    unscaledBig = null;
+                    hasUnscaled = true;
                     break;
                 case DECIMAL_UNSCALED_BYTES:
                     expectWireType(tag, WIRETYPE_LENGTH_DELIMITED);
@@ -679,7 +694,8 @@ public final class ProtobufValueDecoders
                     if (bytes.length == 0) {
                         throw new ProtobufFormatException("Decimal has empty unscaled bytes");
                     }
-                    unscaled = new BigInteger(bytes);
+                    unscaledBig = new BigInteger(bytes);
+                    hasUnscaled = true;
                     break;
                 case DECIMAL_SCALE:
                     expectWireType(tag, WIRETYPE_VARINT);
@@ -689,10 +705,10 @@ public final class ProtobufValueDecoders
                     reader.skipField(tag);
             }
         }
-        if (unscaled == null) {
+        if (!hasUnscaled) {
             throw new ProtobufFormatException("Decimal has no unscaled value");
         }
-        return new DecimalValue(unscaled, scale);
+        return new DecimalValue(unscaledLong, unscaledBig, scale);
     }
 
     private static class TimeDecoder
@@ -943,7 +959,7 @@ public final class ProtobufValueDecoders
                         DecimalValue decimal = readDecimal(reader);
                         reader.popLimit(previousLimit);
                         // NUMBER renders through BigDecimal, which switches to scientific notation for small values
-                        value = new BigDecimal(decimal.unscaled, decimal.scale).toString();
+                        value = new BigDecimal(decimal.unscaled(), decimal.scale).toString();
                         break;
                     case NUMBER_SPECIAL:
                         expectWireType(tag, WIRETYPE_VARINT);
@@ -1214,7 +1230,7 @@ public final class ProtobufValueDecoders
 
     private static String formatDecimal(DecimalValue decimal)
     {
-        String unscaled = decimal.unscaled.toString();
+        String unscaled = decimal.unscaledText();
         int scale = decimal.scale;
         StringBuilder result = new StringBuilder(unscaled.length() + 2);
         if (unscaled.startsWith("-")) {
@@ -1269,23 +1285,50 @@ public final class ProtobufValueDecoders
 
     private static void formatTimestamp(int precision, LocalDateTime dateTime, long picoFraction, StringBuilder builder)
     {
-        TIMESTAMP_FORMATTER.formatTo(dateTime, builder);
+        formatDateTime(dateTime, builder);
         if (precision > 0) {
             appendFraction(picoFraction / POWERS_OF_TEN[MAX_PRECISION - precision], precision, builder);
         }
     }
 
+    /**
+     * Formats like {@code DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss")}, the server's pattern, without
+     * the formatter's overhead: a year beyond 9999 gets a plus sign, a negative year a minus sign.
+     */
+    @VisibleForTesting
+    static void formatDateTime(LocalDateTime dateTime, StringBuilder builder)
+    {
+        int year = dateTime.getYear();
+        if (year > 9999) {
+            builder.append('+');
+        }
+        else if (year < 0) {
+            builder.append('-');
+        }
+        int absoluteYear = Math.abs(year);
+        if (absoluteYear < 1000) {
+            builder.append(absoluteYear < 10 ? "000" : absoluteYear < 100 ? "00" : "0");
+        }
+        builder.append(absoluteYear).append('-');
+        appendTwoDigits(dateTime.getMonthValue(), builder);
+        builder.append('-');
+        appendTwoDigits(dateTime.getDayOfMonth(), builder);
+        builder.append(' ');
+        appendTwoDigits(dateTime.getHour(), builder);
+        builder.append(':');
+        appendTwoDigits(dateTime.getMinute(), builder);
+        builder.append(':');
+        appendTwoDigits(dateTime.getSecond(), builder);
+    }
+
     private static void appendFraction(long scaledFraction, int precision, StringBuilder builder)
     {
         builder.append('.');
-        int start = builder.length();
-        builder.setLength(start + precision);
-        for (int index = start + precision - 1; index >= start; index--) {
-            long temp = scaledFraction / 10;
-            int digit = (int) (scaledFraction - (temp * 10));
-            scaledFraction = temp;
-            builder.setCharAt(index, (char) ('0' + digit));
+        String digits = Long.toString(scaledFraction);
+        for (int i = digits.length(); i < precision; i++) {
+            builder.append('0');
         }
+        builder.append(digits);
     }
 
     private static void appendTwoDigits(int value, StringBuilder builder)

@@ -52,12 +52,17 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.math.BigInteger;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Optional;
+import java.util.Random;
 
 import static io.trino.client.ClientStandardTypes.ARRAY;
 import static io.trino.client.ClientStandardTypes.BIGINT;
@@ -284,6 +289,26 @@ public class TestProtobufQueryDataDecoder
                 .hasMessage("Invalid picos of micro: 1000000");
         assertThatThrownBy(() -> decode(timestamp, Value.newBuilder().setTimestamp(Timestamp.newBuilder().setEpochMicros(0).setPicosOfMicro(-1).setPrecision(12))))
                 .isInstanceOf(ProtobufFormatException.class);
+    }
+
+    @Test
+    public void testDateTimeFormatMatchesServerPattern()
+    {
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss");
+        List<LocalDateTime> values = new ArrayList<>();
+        for (int year : new int[] {-292275, -10000, -9999, -1000, -999, -100, -99, -10, -9, -1, 0, 1, 9, 10, 99, 100, 999, 1000, 1970, 9999, 10000, 99999, 294247}) {
+            values.add(LocalDateTime.of(year, 1, 1, 0, 0, 0));
+            values.add(LocalDateTime.of(year, 12, 31, 23, 59, 59));
+        }
+        Random random = new Random(1);
+        for (int i = 0; i < 10_000; i++) {
+            values.add(LocalDateTime.ofEpochSecond((long) ((random.nextDouble() * 2 - 1) * 9_223_372_036_854L), 0, ZoneOffset.UTC));
+        }
+        for (LocalDateTime value : values) {
+            StringBuilder builder = new StringBuilder();
+            ProtobufValueDecoders.formatDateTime(value, builder);
+            assertThat(builder.toString()).as("%s", value).isEqualTo(formatter.format(value));
+        }
     }
 
     @Test
