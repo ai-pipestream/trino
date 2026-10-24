@@ -124,7 +124,7 @@ The server honors the same client capabilities as the `json` encoding:
 
 | Capability absent | Effect on the protobuf segment |
 |---|---|
-| `PARAMETRIC_DATETIME` | time and timestamp values are rounded to precision 3 before encoding, and `precision` is 3 |
+| `PARAMETRIC_DATETIME` | time and timestamp values are rounded to precision 3 before encoding, and `precision` is 3; map keys are sent at full precision, as the json encoding renders them with `toString()` |
 | `PARAMETRIC_INTERVAL` | `INTERVAL DAY TO SECOND` is rounded to milliseconds, `fractional_precision` is 3, so the client formats the legacy form |
 | `NUMBER` | the column is declared `varchar` and the value is sent as `varchar` text |
 | `VARIANT_BINARY` | `VariantValue.json` is sent instead of `VariantValue.binary` |
