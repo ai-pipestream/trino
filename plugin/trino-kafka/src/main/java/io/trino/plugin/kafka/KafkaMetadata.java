@@ -27,6 +27,7 @@ import io.trino.spi.connector.ConnectorOutputMetadata;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
+import io.trino.spi.connector.ConnectorTableSchema;
 import io.trino.spi.connector.ConnectorTableVersion;
 import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.ConstraintApplicationResult;
@@ -97,6 +98,8 @@ public class KafkaMetadata
             throw new TrinoException(NOT_SUPPORTED, "This connector does not support versioned tables");
         }
 
+        // the data schemas and the columns come from one description, which a schema registry based
+        // supplier resolves from the latest schema versions, so later lookups use the handle instead
         return getTopicDescription(session, schemaTableName)
                 .map(kafkaTopicDescription -> new KafkaTableHandle(
                         schemaTableName.getSchemaName(),
@@ -108,9 +111,7 @@ public class KafkaMetadata
                         kafkaTopicDescription.message().flatMap(KafkaTopicFieldGroup::dataSchema),
                         kafkaTopicDescription.key().flatMap(KafkaTopicFieldGroup::subject),
                         kafkaTopicDescription.message().flatMap(KafkaTopicFieldGroup::subject),
-                        getColumnHandles(session, schemaTableName).values().stream()
-                                .map(KafkaColumnHandle.class::cast)
-                                .collect(toImmutableList()),
+                        getColumnHandles(schemaTableName, kafkaTopicDescription),
                         TupleDomain.all()))
                 .orElse(null);
     }
@@ -135,15 +136,25 @@ public class KafkaMetadata
     }
 
     @Override
-    public Map<String, ColumnHandle> getColumnHandles(ConnectorSession session, ConnectorTableHandle tableHandle)
+    public ConnectorTableSchema getTableSchema(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
-        return getColumnHandles(session, ((KafkaTableHandle) tableHandle).schemaTableName());
+        KafkaTableHandle handle = (KafkaTableHandle) tableHandle;
+        return new ConnectorTableSchema(
+                handle.schemaTableName(),
+                handle.columns().stream()
+                        .map(column -> column.getColumnMetadata().getColumnSchema())
+                        .collect(toImmutableList()));
     }
 
-    private Map<String, ColumnHandle> getColumnHandles(ConnectorSession session, SchemaTableName schemaTableName)
+    @Override
+    public Map<String, ColumnHandle> getColumnHandles(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
-        KafkaTopicDescription kafkaTopicDescription = getRequiredTopicDescription(session, schemaTableName);
+        return ((KafkaTableHandle) tableHandle).columns().stream()
+                .collect(toImmutableMap(KafkaColumnHandle::getName, identity()));
+    }
 
+    private List<KafkaColumnHandle> getColumnHandles(SchemaTableName schemaTableName, KafkaTopicDescription kafkaTopicDescription)
+    {
         Stream<KafkaColumnHandle> keyColumnHandles = kafkaTopicDescription.key().stream()
                 .map(KafkaTopicFieldGroup::fields)
                 .flatMap(Collection::stream)
@@ -171,7 +182,7 @@ public class KafkaMetadata
         }
 
         return concat(topicColumnHandles.stream(), internalColumnHandles.stream())
-                .collect(toImmutableMap(KafkaColumnHandle::getName, identity()));
+                .collect(toImmutableList());
     }
 
     @Override
