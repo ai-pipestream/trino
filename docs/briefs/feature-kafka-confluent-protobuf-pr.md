@@ -28,8 +28,9 @@ using only Apache-licensed dependencies:
   in the file. Columns are matched to the fields of the writer schema by
   field number, the identity of a field on the wire: the table's data
   schema names the registry id of the schema the columns were derived from
-  and the message within it, resolved when the table is described, so a
-  schema registered later does not change what a running query reads, and
+  and the message within it, resolved together with the columns when the
+  table is described, so a schema registered later does not change what a
+  running query reads or writes, and
   the decoder maps each column's field to the writer field with the same
   number and encoding, at the top level and within `ROW`, `ARRAY` and `MAP`
   columns, and converts its value the way protobuf reads it with the reader
@@ -55,8 +56,9 @@ using only Apache-licensed dependencies:
   the `TopicNameStrategy`, keeps the first message of the schema, which was
   the only choice before.
 * `INSERT` into Confluent protobuf tables is supported: rows are encoded with
-  the latest schema of the key and message subjects and framed in the
-  Confluent wire format. Tables whose topic has no key subject write records
+  the schema the table columns were derived from, the latest schema of the key
+  and message subjects when the query starts, and framed in the Confluent wire
+  format. Tables whose topic has no key subject write records
   with a null key; tables without a value subject reject `INSERT`, since a
   null value would be a tombstone.
 * The protobuf encoder writes `NULL` as an unset field when the field tracks
@@ -169,7 +171,8 @@ Tests:
   `TestConfluentSchemaRegistrySecurityConfig` (defaults, mappings, client
   property names, validation), connector startup with the registry
   properties in `TestKafkaPlugin`, `TestConfluentModule` (client properties
-  of all providers combined, a property set twice rejected),
+  of all providers combined, a property set twice rejected), `TestKafkaMetadata`
+  (the table handle, its columns and its data schema come from one description),
   `TestProtobufSchemaParser`, `TestNoConfluentProtobufDependency`, protobuf
   cases in `TestConfluentSchemaRegistryTableDescriptionSupplier`, and new
   Docker cases in `TestKafkaProtobufWithSchemaRegistryMinimalFunctionality`
