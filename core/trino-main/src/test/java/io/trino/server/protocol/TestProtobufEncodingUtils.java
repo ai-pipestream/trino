@@ -15,6 +15,7 @@ package io.trino.server.protocol;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.google.common.base.Utf8;
 import com.google.common.collect.ImmutableList;
 import com.google.common.net.InetAddresses;
 import com.google.common.primitives.Bytes;
@@ -1082,15 +1083,24 @@ public class TestProtobufEncodingUtils
         Slice overlong = wrappedBuffer(new byte[] {(byte) 0xC0, (byte) 0x80});
         Slice surrogate = wrappedBuffer(new byte[] {(byte) 0xED, (byte) 0xA0, (byte) 0x80});
         Slice truncated = wrappedBuffer(new byte[] {'x', (byte) 0xF0, (byte) 0x9F, (byte) 0x98});
+        // a code point above U+10FFFF, a five byte start byte, a lone continuation byte, all ASCII around it
+        Slice beyondUnicode = wrappedBuffer(new byte[] {(byte) 0xF4, (byte) 0x90, (byte) 0x80, (byte) 0x80, 'z'});
+        Slice fiveByteStart = wrappedBuffer(new byte[] {(byte) 0xF8, (byte) 0x88, (byte) 0x80, (byte) 0x80, (byte) 0x80});
+        Slice continuation = wrappedBuffer(new byte[] {'a', 'b', (byte) 0x80});
         Slice valid = utf8Slice("é\uD83D\uDE00");
-        for (Type type : ImmutableList.of(VARCHAR, createVarcharType(10), createCharType(5))) {
+        Slice validMultiByte = utf8Slice("żółć");
+        for (Type type : ImmutableList.of(VARCHAR, createVarcharType(20), createCharType(5))) {
             List<TypedColumn> columns = ImmutableList.of(typed("col", type));
             Page page = page(block(type, builder -> {
                 type.writeSlice(builder, malformed);
                 type.writeSlice(builder, overlong);
                 type.writeSlice(builder, surrogate);
                 type.writeSlice(builder, truncated);
+                type.writeSlice(builder, beyondUnicode);
+                type.writeSlice(builder, fiveByteStart);
+                type.writeSlice(builder, continuation);
                 type.writeSlice(builder, valid);
+                type.writeSlice(builder, validMultiByte);
             }));
             String pad = type instanceof CharType ? " " : "";
             List<List<Object>> expected = ImmutableList.of(
@@ -1098,7 +1108,11 @@ public class TestProtobufEncodingUtils
                     ImmutableList.of("\uFFFD\uFFFD" + pad + pad + pad),
                     ImmutableList.of("\uFFFD" + pad + pad + pad + pad),
                     ImmutableList.of("x\uFFFD" + pad + pad + pad),
-                    ImmutableList.of("é\uD83D\uDE00" + pad + pad + pad));
+                    ImmutableList.of("\uFFFD\uFFFD\uFFFD\uFFFDz"),
+                    ImmutableList.of("\uFFFD\uFFFD\uFFFD\uFFFD\uFFFD"),
+                    ImmutableList.of("ab\uFFFD" + pad + pad),
+                    ImmutableList.of("é\uD83D\uDE00" + pad + pad + pad),
+                    ImmutableList.of("żółć" + pad));
             if (type instanceof CharType) {
                 // The json encoding pads a char through a Java string, which replaces the same way, but it counts
                 // the code points before the replacement: the overlong encoding counts as one code point and turns
@@ -1109,7 +1123,11 @@ public class TestProtobufEncodingUtils
                         ImmutableList.of("\uFFFD\uFFFD    "),
                         expected.get(2),
                         expected.get(3),
-                        expected.get(4)));
+                        ImmutableList.of("\uFFFD\uFFFD\uFFFD\uFFFDz   "),
+                        ImmutableList.of("\uFFFD\uFFFD\uFFFD\uFFFD\uFFFD    "),
+                        ImmutableList.of("ab\uFFFD   "),
+                        expected.get(7),
+                        expected.get(8)));
             }
             else {
                 assertThatThrownBy(() -> decode(TEST_SESSION, columns, "json", ImmutableList.of(page)))
@@ -1120,11 +1138,21 @@ public class TestProtobufEncodingUtils
                         .as("%s %s", type, encoding)
                         .isEqualTo(expected);
             }
-            // the uncompressed segment holds the replacement, not the malformed bytes
+            // the uncompressed segment holds the replacement, not the malformed bytes: every string field of the
+            // segment is valid UTF-8, as a strict parser requires
             byte[] segment = encode(TEST_SESSION, columns, "protobuf", ImmutableList.of(page)).data();
             assertThat(Bytes.indexOf(segment, (byte) 0xFF)).isEqualTo(-1);
             assertThat(Bytes.indexOf(segment, new byte[] {(byte) 0xC0, (byte) 0x80})).isEqualTo(-1);
+            assertThat(Bytes.indexOf(segment, new byte[] {(byte) 0xED, (byte) 0xA0, (byte) 0x80})).isEqualTo(-1);
+            assertThat(Bytes.indexOf(segment, new byte[] {(byte) 0xF4, (byte) 0x90})).isEqualTo(-1);
+            assertThat(Bytes.indexOf(segment, (byte) 0xF8)).isEqualTo(-1);
+            assertThat(Bytes.indexOf(segment, new byte[] {'b', (byte) 0x80})).isEqualTo(-1);
             assertThat(Bytes.indexOf(segment, new byte[] {(byte) 0xEF, (byte) 0xBF, (byte) 0xBD})).isNotEqualTo(-1);
+            assertThat(Bytes.indexOf(segment, validMultiByte.getBytes())).isNotEqualTo(-1);
+            assertThat(Bytes.indexOf(segment, valid.getBytes())).isNotEqualTo(-1);
+            // one text column with short values: the framing of the segment is ASCII, so the whole segment is
+            // well-formed UTF-8 exactly when every text value is
+            assertThat(Utf8.isWellFormed(segment)).isTrue();
         }
     }
 
