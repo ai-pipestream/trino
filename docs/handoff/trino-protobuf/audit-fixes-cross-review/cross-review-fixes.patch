@@ -1,0 +1,751 @@
+From 9c690d0d31e4c94e784cbb0a048961c6960c6c56 Mon Sep 17 00:00:00 2001
+From: Kristian <kristian@apache.org>
+Date: Sat, 24 Oct 2026 01:47:06 +0000
+Subject: [PATCH 1/3] Answer Kafka table metadata from the table handle
+
+The INSERT planner takes the columns it writes from the table metadata,
+which the Kafka connector still built by describing the table again,
+while analysis took them from the table handle. A schema registry based
+supplier describes a table with its latest schema versions, so a schema
+registered between the two gave the plan columns the handle did not
+have, and the pinned data schema did not protect the write.
+
+Carry the column comment in the column handle, the one piece of the
+table metadata the handle lacked, and build the table metadata, and the
+table schema with it, from the handle. Listing the columns of all tables
+still describes each table, as it has no handle.
+---
+ .../trino/plugin/kafka/KafkaColumnHandle.java | 20 +++-
+ .../kafka/KafkaInternalFieldManager.java      | 14 +--
+ .../io/trino/plugin/kafka/KafkaMetadata.java  | 91 ++++++++-----------
+ .../kafka/KafkaTopicFieldDescription.java     | 14 +--
+ .../kafka/TestKafkaInternalFieldManager.java  |  5 +-
+ .../trino/plugin/kafka/TestKafkaMetadata.java | 36 ++++++--
+ .../encoder/TestNullRowEncoderFactory.java    |  2 +-
+ .../kafka/encoder/json/TestJsonEncoder.java   |  6 +-
+ ...estConfluentProtobufRowEncoderFactory.java | 18 ++--
+ .../encoder/raw/TestRawEncoderMapping.java    | 14 +--
+ .../kafka/protobuf/TestProtobufEncoder.java   |  6 +-
+ .../TestAvroConfluentRowDecoder.java          | 14 +--
+ ...stConfluentProtobufSchemaRegistryRest.java |  2 +-
+ ...tSchemaRegistryDynamicMessageProvider.java | 12 +--
+ 14 files changed, 126 insertions(+), 128 deletions(-)
+
+diff --git a/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaColumnHandle.java b/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaColumnHandle.java
+index 19b240dc..9f22c42c 100644
+--- a/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaColumnHandle.java
++++ b/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaColumnHandle.java
+@@ -21,6 +21,7 @@ import io.trino.spi.connector.ColumnMetadata;
+ import io.trino.spi.type.Type;
+ 
+ import java.util.Objects;
++import java.util.Optional;
+ 
+ import static com.google.common.base.MoreObjects.toStringHelper;
+ import static java.util.Objects.requireNonNull;
+@@ -68,6 +69,8 @@ public final class KafkaColumnHandle
+      */
+     private final boolean internal;
+ 
++    private final Optional<String> comment;
++
+     @JsonCreator
+     public KafkaColumnHandle(
+             @JsonProperty("name") String name,
+@@ -77,7 +80,8 @@ public final class KafkaColumnHandle
+             @JsonProperty("formatHint") String formatHint,
+             @JsonProperty("keyCodec") boolean keyCodec,
+             @JsonProperty("hidden") boolean hidden,
+-            @JsonProperty("internal") boolean internal)
++            @JsonProperty("internal") boolean internal,
++            @JsonProperty("comment") Optional<String> comment)
+     {
+         this.name = requireNonNull(name, "name is null");
+         this.type = requireNonNull(type, "type is null");
+@@ -87,6 +91,7 @@ public final class KafkaColumnHandle
+         this.keyCodec = keyCodec;
+         this.hidden = hidden;
+         this.internal = internal;
++        this.comment = requireNonNull(comment, "comment is null");
+     }
+ 
+     @Override
+@@ -143,11 +148,18 @@ public final class KafkaColumnHandle
+         return internal;
+     }
+ 
++    @JsonProperty
++    public Optional<String> getComment()
++    {
++        return comment;
++    }
++
+     ColumnMetadata getColumnMetadata()
+     {
+         return ColumnMetadata.builder()
+                 .setName(name)
+                 .setType(type)
++                .setComment(comment)
+                 .setHidden(hidden)
+                 .build();
+     }
+@@ -155,7 +167,7 @@ public final class KafkaColumnHandle
+     @Override
+     public int hashCode()
+     {
+-        return Objects.hash(name, type, mapping, dataFormat, formatHint, keyCodec, hidden, internal);
++        return Objects.hash(name, type, mapping, dataFormat, formatHint, keyCodec, hidden, internal, comment);
+     }
+ 
+     @Override
+@@ -176,7 +188,8 @@ public final class KafkaColumnHandle
+                 Objects.equals(this.formatHint, other.formatHint) &&
+                 this.keyCodec == other.keyCodec &&
+                 this.hidden == other.hidden &&
+-                this.internal == other.internal;
++                this.internal == other.internal &&
++                Objects.equals(this.comment, other.comment);
+     }
+ 
+     @Override
+@@ -191,6 +204,7 @@ public final class KafkaColumnHandle
+                 .add("keyCodec", keyCodec)
+                 .add("hidden", hidden)
+                 .add("internal", internal)
++                .add("comment", comment)
+                 .toString();
+     }
+ }
+diff --git a/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaInternalFieldManager.java b/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaInternalFieldManager.java
+index a6c93e8e..8ca78be0 100644
+--- a/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaInternalFieldManager.java
++++ b/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaInternalFieldManager.java
+@@ -14,7 +14,6 @@
+ package io.trino.plugin.kafka;
+ 
+ import com.google.inject.Inject;
+-import io.trino.spi.connector.ColumnMetadata;
+ import io.trino.spi.type.ArrayType;
+ import io.trino.spi.type.BigintType;
+ import io.trino.spi.type.BooleanType;
+@@ -141,17 +140,8 @@ public class KafkaInternalFieldManager
+                     null,
+                     false,
+                     hidden,
+-                    true);
+-        }
+-
+-        ColumnMetadata getColumnMetadata(boolean hidden)
+-        {
+-            return ColumnMetadata.builder()
+-                    .setName(columnName)
+-                    .setType(type)
+-                    .setComment(Optional.ofNullable(comment))
+-                    .setHidden(hidden)
+-                    .build();
++                    true,
++                    Optional.of(comment));
+         }
+     }
+ 
+diff --git a/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaMetadata.java b/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaMetadata.java
+index 35bc3599..e0135538 100644
+--- a/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaMetadata.java
++++ b/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaMetadata.java
+@@ -27,7 +27,6 @@ import io.trino.spi.connector.ConnectorOutputMetadata;
+ import io.trino.spi.connector.ConnectorSession;
+ import io.trino.spi.connector.ConnectorTableHandle;
+ import io.trino.spi.connector.ConnectorTableMetadata;
+-import io.trino.spi.connector.ConnectorTableSchema;
+ import io.trino.spi.connector.ConnectorTableVersion;
+ import io.trino.spi.connector.Constraint;
+ import io.trino.spi.connector.ConstraintApplicationResult;
+@@ -99,7 +98,8 @@ public class KafkaMetadata
+         }
+ 
+         // the data schemas and the columns come from one description, which a schema registry based
+-        // supplier resolves from the latest schema versions, so later lookups use the handle instead
++        // supplier resolves from the latest schema versions, so later lookups with the handle use it
++        // instead of describing the table again
+         return getTopicDescription(session, schemaTableName)
+                 .map(kafkaTopicDescription -> new KafkaTableHandle(
+                         schemaTableName.getSchemaName(),
+@@ -124,7 +124,8 @@ public class KafkaMetadata
+     @Override
+     public ConnectorTableMetadata getTableMetadata(ConnectorSession session, ConnectorTableHandle tableHandle)
+     {
+-        return getTableMetadata(session, ((KafkaTableHandle) tableHandle).schemaTableName());
++        KafkaTableHandle handle = (KafkaTableHandle) tableHandle;
++        return new ConnectorTableMetadata(handle.schemaTableName(), getColumnsMetadata(handle.columns()));
+     }
+ 
+     @Override
+@@ -135,17 +136,6 @@ public class KafkaMetadata
+                 .collect(toImmutableList());
+     }
+ 
+-    @Override
+-    public ConnectorTableSchema getTableSchema(ConnectorSession session, ConnectorTableHandle tableHandle)
+-    {
+-        KafkaTableHandle handle = (KafkaTableHandle) tableHandle;
+-        return new ConnectorTableSchema(
+-                handle.schemaTableName(),
+-                handle.columns().stream()
+-                        .map(column -> column.getColumnMetadata().getColumnSchema())
+-                        .collect(toImmutableList()));
+-    }
+-
+     @Override
+     public Map<String, ColumnHandle> getColumnHandles(ConnectorSession session, ConnectorTableHandle tableHandle)
+     {
+@@ -154,6 +144,28 @@ public class KafkaMetadata
+     }
+ 
+     private List<KafkaColumnHandle> getColumnHandles(SchemaTableName schemaTableName, KafkaTopicDescription kafkaTopicDescription)
++    {
++        List<KafkaColumnHandle> columnHandles = getColumnHandles(kafkaTopicDescription);
++
++        Set<String> conflictingColumns = columnHandles.stream()
++                .filter(columnHandle -> !columnHandle.isInternal())
++                .map(KafkaColumnHandle::getName)
++                .collect(toSet());
++        conflictingColumns.retainAll(columnHandles.stream()
++                .filter(KafkaColumnHandle::isInternal)
++                .map(KafkaColumnHandle::getName)
++                .collect(toSet()));
++        if (!conflictingColumns.isEmpty()) {
++            throw new TrinoException(DUPLICATE_COLUMN_NAME, "Internal Kafka column names conflict with column names from the table. "
++                    + "Consider changing kafka.internal-column-prefix configuration property. "
++                    + "topic=" + schemaTableName
++                    + ", Conflicting names=" + conflictingColumns);
++        }
++
++        return columnHandles;
++    }
++
++    private List<KafkaColumnHandle> getColumnHandles(KafkaTopicDescription kafkaTopicDescription)
+     {
+         Stream<KafkaColumnHandle> keyColumnHandles = kafkaTopicDescription.key().stream()
+                 .map(KafkaTopicFieldGroup::fields)
+@@ -165,23 +177,10 @@ public class KafkaMetadata
+                 .flatMap(Collection::stream)
+                 .map(kafkaTopicFieldDescription -> kafkaTopicFieldDescription.columnHandle(false));
+ 
+-        List<KafkaColumnHandle> topicColumnHandles = concat(keyColumnHandles, messageColumnHandles)
+-                .collect(toImmutableList());
++        Stream<KafkaColumnHandle> internalColumnHandles = kafkaInternalFieldManager.getInternalFields().stream()
++                .map(kafkaInternalField -> kafkaInternalField.getColumnHandle(hideInternalColumns));
+ 
+-        List<KafkaColumnHandle> internalColumnHandles = kafkaInternalFieldManager.getInternalFields().stream()
+-                .map(kafkaInternalField -> kafkaInternalField.getColumnHandle(hideInternalColumns))
+-                .collect(toImmutableList());
+-
+-        Set<String> conflictingColumns = topicColumnHandles.stream().map(KafkaColumnHandle::getName).collect(toSet());
+-        conflictingColumns.retainAll(internalColumnHandles.stream().map(KafkaColumnHandle::getName).collect(toSet()));
+-        if (!conflictingColumns.isEmpty()) {
+-            throw new TrinoException(DUPLICATE_COLUMN_NAME, "Internal Kafka column names conflict with column names from the table. "
+-                    + "Consider changing kafka.internal-column-prefix configuration property. "
+-                    + "topic=" + schemaTableName
+-                    + ", Conflicting names=" + conflictingColumns);
+-        }
+-
+-        return concat(topicColumnHandles.stream(), internalColumnHandles.stream())
++        return concat(concat(keyColumnHandles, messageColumnHandles), internalColumnHandles)
+                 .collect(toImmutableList());
+     }
+ 
+@@ -225,32 +224,14 @@ public class KafkaMetadata
+     private ConnectorTableMetadata getTableMetadata(ConnectorSession session, SchemaTableName schemaTableName)
+     {
+         KafkaTopicDescription table = getRequiredTopicDescription(session, schemaTableName);
++        return new ConnectorTableMetadata(schemaTableName, getColumnsMetadata(getColumnHandles(table)));
++    }
+ 
+-        ImmutableList.Builder<ColumnMetadata> builder = ImmutableList.builder();
+-
+-        table.key().ifPresent(key -> {
+-            List<KafkaTopicFieldDescription> fields = key.fields();
+-            if (fields != null) {
+-                for (KafkaTopicFieldDescription fieldDescription : fields) {
+-                    builder.add(fieldDescription.columnMetadata());
+-                }
+-            }
+-        });
+-
+-        table.message().ifPresent(message -> {
+-            List<KafkaTopicFieldDescription> fields = message.fields();
+-            if (fields != null) {
+-                for (KafkaTopicFieldDescription fieldDescription : fields) {
+-                    builder.add(fieldDescription.columnMetadata());
+-                }
+-            }
+-        });
+-
+-        for (KafkaInternalFieldManager.InternalField fieldDescription : kafkaInternalFieldManager.getInternalFields()) {
+-            builder.add(fieldDescription.getColumnMetadata(hideInternalColumns));
+-        }
+-
+-        return new ConnectorTableMetadata(schemaTableName, builder.build());
++    private static List<ColumnMetadata> getColumnsMetadata(List<KafkaColumnHandle> columns)
++    {
++        return columns.stream()
++                .map(KafkaColumnHandle::getColumnMetadata)
++                .collect(toImmutableList());
+     }
+ 
+     @Override
+diff --git a/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaTopicFieldDescription.java b/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaTopicFieldDescription.java
+index 540226e7..4137f82d 100644
+--- a/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaTopicFieldDescription.java
++++ b/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/KafkaTopicFieldDescription.java
+@@ -13,7 +13,6 @@
+  */
+ package io.trino.plugin.kafka;
+ 
+-import io.trino.spi.connector.ColumnMetadata;
+ import io.trino.spi.type.Type;
+ 
+ import java.util.Optional;
+@@ -50,16 +49,7 @@ public record KafkaTopicFieldDescription(
+                 formatHint(),
+                 keyCodec,
+                 hidden(),
+-                false);
+-    }
+-
+-    ColumnMetadata columnMetadata()
+-    {
+-        return ColumnMetadata.builder()
+-                .setName(name())
+-                .setType(type())
+-                .setComment(Optional.ofNullable(comment()))
+-                .setHidden(hidden())
+-                .build();
++                false,
++                Optional.ofNullable(comment()));
+     }
+ }
+diff --git a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/TestKafkaInternalFieldManager.java b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/TestKafkaInternalFieldManager.java
+index 3f227846..963d8454 100644
+--- a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/TestKafkaInternalFieldManager.java
++++ b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/TestKafkaInternalFieldManager.java
+@@ -43,7 +43,8 @@ public class TestKafkaInternalFieldManager
+                         null,
+                         false,
+                         false,
+-                        true);
++                        true,
++                        Optional.of("Partition Id"));
+ 
+         ColumnMetadata columnMetadata =
+                 ColumnMetadata.builder()
+@@ -56,6 +57,6 @@ public class TestKafkaInternalFieldManager
+         assertThat(internalField.getInternalFieldId()).isEqualTo(PARTITION_ID_FIELD);
+         assertThat(internalField.getColumnName()).isEqualTo("internal_field_name");
+         assertThat(internalField.getColumnHandle(false)).isEqualTo(kafkaColumnHandle);
+-        assertThat(internalField.getColumnMetadata(false)).isEqualTo(columnMetadata);
++        assertThat(internalField.getColumnHandle(false).getColumnMetadata()).isEqualTo(columnMetadata);
+     }
+ }
+diff --git a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/TestKafkaMetadata.java b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/TestKafkaMetadata.java
+index 677f691b..b0c0daeb 100644
+--- a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/TestKafkaMetadata.java
++++ b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/TestKafkaMetadata.java
+@@ -19,17 +19,22 @@ import io.trino.plugin.kafka.schema.TableDescriptionSupplier;
+ import io.trino.spi.connector.ColumnMetadata;
+ import io.trino.spi.connector.ColumnSchema;
+ import io.trino.spi.connector.ConnectorSession;
++import io.trino.spi.connector.RelationColumnsMetadata;
+ import io.trino.spi.connector.SchemaTableName;
+ import org.junit.jupiter.api.Test;
+ 
++import java.util.Iterator;
++import java.util.List;
+ import java.util.Optional;
+ import java.util.Set;
+ import java.util.concurrent.atomic.AtomicInteger;
++import java.util.function.UnaryOperator;
+ 
+ import static io.trino.spi.type.BigintType.BIGINT;
+ import static io.trino.testing.TestingConnectorSession.SESSION;
+ import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
+ import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.tuple;
+ 
+ public class TestKafkaMetadata
+ {
+@@ -49,7 +54,7 @@ public class TestKafkaMetadata
+         assertThat(handle.messageDataSchemaLocation()).contains("schema-registry-id:1;message=schema");
+         assertThat(handle.columns()).extracting(KafkaColumnHandle::getName).contains("column_1");
+ 
+-        // the columns a query is analyzed and read with match the data schema of the handle
++        // the columns a query is analyzed, planned, read and written with match the data schema of the handle
+         assertThat(metadata.getTableSchema(SESSION, handle).getColumns())
+                 .extracting(ColumnSchema::getName)
+                 .contains("column_1", "_partition_id")
+@@ -58,16 +63,33 @@ public class TestKafkaMetadata
+                 .filteredOn(column -> column.getName().equals("_partition_id"))
+                 .extracting(ColumnSchema::isHidden)
+                 .containsExactly(true);
++        List<ColumnMetadata> columns = metadata.getTableMetadata(SESSION, handle).getColumns();
++        assertThat(columns)
++                .extracting(ColumnMetadata::getName)
++                .contains("column_1", "_partition_id")
++                .doesNotContain("column_2");
++        assertThat(columns)
++                .filteredOn(column -> column.getName().equals("column_1"))
++                .extracting(ColumnMetadata::getComment)
++                .containsExactly(Optional.of("version 1"));
++        assertThat(columns)
++                .filteredOn(column -> column.getName().equals("_partition_id"))
++                .extracting(ColumnMetadata::getComment, ColumnMetadata::isHidden)
++                .containsExactly(tuple(Optional.of("Partition Id"), true));
+         assertThat(metadata.getColumnHandles(SESSION, handle))
+                 .containsOnlyKeys(handle.columns().stream().map(KafkaColumnHandle::getName).toList())
+                 .containsKey("column_1");
++        assertThat(metadata.getColumnHandles(SESSION, handle).values())
++                .map(column -> metadata.getColumnMetadata(SESSION, handle, column))
++                .containsExactlyElementsOf(columns);
+         assertThat(supplier.lookups()).isEqualTo(1);
+ 
+-        // the table metadata is looked up again, and shows the latest version
+-        assertThat(metadata.getTableMetadata(SESSION, handle).getColumns())
+-                .extracting(ColumnMetadata::getName)
+-                .contains("column_2")
+-                .doesNotContain("column_1");
++        // listing the columns of the tables of the catalog describes the table again, and shows the latest version
++        Iterator<RelationColumnsMetadata> relations = metadata.streamRelationColumns(SESSION, Optional.of(TABLE.getSchemaName()), UnaryOperator.identity());
++        assertThat(ImmutableList.copyOf(relations))
++                .extracting(RelationColumnsMetadata::name)
++                .containsExactly(TABLE);
++        assertThat(supplier.lookups()).isEqualTo(2);
+     }
+ 
+     private static class VersionedTableDescriptionSupplier
+@@ -95,7 +117,7 @@ public class TestKafkaMetadata
+                             "protobuf",
+                             Optional.of("schema-registry-id:" + current + ";message=schema"),
+                             Optional.of("orders-value"),
+-                            ImmutableList.of(new KafkaTopicFieldDescription(column, BIGINT, column, null, null, null, false))))));
++                            ImmutableList.of(new KafkaTopicFieldDescription(column, BIGINT, column, "version " + current, null, null, false))))));
+         }
+ 
+         public int lookups()
+diff --git a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/TestNullRowEncoderFactory.java b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/TestNullRowEncoderFactory.java
+index 940f9cd1..509c3dd0 100644
+--- a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/TestNullRowEncoderFactory.java
++++ b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/TestNullRowEncoderFactory.java
+@@ -55,7 +55,7 @@ public class TestNullRowEncoderFactory
+     @Test
+     public void testColumnsAreRejected()
+     {
+-        KafkaColumnHandle column = new KafkaColumnHandle("key", BIGINT, "key", null, null, true, false, false);
++        KafkaColumnHandle column = new KafkaColumnHandle("key", BIGINT, "key", null, null, true, false, false, Optional.empty());
+         RowEncoderSpec spec = new RowEncoderSpec(DummyRowDecoder.NAME, Optional.empty(), Optional.empty(), ImmutableList.of(column), "orders", KEY);
+         assertThatThrownBy(() -> FACTORY.create(SESSION, spec))
+                 .isInstanceOf(IllegalArgumentException.class)
+diff --git a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/json/TestJsonEncoder.java b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/json/TestJsonEncoder.java
+index 80cadcc3..c79882d4 100644
+--- a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/json/TestJsonEncoder.java
++++ b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/json/TestJsonEncoder.java
+@@ -85,17 +85,17 @@ public class TestJsonEncoder
+ 
+     private static void singleColumnEncoder(Type type)
+     {
+-        ENCODER_FACTORY.create(SESSION, new RowEncoderSpec(JsonRowEncoder.NAME, Optional.empty(), Optional.empty(), ImmutableList.of(new KafkaColumnHandle("default", type, "default", null, null, false, false, false)), TOPIC, MESSAGE));
++        ENCODER_FACTORY.create(SESSION, new RowEncoderSpec(JsonRowEncoder.NAME, Optional.empty(), Optional.empty(), ImmutableList.of(new KafkaColumnHandle("default", type, "default", null, null, false, false, false, Optional.empty())), TOPIC, MESSAGE));
+     }
+ 
+     private static void singleColumnEncoder(Type type, DateTimeFormat dataFormat, String formatHint)
+     {
+         requireNonNull(dataFormat, "dataFormat is null");
+         if (dataFormat.equals(CUSTOM_DATE_TIME)) {
+-            ENCODER_FACTORY.create(SESSION, new RowEncoderSpec(JsonRowEncoder.NAME, Optional.empty(), Optional.empty(), ImmutableList.of(new KafkaColumnHandle("default", type, "default", dataFormat.toString(), formatHint, false, false, false)), TOPIC, MESSAGE));
++            ENCODER_FACTORY.create(SESSION, new RowEncoderSpec(JsonRowEncoder.NAME, Optional.empty(), Optional.empty(), ImmutableList.of(new KafkaColumnHandle("default", type, "default", dataFormat.toString(), formatHint, false, false, false, Optional.empty())), TOPIC, MESSAGE));
+         }
+         else {
+-            ENCODER_FACTORY.create(SESSION, new RowEncoderSpec(JsonRowEncoder.NAME, Optional.empty(), Optional.empty(), ImmutableList.of(new KafkaColumnHandle("default", type, "default", dataFormat.toString(), null, false, false, false)), TOPIC, MESSAGE));
++            ENCODER_FACTORY.create(SESSION, new RowEncoderSpec(JsonRowEncoder.NAME, Optional.empty(), Optional.empty(), ImmutableList.of(new KafkaColumnHandle("default", type, "default", dataFormat.toString(), null, false, false, false, Optional.empty())), TOPIC, MESSAGE));
+         }
+     }
+ 
+diff --git a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/protobuf/TestConfluentProtobufRowEncoderFactory.java b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/protobuf/TestConfluentProtobufRowEncoderFactory.java
+index 7d2922cd..83370f71 100644
+--- a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/protobuf/TestConfluentProtobufRowEncoderFactory.java
++++ b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/protobuf/TestConfluentProtobufRowEncoderFactory.java
+@@ -86,9 +86,9 @@ public class TestConfluentProtobufRowEncoderFactory
+             }
+             """;
+ 
+-    private static final KafkaColumnHandle COL_1 = new KafkaColumnHandle("col_1", VARCHAR, "col_1", null, null, false, false, false);
+-    private static final KafkaColumnHandle COL_2 = new KafkaColumnHandle("col_2", BIGINT, "col_2", null, null, false, false, false);
+-    private static final KafkaColumnHandle COL_3 = new KafkaColumnHandle("col_3", BIGINT, "col_3", null, null, false, false, false);
++    private static final KafkaColumnHandle COL_1 = new KafkaColumnHandle("col_1", VARCHAR, "col_1", null, null, false, false, false, Optional.empty());
++    private static final KafkaColumnHandle COL_2 = new KafkaColumnHandle("col_2", BIGINT, "col_2", null, null, false, false, false, Optional.empty());
++    private static final KafkaColumnHandle COL_3 = new KafkaColumnHandle("col_3", BIGINT, "col_3", null, null, false, false, false, Optional.empty());
+ 
+     @Test
+     public void testEncodeInConfluentWireFormat()
+@@ -182,7 +182,7 @@ public class TestConfluentProtobufRowEncoderFactory
+ 
+         // the table's message is used even when the subject does not name it
+         Descriptor other = ((ConfluentProtobufSchema) client.getSchemaById(tableSchemaId)).findMessage("Other").orElseThrow();
+-        KafkaColumnHandle name = new KafkaColumnHandle("name", VARCHAR, "name", null, null, false, false, false);
++        KafkaColumnHandle name = new KafkaColumnHandle("name", VARCHAR, "name", null, null, false, false, false, Optional.empty());
+         try (RowEncoder encoder = createEncoder(client, Optional.of(readerSchemaReference(tableSchemaId, other)), Optional.of(subject), ImmutableList.of(name))) {
+             encoder.appendColumnValue(writeNativeValue(VARCHAR, utf8Slice("other")), 0);
+             Frame frame = readFrame(encoder.toByteArray());
+@@ -209,7 +209,7 @@ public class TestConfluentProtobufRowEncoderFactory
+                     int64 key = 1;
+                 }
+                 """));
+-        KafkaColumnHandle key = new KafkaColumnHandle("key", BIGINT, "key", null, null, true, false, false);
++        KafkaColumnHandle key = new KafkaColumnHandle("key", BIGINT, "key", null, null, true, false, false, Optional.empty());
+         RowEncoderSpec spec = new RowEncoderSpec(ProtobufRowEncoder.NAME, Optional.empty(), Optional.of(TOPIC + "-key"), ImmutableList.of(key), TOPIC, KEY);
+         try (RowEncoder encoder = new ConfluentProtobufRowEncoderFactory(client).create(TestingConnectorSession.SESSION, spec)) {
+             encoder.appendColumnValue(writeNativeValue(BIGINT, 7L), 0);
+@@ -229,7 +229,7 @@ public class TestConfluentProtobufRowEncoderFactory
+         String subject = TOPIC + "-Other";
+         int schemaId = client.register(subject, schema(client, SCHEMA));
+         Descriptor other = ((ConfluentProtobufSchema) client.getSchemaById(schemaId)).getFileDescriptor().findMessageTypeByName("Other");
+-        KafkaColumnHandle name = new KafkaColumnHandle("name", VARCHAR, "name", null, null, false, false, false);
++        KafkaColumnHandle name = new KafkaColumnHandle("name", VARCHAR, "name", null, null, false, false, false, Optional.empty());
+ 
+         try (RowEncoder encoder = createEncoder(client, Optional.of(subject), ImmutableList.of(name))) {
+             encoder.appendColumnValue(writeNativeValue(VARCHAR, utf8Slice("second")), 0);
+@@ -287,9 +287,9 @@ public class TestConfluentProtobufRowEncoderFactory
+         MapType mapType = new MapType(VARCHAR, VARCHAR, new TypeOperators());
+         ArrayType arrayType = new ArrayType(VARCHAR);
+         List<EncoderColumnHandle> columns = ImmutableList.of(
+-                new KafkaColumnHandle("attributes", mapType, "attributes", null, null, false, false, false),
+-                new KafkaColumnHandle("color", VARCHAR, "color", null, null, false, false, false),
+-                new KafkaColumnHandle("palette", arrayType, "palette", null, null, false, false, false));
++                new KafkaColumnHandle("attributes", mapType, "attributes", null, null, false, false, false, Optional.empty()),
++                new KafkaColumnHandle("color", VARCHAR, "color", null, null, false, false, false, Optional.empty()),
++                new KafkaColumnHandle("palette", arrayType, "palette", null, null, false, false, false, Optional.empty()));
+ 
+         try (RowEncoder encoder = createEncoder(client, Optional.of(TOPIC + "-value"), columns)) {
+             encoder.appendColumnValue(writeNativeValue(mapType, buildMapValue(mapType, 1, (keyBuilder, valueBuilder) -> {
+diff --git a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/raw/TestRawEncoderMapping.java b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/raw/TestRawEncoderMapping.java
+index 4048a929..c7f44859 100644
+--- a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/raw/TestRawEncoderMapping.java
++++ b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/raw/TestRawEncoderMapping.java
+@@ -43,13 +43,13 @@ public class TestRawEncoderMapping
+     @Test
+     public void testMapping()
+     {
+-        EncoderColumnHandle col1 = new KafkaColumnHandle("test1", BIGINT, "0", "LONG", null, false, false, false);
+-        EncoderColumnHandle col2 = new KafkaColumnHandle("test2", createUnboundedVarcharType(), "8:14", "BYTE", null, false, false, false);
+-        EncoderColumnHandle col3 = new KafkaColumnHandle("test3", BIGINT, "14", "LONG", null, false, false, false);
+-        EncoderColumnHandle col4 = new KafkaColumnHandle("test4", createUnboundedVarcharType(), "22:28", "BYTE", null, false, false, false);
+-        EncoderColumnHandle col5 = new KafkaColumnHandle("test5", BIGINT, "28", "LONG", null, false, false, false);
+-        EncoderColumnHandle col6 = new KafkaColumnHandle("test6", createVarcharType(6), "36:42", "BYTE", null, false, false, false);
+-        EncoderColumnHandle col7 = new KafkaColumnHandle("test7", createVarcharType(6), "42:48", "BYTE", null, false, false, false);
++        EncoderColumnHandle col1 = new KafkaColumnHandle("test1", BIGINT, "0", "LONG", null, false, false, false, Optional.empty());
++        EncoderColumnHandle col2 = new KafkaColumnHandle("test2", createUnboundedVarcharType(), "8:14", "BYTE", null, false, false, false, Optional.empty());
++        EncoderColumnHandle col3 = new KafkaColumnHandle("test3", BIGINT, "14", "LONG", null, false, false, false, Optional.empty());
++        EncoderColumnHandle col4 = new KafkaColumnHandle("test4", createUnboundedVarcharType(), "22:28", "BYTE", null, false, false, false, Optional.empty());
++        EncoderColumnHandle col5 = new KafkaColumnHandle("test5", BIGINT, "28", "LONG", null, false, false, false, Optional.empty());
++        EncoderColumnHandle col6 = new KafkaColumnHandle("test6", createVarcharType(6), "36:42", "BYTE", null, false, false, false, Optional.empty());
++        EncoderColumnHandle col7 = new KafkaColumnHandle("test7", createVarcharType(6), "42:48", "BYTE", null, false, false, false, Optional.empty());
+ 
+         RowEncoder rowEncoder = ENCODER_FACTORY.create(TestingConnectorSession.SESSION, new RowEncoderSpec(RawRowEncoder.NAME, Optional.empty(), Optional.empty(), ImmutableList.of(col1, col2, col3, col4, col5, col6, col7), TOPIC, MESSAGE));
+ 
+diff --git a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/protobuf/TestProtobufEncoder.java b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/protobuf/TestProtobufEncoder.java
+index 21907f4e..24047ec8 100644
+--- a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/protobuf/TestProtobufEncoder.java
++++ b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/protobuf/TestProtobufEncoder.java
+@@ -609,8 +609,8 @@ public class TestProtobufEncoder
+                 }
+                 """).findMessageTypeByName(DEFAULT_MESSAGE);
+         EncoderColumnHandle nameColumn = createEncoderColumnHandle("name", VARCHAR, "name");
+-        KafkaColumnHandle countColumn = new KafkaColumnHandle("count", BIGINT, "count", null, null, false, false, false);
+-        KafkaColumnHandle numberColumn = new KafkaColumnHandle("number", BIGINT, "number", null, null, false, false, false);
++        KafkaColumnHandle countColumn = new KafkaColumnHandle("count", BIGINT, "count", null, null, false, false, false, Optional.empty());
++        KafkaColumnHandle numberColumn = new KafkaColumnHandle("number", BIGINT, "number", null, null, false, false, false, Optional.empty());
+ 
+         // optional fields and oneof members are left unset, and read back as NULL
+         RowEncoder encoder = new ProtobufRowEncoder(descriptor, TestingConnectorSession.SESSION, ImmutableList.of(nameColumn, countColumn, numberColumn));
+@@ -674,6 +674,6 @@ public class TestProtobufEncoder
+ 
+     private static EncoderColumnHandle createEncoderColumnHandle(String name, Type type, String mapping)
+     {
+-        return new KafkaColumnHandle(name, type, mapping, null, null, false, false, false);
++        return new KafkaColumnHandle(name, type, mapping, null, null, false, false, false, Optional.empty());
+     }
+ }
+diff --git a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestAvroConfluentRowDecoder.java b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestAvroConfluentRowDecoder.java
+index 1707d9af..bf019969 100644
+--- a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestAvroConfluentRowDecoder.java
++++ b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestAvroConfluentRowDecoder.java
+@@ -90,12 +90,12 @@ public class TestAvroConfluentRowDecoder
+         mockSchemaRegistryClient.register(TOPIC + "-value", new AvroSchema(evolvedSchema));
+ 
+         Set<DecoderColumnHandle> columnHandles = ImmutableSet.<DecoderColumnHandle>builder()
+-                .add(new KafkaColumnHandle("col1", INTEGER, "col1", null, null, false, false, false))
+-                .add(new KafkaColumnHandle("col2", VARCHAR, "col2", null, null, false, false, false))
+-                .add(new KafkaColumnHandle("col3", INTEGER, "col3", null, null, false, false, false))
+-                .add(new KafkaColumnHandle("col4", INTEGER, "col4", null, null, false, false, false))
+-                .add(new KafkaColumnHandle("col5", VARBINARY, "col5", null, null, false, false, false))
+-                .add(new KafkaColumnHandle("col6", BIGINT, "col6", null, null, false, false, false))
++                .add(new KafkaColumnHandle("col1", INTEGER, "col1", null, null, false, false, false, Optional.empty()))
++                .add(new KafkaColumnHandle("col2", VARCHAR, "col2", null, null, false, false, false, Optional.empty()))
++                .add(new KafkaColumnHandle("col3", INTEGER, "col3", null, null, false, false, false, Optional.empty()))
++                .add(new KafkaColumnHandle("col4", INTEGER, "col4", null, null, false, false, false, Optional.empty()))
++                .add(new KafkaColumnHandle("col5", VARBINARY, "col5", null, null, false, false, false, Optional.empty()))
++                .add(new KafkaColumnHandle("col6", BIGINT, "col6", null, null, false, false, false, Optional.empty()))
+                 .build();
+ 
+         RowDecoder rowDecoder = getRowDecoder(mockSchemaRegistryClient, columnHandles, evolvedSchema);
+@@ -113,7 +113,7 @@ public class TestAvroConfluentRowDecoder
+         MockSchemaRegistryClient mockSchemaRegistryClient = new MockSchemaRegistryClient();
+         Schema schema = Schema.create(Schema.Type.LONG);
+         mockSchemaRegistryClient.register(format("%s-key", TOPIC), new AvroSchema(schema));
+-        Set<DecoderColumnHandle> columnHandles = ImmutableSet.of(new KafkaColumnHandle("col1", BIGINT, "col1", null, null, false, false, false));
++        Set<DecoderColumnHandle> columnHandles = ImmutableSet.of(new KafkaColumnHandle("col1", BIGINT, "col1", null, null, false, false, false, Optional.empty()));
+         RowDecoder rowDecoder = getRowDecoder(mockSchemaRegistryClient, columnHandles, schema);
+         testSingleValueRow(rowDecoder, 3L, schema, 1);
+     }
+diff --git a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestConfluentProtobufSchemaRegistryRest.java b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestConfluentProtobufSchemaRegistryRest.java
+index 4b5cab74..57387f6e 100644
+--- a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestConfluentProtobufSchemaRegistryRest.java
++++ b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestConfluentProtobufSchemaRegistryRest.java
+@@ -254,7 +254,7 @@ public class TestConfluentProtobufSchemaRegistryRest
+             throws Exception
+     {
+         SchemaRegistryClient client = createClient("http://" + USER_INFO + "@" + baseUrl, ImmutableMap.of("basic.auth.credentials.source", "URL"));
+-        KafkaColumnHandle column = new KafkaColumnHandle("col_1", VARCHAR, "col_1", null, null, false, false, false);
++        KafkaColumnHandle column = new KafkaColumnHandle("col_1", VARCHAR, "col_1", null, null, false, false, false, Optional.empty());
+         RowEncoderSpec spec = new RowEncoderSpec(ProtobufRowEncoder.NAME, Optional.empty(), Optional.of("orders-value"), ImmutableList.of(column), "orders", MESSAGE);
+         try (RowEncoder encoder = new ConfluentProtobufRowEncoderFactory(client).create(TestingConnectorSession.SESSION, spec)) {
+             encoder.appendColumnValue(writeNativeValue(VARCHAR, utf8Slice("Trino")), 0);
+diff --git a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestConfluentSchemaRegistryDynamicMessageProvider.java b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestConfluentSchemaRegistryDynamicMessageProvider.java
+index 480adc11..92844b97 100644
+--- a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestConfluentSchemaRegistryDynamicMessageProvider.java
++++ b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestConfluentSchemaRegistryDynamicMessageProvider.java
+@@ -314,9 +314,9 @@ public class TestConfluentSchemaRegistryDynamicMessageProvider
+ 
+         // the table columns come from the latest schema
+         RowType detailType = RowType.rowType(RowType.field("note", createUnboundedVarcharType()), RowType.field("weight", BIGINT));
+-        KafkaColumnHandle col1 = new KafkaColumnHandle("col_1", VARCHAR, "col_1", null, null, false, false, false);
+-        KafkaColumnHandle col2 = new KafkaColumnHandle("col_2", BIGINT, "col_2", null, null, false, false, false);
+-        KafkaColumnHandle detail = new KafkaColumnHandle("detail", detailType, "detail", null, null, false, false, false);
++        KafkaColumnHandle col1 = new KafkaColumnHandle("col_1", VARCHAR, "col_1", null, null, false, false, false, Optional.empty());
++        KafkaColumnHandle col2 = new KafkaColumnHandle("col_2", BIGINT, "col_2", null, null, false, false, false, Optional.empty());
++        KafkaColumnHandle detail = new KafkaColumnHandle("detail", detailType, "detail", null, null, false, false, false, Optional.empty());
+         RowDecoder decoder = new ProtobufRowDecoderFactory(new ConfluentSchemaRegistryDynamicMessageProvider.Factory(client), TESTING_TYPE_MANAGER, new DummyDescriptorProvider())
+                 .create(TestingConnectorSession.SESSION, new RowDecoderSpec(ProtobufRowDecoder.NAME, ImmutableMap.of(), ImmutableSet.of(col1, col2, detail)));
+ 
+@@ -378,9 +378,9 @@ public class TestConfluentSchemaRegistryDynamicMessageProvider
+ 
+         // the table columns and the data schema come from the latest schema, which renamed every field
+         RowType infoType = RowType.rowType(RowType.field("text", createUnboundedVarcharType()));
+-        KafkaColumnHandle name = new KafkaColumnHandle("name", VARCHAR, "name", null, null, false, false, false);
+-        KafkaColumnHandle info = new KafkaColumnHandle("info", infoType, "info", null, null, false, false, false);
+-        KafkaColumnHandle text = new KafkaColumnHandle("text", VARCHAR, "info/text", null, null, false, false, false);
++        KafkaColumnHandle name = new KafkaColumnHandle("name", VARCHAR, "name", null, null, false, false, false, Optional.empty());
++        KafkaColumnHandle info = new KafkaColumnHandle("info", infoType, "info", null, null, false, false, false, Optional.empty());
++        KafkaColumnHandle text = new KafkaColumnHandle("text", VARCHAR, "info/text", null, null, false, false, false, Optional.empty());
+         RowDecoder decoder = new ProtobufRowDecoderFactory(new ConfluentSchemaRegistryDynamicMessageProvider.Factory(client), TESTING_TYPE_MANAGER, new DummyDescriptorProvider())
+                 .create(TestingConnectorSession.SESSION, new RowDecoderSpec(ProtobufRowDecoder.NAME, ImmutableMap.of("dataSchema", readerSchemaReference(newId, ((ConfluentProtobufSchema) client.getSchemaById(newId)).getMessageDescriptor())), ImmutableSet.of(name, info, text)));
+ 
+-- 
+2.43.0
+
+
+From fc6e3bc550d3700fd15d8865333d6dca2b4ea208 Mon Sep 17 00:00:00 2001
+From: Kristian <kristian@apache.org>
+Date: Sat, 24 Oct 2026 01:47:07 +0000
+Subject: [PATCH 2/3] Report a deleted Confluent protobuf table schema as a
+ schema error
+
+The encoder fetches the schema the table columns were derived from by
+its id. When the registry no longer has it, fail with KAFKA_SCHEMA_ERROR
+naming the id and the subject, as the decoder does for a missing schema
+id, instead of reporting a registry error.
+---
+ .../protobuf/ConfluentProtobufRowEncoderFactory.java      | 8 +++++++-
+ .../protobuf/TestConfluentProtobufRowEncoderFactory.java  | 6 ++++++
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/encoder/protobuf/ConfluentProtobufRowEncoderFactory.java b/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/encoder/protobuf/ConfluentProtobufRowEncoderFactory.java
+index b5c07771..a79ce0c1 100644
+--- a/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/encoder/protobuf/ConfluentProtobufRowEncoderFactory.java
++++ b/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/encoder/protobuf/ConfluentProtobufRowEncoderFactory.java
+@@ -97,7 +97,13 @@ public class ConfluentProtobufRowEncoderFactory
+         try {
+             schema = schemaRegistryClient.getSchemaBySubjectAndId(subject, schemaId);
+         }
+-        catch (RestClientException | IOException e) {
++        catch (RestClientException e) {
++            if (e.getStatus() == HTTP_NOT_FOUND) {
++                throw new TrinoException(KAFKA_SCHEMA_ERROR, format("Schema id %s of subject '%s' does not exist in the schema registry", schemaId, subject), e);
++            }
++            throw new TrinoException(KAFKA_SCHEMA_REGISTRY_ERROR, format("Failed to fetch schema id %s of subject '%s' from the schema registry: %s", schemaId, subject, e.getMessage()), e);
++        }
++        catch (IOException e) {
+             throw new TrinoException(KAFKA_SCHEMA_REGISTRY_ERROR, format("Failed to fetch schema id %s of subject '%s' from the schema registry: %s", schemaId, subject, e.getMessage()), e);
+         }
+         if (!(schema instanceof ConfluentProtobufSchema protobufSchema)) {
+diff --git a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/protobuf/TestConfluentProtobufRowEncoderFactory.java b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/protobuf/TestConfluentProtobufRowEncoderFactory.java
+index 83370f71..281a10ae 100644
+--- a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/protobuf/TestConfluentProtobufRowEncoderFactory.java
++++ b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/encoder/protobuf/TestConfluentProtobufRowEncoderFactory.java
+@@ -194,6 +194,12 @@ public class TestConfluentProtobufRowEncoderFactory
+                 () -> createEncoder(client, Optional.of("schema-registry-id:" + tableSchemaId + ";message=Missing"), Optional.of(subject), ImmutableList.of(COL_1)),
+                 KAFKA_SCHEMA_ERROR,
+                 "Schema id " + tableSchemaId + " of subject 'orders-value' does not declare message Missing");
++
++        // the schema of the table was deleted from the registry after the table was described
++        assertTrinoException(
++                () -> createEncoder(client, Optional.of("schema-registry-id:999;message=schema"), Optional.of(subject), ImmutableList.of(COL_1)),
++                KAFKA_SCHEMA_ERROR,
++                "Schema id 999 of subject 'orders-value' does not exist in the schema registry");
+     }
+ 
+     @Test
+-- 
+2.43.0
+
+
+From 1722171d81d49bae855bad5533988097a92e6afc Mon Sep 17 00:00:00 2001
+From: Kristian <kristian@apache.org>
+Date: Sat, 24 Oct 2026 01:47:07 +0000
+Subject: [PATCH 3/3] Update PR draft for the table metadata fix
+
+---
+ docs/briefs/feature-kafka-confluent-protobuf-pr.md | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/docs/briefs/feature-kafka-confluent-protobuf-pr.md b/docs/briefs/feature-kafka-confluent-protobuf-pr.md
+index d8152087..d238a14a 100644
+--- a/docs/briefs/feature-kafka-confluent-protobuf-pr.md
++++ b/docs/briefs/feature-kafka-confluent-protobuf-pr.md
+@@ -29,8 +29,10 @@ using only Apache-licensed dependencies:
+   field number, the identity of a field on the wire: the table's data
+   schema names the registry id of the schema the columns were derived from
+   and the message within it, resolved together with the columns when the
+-  table is described, so a schema registered later does not change what a
+-  running query reads or writes, and
++  table is described, and the table metadata a query is analyzed and planned
++  with comes from the table handle (whose columns now carry their comments),
++  so a schema registered later does not change what a running query reads or
++  writes, and
+   the decoder maps each column's field to the writer field with the same
+   number and encoding, at the top level and within `ROW`, `ARRAY` and `MAP`
+   columns, and converts its value the way protobuf reads it with the reader
+@@ -172,7 +174,10 @@ Tests:
+   property names, validation), connector startup with the registry
+   properties in `TestKafkaPlugin`, `TestConfluentModule` (client properties
+   of all providers combined, a property set twice rejected), `TestKafkaMetadata`
+-  (the table handle, its columns and its data schema come from one description),
++  (the table handle, its columns and its data schema come from one description,
++  which the table metadata, schema and column handles of the handle answer from
++  with the column comments, while listing the columns of all tables describes
++  the table again),
+   `TestProtobufSchemaParser`, `TestNoConfluentProtobufDependency`, protobuf
+   cases in `TestConfluentSchemaRegistryTableDescriptionSupplier`, and new
+   Docker cases in `TestKafkaProtobufWithSchemaRegistryMinimalFunctionality`
+-- 
+2.43.0
+

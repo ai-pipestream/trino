@@ -1,0 +1,1519 @@
+From a7c7605292a6a4c533d557013b55ef37f48759bd Mon Sep 17 00:00:00 2001
+From: Kristian Rickert <kristian@apache.org>
+Date: Fri, 23 Oct 2026 11:51:34 +0000
+Subject: [PATCH 1/7] Scope protoc configuration to each module
+
+The source and include directories in pluginManagement applied to every
+module that runs protoc. trino-hive-formats has no src/main/proto and
+failed to build, and trino-kafka inherited the directories as well.
+---
+ core/trino-main/pom.xml            | 11 +++++++++++
+ lib/trino-protobuf-handles/pom.xml | 15 ++++++++++++---
+ plugin/trino-hive/pom.xml          | 11 +++++++++++
+ plugin/trino-memory/pom.xml        | 11 +++++++++++
+ plugin/trino-tpch/pom.xml          | 11 +++++++++++
+ pom.xml                            |  9 ---------
+ 6 files changed, 56 insertions(+), 12 deletions(-)
+
+diff --git a/core/trino-main/pom.xml b/core/trino-main/pom.xml
+index 468ab3ec..689716e1 100644
+--- a/core/trino-main/pom.xml
++++ b/core/trino-main/pom.xml
+@@ -584,6 +584,17 @@
+                             <goal>run</goal>
+                         </goals>
+                         <phase>generate-sources</phase>
++                        <configuration>
++                            <addSources>main</addSources>
++                            <includeMavenTypes>direct</includeMavenTypes>
++                            <inputDirectories>
++                                <include>src/main/proto</include>
++                            </inputDirectories>
++                            <includeDirectories>
++                                <include>src/main/proto</include>
++                            </includeDirectories>
++                            <outputDirectory>target/generated-sources/protobuf</outputDirectory>
++                        </configuration>
+                     </execution>
+                 </executions>
+             </plugin>
+diff --git a/lib/trino-protobuf-handles/pom.xml b/lib/trino-protobuf-handles/pom.xml
+index db065c74..9e066802 100644
+--- a/lib/trino-protobuf-handles/pom.xml
++++ b/lib/trino-protobuf-handles/pom.xml
+@@ -69,9 +69,6 @@
+             <plugin>
+                 <groupId>com.github.os72</groupId>
+                 <artifactId>protoc-jar-maven-plugin</artifactId>
+-                <configuration>
+-                    <addProtoSources>inputs</addProtoSources>
+-                </configuration>
+                 <executions>
+                     <execution>
+                         <id>generate-sources</id>
+@@ -79,6 +76,18 @@
+                             <goal>run</goal>
+                         </goals>
+                         <phase>generate-sources</phase>
++                        <configuration>
++                            <addProtoSources>inputs</addProtoSources>
++                            <addSources>main</addSources>
++                            <includeMavenTypes>direct</includeMavenTypes>
++                            <inputDirectories>
++                                <include>src/main/proto</include>
++                            </inputDirectories>
++                            <includeDirectories>
++                                <include>src/main/proto</include>
++                            </includeDirectories>
++                            <outputDirectory>target/generated-sources/protobuf</outputDirectory>
++                        </configuration>
+                     </execution>
+                 </executions>
+             </plugin>
+diff --git a/plugin/trino-hive/pom.xml b/plugin/trino-hive/pom.xml
+index 3a8709cb..864560f8 100644
+--- a/plugin/trino-hive/pom.xml
++++ b/plugin/trino-hive/pom.xml
+@@ -597,6 +597,17 @@
+                             <goal>run</goal>
+                         </goals>
+                         <phase>generate-sources</phase>
++                        <configuration>
++                            <addSources>main</addSources>
++                            <includeMavenTypes>direct</includeMavenTypes>
++                            <inputDirectories>
++                                <include>src/main/proto</include>
++                            </inputDirectories>
++                            <includeDirectories>
++                                <include>src/main/proto</include>
++                            </includeDirectories>
++                            <outputDirectory>target/generated-sources/protobuf</outputDirectory>
++                        </configuration>
+                     </execution>
+                 </executions>
+             </plugin>
+diff --git a/plugin/trino-memory/pom.xml b/plugin/trino-memory/pom.xml
+index ddaa318f..340cd379 100644
+--- a/plugin/trino-memory/pom.xml
++++ b/plugin/trino-memory/pom.xml
+@@ -211,6 +211,17 @@
+                             <goal>run</goal>
+                         </goals>
+                         <phase>generate-sources</phase>
++                        <configuration>
++                            <addSources>main</addSources>
++                            <includeMavenTypes>direct</includeMavenTypes>
++                            <inputDirectories>
++                                <include>src/main/proto</include>
++                            </inputDirectories>
++                            <includeDirectories>
++                                <include>src/main/proto</include>
++                            </includeDirectories>
++                            <outputDirectory>target/generated-sources/protobuf</outputDirectory>
++                        </configuration>
+                     </execution>
+                 </executions>
+             </plugin>
+diff --git a/plugin/trino-tpch/pom.xml b/plugin/trino-tpch/pom.xml
+index 62beb9e8..d276d590 100644
+--- a/plugin/trino-tpch/pom.xml
++++ b/plugin/trino-tpch/pom.xml
+@@ -154,6 +154,17 @@
+                             <goal>run</goal>
+                         </goals>
+                         <phase>generate-sources</phase>
++                        <configuration>
++                            <addSources>main</addSources>
++                            <includeMavenTypes>direct</includeMavenTypes>
++                            <inputDirectories>
++                                <include>src/main/proto</include>
++                            </inputDirectories>
++                            <includeDirectories>
++                                <include>src/main/proto</include>
++                            </includeDirectories>
++                            <outputDirectory>target/generated-sources/protobuf</outputDirectory>
++                        </configuration>
+                     </execution>
+                 </executions>
+             </plugin>
+diff --git a/pom.xml b/pom.xml
+index d63cc958..f88cc9b7 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -2234,15 +2234,6 @@
+                     <configuration>
+                         <protocArtifact>com.google.protobuf:protoc:${dep.protobuf.version}</protocArtifact>
+                         <protocVersion>${dep.protobuf.version}</protocVersion>
+-                        <addSources>main</addSources>
+-                        <includeMavenTypes>direct</includeMavenTypes>
+-                        <inputDirectories>
+-                            <include>src/main/proto</include>
+-                        </inputDirectories>
+-                        <includeDirectories>
+-                            <include>src/main/proto</include>
+-                        </includeDirectories>
+-                        <outputDirectory>target/generated-sources/protobuf</outputDirectory>
+                     </configuration>
+                 </plugin>
+                 <plugin>
+-- 
+2.43.0
+
+
+From d3eb0fe4a011422f96199e95c53df2f6edf193f7 Mon Sep 17 00:00:00 2001
+From: Kristian Rickert <kristian@apache.org>
+Date: Fri, 23 Oct 2026 11:51:34 +0000
+Subject: [PATCH 2/7] Harden protobuf domain decoding
+
+Reject a block of the wrong class for the domain type, an invalid type id
+and bytes after the block with a TrinoException instead of letting a raw
+ClassCastException or IllegalArgumentException escape.
+
+Decode a normalized discrete set without rebuilding every value as a
+Range, as the JSON deserializer does. Large dynamic filter domains decoded
+slower than JSON before this change.
+---
+ .../protobuf/handles/DomainProtoCodec.java    | 140 +++++++++++++++---
+ .../handles/TestDomainProtoCodec.java         | 123 ++++++++++++++-
+ .../hive/TestHiveHandleCodecProvider.java     |   6 +-
+ 3 files changed, 246 insertions(+), 23 deletions(-)
+
+diff --git a/lib/trino-protobuf-handles/src/main/java/io/trino/protobuf/handles/DomainProtoCodec.java b/lib/trino-protobuf-handles/src/main/java/io/trino/protobuf/handles/DomainProtoCodec.java
+index 6fe81da1..8f2c2a5b 100644
+--- a/lib/trino-protobuf-handles/src/main/java/io/trino/protobuf/handles/DomainProtoCodec.java
++++ b/lib/trino-protobuf-handles/src/main/java/io/trino/protobuf/handles/DomainProtoCodec.java
+@@ -17,6 +17,7 @@ import com.google.inject.Inject;
+ import com.google.protobuf.ByteString;
+ import io.airlift.slice.DynamicSliceOutput;
+ import io.airlift.slice.Slice;
++import io.airlift.slice.SliceInput;
+ import io.airlift.slice.SliceOutput;
+ import io.airlift.slice.Slices;
+ import io.trino.protobuf.handles.v1.AllOrNoneValueSet;
+@@ -36,12 +37,18 @@ import io.trino.spi.type.Type;
+ import io.trino.spi.type.TypeId;
+ import io.trino.spi.type.TypeManager;
+ 
++import java.lang.invoke.MethodHandle;
+ import java.util.ArrayList;
+ import java.util.LinkedHashSet;
+ import java.util.List;
+ import java.util.Set;
+ 
+ import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
++import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION_NOT_NULL;
++import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
++import static io.trino.spi.function.InvocationConvention.simpleConvention;
++import static io.trino.spi.type.DoubleType.DOUBLE;
++import static io.trino.spi.type.RealType.REAL;
+ import static io.trino.spi.type.TypeUtils.readNativeValue;
+ import static io.trino.spi.type.TypeUtils.writeNativeValue;
+ import static java.lang.Math.toIntExact;
+@@ -99,14 +106,23 @@ public final class DomainProtoCodec
+ 
+     public Domain fromProto(io.trino.protobuf.handles.v1.Domain proto)
+     {
+-        Type type = typeManager.getType(TypeId.of(proto.getTypeId()));
+-        ValueSet values = switch (proto.getValueSetCase()) {
+-            case ALL_OR_NONE -> proto.getAllOrNone().getAll() ? ValueSet.all(type) : ValueSet.none(type);
+-            case SORTED_RANGES -> sortedRangeSet(type, proto.getSortedRanges());
+-            case EQUATABLE_VALUES -> equatableValueSet(type, proto.getEquatableValues());
+-            case VALUESET_NOT_SET -> throw new TrinoException(GENERIC_INTERNAL_ERROR, "Protobuf domain of type %s has no value set".formatted(type));
+-        };
+-        return Domain.create(values, proto.getNullAllowed());
++        Type type = type(proto.getTypeId());
++        try {
++            ValueSet values = switch (proto.getValueSetCase()) {
++                case ALL_OR_NONE -> proto.getAllOrNone().getAll() ? ValueSet.all(type) : ValueSet.none(type);
++                case SORTED_RANGES -> sortedRangeSet(type, proto.getSortedRanges());
++                case EQUATABLE_VALUES -> equatableValueSet(type, proto.getEquatableValues());
++                case VALUESET_NOT_SET -> throw new TrinoException(GENERIC_INTERNAL_ERROR, "Protobuf domain of type %s has no value set".formatted(type));
++            };
++            return Domain.create(values, proto.getNullAllowed());
++        }
++        catch (TrinoException e) {
++            throw e;
++        }
++        catch (RuntimeException e) {
++            // values whose nested blocks do not match the type fail inside the type's operators
++            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Protobuf domain of type %s is invalid: %s".formatted(type, e), e);
++        }
+     }
+ 
+     /**
+@@ -135,24 +151,38 @@ public final class DomainProtoCodec
+         return new TrinoException(GENERIC_INTERNAL_ERROR, "Invalid TupleDomain kind %s in %s".formatted(kind, context));
+     }
+ 
++    // SortedRangeSet.fromJson is the deserialization entry point of the SPI; this codec is a deserializer too
++    @SuppressWarnings({"deprecation", "DoNotCall"})
+     private ValueSet sortedRangeSet(Type type, io.trino.protobuf.handles.v1.SortedRangeSet proto)
+     {
+-        Block bounds = deserializeBlock(proto.getBounds());
++        Block bounds = deserializeBlock(type, proto.getBounds());
+         int inclusiveCount = proto.getInclusiveCount();
+         if (inclusiveCount != bounds.getPositionCount() || inclusiveCount % 2 != 0) {
+             throw new TrinoException(GENERIC_INTERNAL_ERROR, "Protobuf sorted range set of type %s has %s bounds and %s inclusive flags".formatted(type, bounds.getPositionCount(), inclusiveCount));
+         }
++        if (inclusiveCount == 0) {
++            return ValueSet.none(type);
++        }
++        if (proto.getDiscreteSetMarker() == DiscreteSetMarker.DISCRETE) {
++            boolean[] inclusive = new boolean[inclusiveCount];
++            for (int position = 0; position < inclusiveCount; position++) {
++                inclusive[position] = proto.getInclusive(position);
++            }
++            if (isNormalizedDiscreteSet(type, bounds, inclusive)) {
++                // Dynamic filters ship discrete sets of up to millions of values: adopt the block as is, the way
++                // the JSON deserializer does, instead of rebuilding and sorting one Range per value.
++                return SortedRangeSet.fromJson(type, inclusive, bounds, SortedRangeSet.DiscreteSetMarker.DISCRETE);
++            }
++        }
+         List<Range> ranges = new ArrayList<>(inclusiveCount / 2);
+         for (int position = 0; position < inclusiveCount; position += 2) {
+             ranges.add(range(type, bounds, position, proto.getInclusive(position), proto.getInclusive(position + 1)));
+         }
+-        if (ranges.isEmpty()) {
+-            return ValueSet.none(type);
+-        }
+         try {
+-            // A set the sender knew to be discrete is rebuilt through the discrete value constructors, which
+-            // produce the same marker and block layout as Domain.singleValue and ValueSet.of. The marker is
+-            // only a hint: ranges that are not single values are rebuilt as ranges whatever the marker says.
++            // A set marked discrete that is not already normalized, with duplicate or unordered values, is rebuilt
++            // through the discrete value constructors, which produce the same marker and block layout as
++            // Domain.singleValue and ValueSet.of. The marker is only a hint: ranges that are not single values are
++            // rebuilt as ranges whatever the marker says.
+             if (proto.getDiscreteSetMarker() == DiscreteSetMarker.DISCRETE && ranges.stream().allMatch(Range::isSingleValue)) {
+                 if (ranges.size() == 1) {
+                     return ValueSet.of(type, ranges.get(0).getSingleValue());
+@@ -166,6 +196,55 @@ public final class DomainProtoCodec
+         }
+     }
+ 
++    /**
++     * Whether the bounds hold single values only, each one non-null and inclusive at both ends, in strictly
++     * ascending order: exactly the layout {@link SortedRangeSet} keeps for a discrete set. Checking this is
++     * linear, so a well-formed set can be adopted without rebuilding it.
++     */
++    private boolean isNormalizedDiscreteSet(Type type, Block bounds, boolean[] inclusive)
++    {
++        MethodHandle comparison = typeManager.getTypeOperators().getComparisonUnorderedLastOperator(type, simpleConvention(FAIL_ON_NULL, BLOCK_POSITION_NOT_NULL, BLOCK_POSITION_NOT_NULL));
++        for (int position = 0; position < bounds.getPositionCount(); position += 2) {
++            if (!inclusive[position] || !inclusive[position + 1] || bounds.isNull(position) || bounds.isNull(position + 1)) {
++                return false;
++            }
++            if (isNaN(type, bounds, position)) {
++                return false;
++            }
++            if (compare(comparison, bounds, position, position + 1) != 0) {
++                return false;
++            }
++            if (position > 0 && compare(comparison, bounds, position - 1, position) >= 0) {
++                return false;
++            }
++        }
++        return true;
++    }
++
++    private static long compare(MethodHandle comparison, Block block, int leftPosition, int rightPosition)
++    {
++        try {
++            return (long) comparison.invokeExact(block, leftPosition, block, rightPosition);
++        }
++        catch (RuntimeException | Error e) {
++            throw e;
++        }
++        catch (Throwable throwable) {
++            throw new RuntimeException(throwable);
++        }
++    }
++
++    private static boolean isNaN(Type type, Block block, int position)
++    {
++        if (type.equals(DOUBLE)) {
++            return Double.isNaN(DOUBLE.getDouble(block, position));
++        }
++        if (type.equals(REAL)) {
++            return Float.isNaN(REAL.getFloat(block, position));
++        }
++        return false;
++    }
++
+     private static DiscreteSetMarker toProto(SortedRangeSet.DiscreteSetMarker marker)
+     {
+         return switch (marker) {
+@@ -200,7 +279,7 @@ public final class DomainProtoCodec
+ 
+     private ValueSet equatableValueSet(Type type, io.trino.protobuf.handles.v1.EquatableValueSet proto)
+     {
+-        Block values = deserializeBlock(proto.getValues());
++        Block values = deserializeBlock(type, proto.getValues());
+         Set<EquatableValueSet.ValueEntry> entries = new LinkedHashSet<>(values.getPositionCount());
+         for (int position = 0; position < values.getPositionCount(); position++) {
+             if (values.isNull(position)) {
+@@ -224,13 +303,36 @@ public final class DomainProtoCodec
+         return ByteString.copyFrom(slice.byteArray(), slice.byteArrayOffset(), slice.length());
+     }
+ 
+-    private Block deserializeBlock(ByteString bytes)
++    private Block deserializeBlock(Type type, ByteString bytes)
+     {
++        SliceInput input = Slices.wrappedBuffer(bytes.toByteArray()).getInput();
++        Block block;
+         try {
+-            return blockEncodingSerde.readBlock(Slices.wrappedBuffer(bytes.toByteArray()).getInput());
++            block = blockEncodingSerde.readBlock(input);
++        }
++        catch (RuntimeException e) {
++            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to decode block in protobuf domain of type %s".formatted(type), e);
++        }
++        if (input.isReadable()) {
++            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Protobuf domain of type %s has %s bytes after its block".formatted(type, input.available()));
++        }
++        Class<?> valueBlockType = block.getUnderlyingValueBlock().getClass();
++        if (!type.getValueBlockType().isAssignableFrom(valueBlockType)) {
++            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Protobuf domain of type %s carries a %s instead of a %s".formatted(type, valueBlockType.getSimpleName(), type.getValueBlockType().getSimpleName()));
++        }
++        return block;
++    }
++
++    private Type type(String typeId)
++    {
++        try {
++            return typeManager.getType(TypeId.of(typeId));
++        }
++        catch (TrinoException e) {
++            throw e;
+         }
+         catch (RuntimeException e) {
+-            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to decode block in protobuf domain", e);
++            throw new TrinoException(GENERIC_INTERNAL_ERROR, "Protobuf domain carries an invalid type: " + typeId, e);
+         }
+     }
+ }
+diff --git a/lib/trino-protobuf-handles/src/test/java/io/trino/protobuf/handles/TestDomainProtoCodec.java b/lib/trino-protobuf-handles/src/test/java/io/trino/protobuf/handles/TestDomainProtoCodec.java
+index a1c51679..01b60347 100644
+--- a/lib/trino-protobuf-handles/src/test/java/io/trino/protobuf/handles/TestDomainProtoCodec.java
++++ b/lib/trino-protobuf-handles/src/test/java/io/trino/protobuf/handles/TestDomainProtoCodec.java
+@@ -31,7 +31,9 @@ import io.trino.spi.predicate.TupleDomain;
+ import io.trino.spi.predicate.ValueSet;
+ import io.trino.spi.type.Int128;
+ import io.trino.spi.type.LongTimestamp;
++import io.trino.spi.type.MapType;
+ import io.trino.spi.type.Type;
++import io.trino.spi.type.TypeOperators;
+ import org.junit.jupiter.api.Test;
+ 
+ import java.io.UncheckedIOException;
+@@ -54,6 +56,7 @@ import static io.trino.spi.type.IntegerType.INTEGER;
+ import static io.trino.spi.type.RealType.REAL;
+ import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
+ import static io.trino.spi.type.TimestampType.TIMESTAMP_NANOS;
++import static io.trino.spi.type.TypeUtils.writeNativeValue;
+ import static io.trino.spi.type.VarbinaryType.VARBINARY;
+ import static io.trino.spi.type.VarcharType.VARCHAR;
+ import static java.lang.Float.floatToRawIntBits;
+@@ -162,6 +165,35 @@ public class TestDomainProtoCodec
+         assertThat(codec.fromProto(duplicated)).isEqualTo(values);
+     }
+ 
++    @Test
++    public void testUnorderedDiscreteValuesAreSorted()
++    {
++        Domain values = Domain.multipleValues(BIGINT, List.of(1L, 3L));
++        io.trino.protobuf.handles.v1.Domain proto = codec.toProto(values);
++        io.trino.protobuf.handles.v1.Domain unordered = proto.toBuilder()
++                .setSortedRanges(proto.getSortedRanges().toBuilder()
++                        .setBounds(serialize(BIGINT, 3L, 3L, 1L, 1L)))
++                .build();
++        Domain decoded = codec.fromProto(unordered);
++        assertThat(decoded).isEqualTo(values);
++        assertThat(((SortedRangeSet) decoded.getValues()).getDiscreteSetMarker()).isEqualTo(DISCRETE);
++    }
++
++    @Test
++    public void testNaNInDiscreteSetIsRejected()
++    {
++        io.trino.protobuf.handles.v1.Domain proto = codec.toProto(Domain.singleValue(DOUBLE, 1.0));
++        assertThat(proto.getSortedRanges().getDiscreteSetMarker()).isEqualTo(DiscreteSetMarker.DISCRETE);
++        io.trino.protobuf.handles.v1.Domain nan = proto.toBuilder()
++                .setSortedRanges(proto.getSortedRanges().toBuilder()
++                        .setBounds(serialize(DOUBLE, Double.NaN, Double.NaN)))
++                .build();
++        assertThatThrownBy(() -> codec.fromProto(nan))
++                .isInstanceOf(TrinoException.class)
++                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()))
++                .hasMessageContaining("NaN");
++    }
++
+     @Test
+     public void testSortedRangesWireShape()
+     {
+@@ -219,9 +251,85 @@ public class TestDomainProtoCodec
+                 .setAllOrNone(AllOrNoneValueSet.newBuilder().setAll(true))
+                 .build();
+         assertThatThrownBy(() -> codec.fromProto(unknown))
++                .isInstanceOf(TrinoException.class)
+                 .hasMessageContaining("no_such_type");
+     }
+ 
++    @Test
++    public void testBlockOfAnotherTypeIsRejected()
++    {
++        // the bounds of a bigint domain encoded as a varchar block
++        io.trino.protobuf.handles.v1.Domain proto = codec.toProto(Domain.singleValue(BIGINT, 1L));
++        io.trino.protobuf.handles.v1.Domain varcharBounds = proto.toBuilder()
++                .setSortedRanges(proto.getSortedRanges().toBuilder()
++                        .setBounds(serialize(VARCHAR, utf8Slice("a"), utf8Slice("a"))))
++                .build();
++        assertThatThrownBy(() -> codec.fromProto(varcharBounds))
++                .isInstanceOf(TrinoException.class)
++                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()))
++                .hasMessageContaining("of type bigint carries a VariableWidthBlock instead of a LongArrayBlock");
++
++        io.trino.protobuf.handles.v1.Domain equatable = codec.toProto(Domain.singleValue(BIGINT_MAP, mapOf(1, 2)));
++        io.trino.protobuf.handles.v1.Domain bigintValues = equatable.toBuilder()
++                .setEquatableValues(equatable.getEquatableValues().toBuilder()
++                        .setValues(serialize(BIGINT, 1L)))
++                .build();
++        assertThatThrownBy(() -> codec.fromProto(bigintValues))
++                .isInstanceOf(TrinoException.class)
++                .hasMessageContaining("carries a LongArrayBlock instead of a MapBlock");
++    }
++
++    @Test
++    public void testNestedBlockOfAnotherTypeIsRejected()
++    {
++        // a map block whose keys and values are varchar where the domain type says bigint: the outer
++        // block class matches, so the mismatch surfaces while the nested values are read
++        Type varcharMap = new MapType(VARCHAR, VARCHAR, new TypeOperators());
++        BlockBuilder builder = varcharMap.createBlockBuilder(null, 1);
++        ((MapBlockBuilder) builder).buildEntry((keyBuilder, valueBuilder) -> {
++            VARCHAR.writeSlice(keyBuilder, utf8Slice("k"));
++            VARCHAR.writeSlice(valueBuilder, utf8Slice("v"));
++        });
++        DynamicSliceOutput output = new DynamicSliceOutput(64);
++        SERDE.writeBlock(output, builder.build());
++        io.trino.protobuf.handles.v1.Domain proto = codec.toProto(Domain.singleValue(BIGINT_MAP, mapOf(1, 2)));
++        io.trino.protobuf.handles.v1.Domain nestedMismatch = proto.toBuilder()
++                .setEquatableValues(proto.getEquatableValues().toBuilder()
++                        .setValues(ByteString.copyFrom(output.slice().getBytes())))
++                .build();
++        assertThatThrownBy(() -> codec.fromProto(nestedMismatch))
++                .isInstanceOf(TrinoException.class)
++                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()))
++                .hasMessageContaining("domain of type map(bigint, bigint)");
++    }
++
++    @Test
++    public void testTrailingBytesAfterBlockAreRejected()
++    {
++        io.trino.protobuf.handles.v1.Domain proto = codec.toProto(Domain.singleValue(BIGINT, 1L));
++        io.trino.protobuf.handles.v1.Domain trailing = proto.toBuilder()
++                .setSortedRanges(proto.getSortedRanges().toBuilder()
++                        .setBounds(proto.getSortedRanges().getBounds().concat(ByteString.copyFrom(new byte[] {0, 0, 0}))))
++                .build();
++        assertThatThrownBy(() -> codec.fromProto(trailing))
++                .isInstanceOf(TrinoException.class)
++                .hasMessageContaining("has 3 bytes after its block");
++    }
++
++    @Test
++    public void testInvalidTypeIdIsCategorized()
++    {
++        for (String typeId : List.of("", "varchar(-1)", "map(bigint")) {
++            io.trino.protobuf.handles.v1.Domain invalid = io.trino.protobuf.handles.v1.Domain.newBuilder()
++                    .setTypeId(typeId)
++                    .setAllOrNone(AllOrNoneValueSet.newBuilder().setAll(true))
++                    .build();
++            assertThatThrownBy(() -> codec.fromProto(invalid))
++                    .isInstanceOf(TrinoException.class)
++                    .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()));
++        }
++    }
++
+     @Test
+     public void testNullInEquatableValuesIsRejected()
+     {
+@@ -268,9 +376,9 @@ public class TestDomainProtoCodec
+             SortedRangeSet decodedRanges = (SortedRangeSet) decoded.getValues();
+             assertThat(decodedRanges.getOrderedRanges()).isEqualTo(ranges.getOrderedRanges());
+             if (ranges.getDiscreteSetMarker() == DISCRETE) {
+-                // discrete sets come back exactly as the sender built them, block layout included
++                // discrete sets come back marked discrete; the block layout is whatever the block serde wrote,
++                // exactly as on the JSON control plane
+                 assertThat(decodedRanges.getDiscreteSetMarker()).isEqualTo(DISCRETE);
+-                assertThat(decodedRanges.getSortedRanges().getClass()).isEqualTo(ranges.getSortedRanges().getClass());
+             }
+             assertThat(decodedRanges.isDiscreteSet()).isEqualTo(ranges.isDiscreteSet());
+         }
+@@ -279,6 +387,17 @@ public class TestDomainProtoCodec
+         }
+     }
+ 
++    private static ByteString serialize(Type type, Object... values)
++    {
++        BlockBuilder builder = type.createBlockBuilder(null, values.length);
++        for (Object value : values) {
++            writeNativeValue(type, builder, value);
++        }
++        DynamicSliceOutput output = new DynamicSliceOutput(64);
++        SERDE.writeBlock(output, builder.build());
++        return ByteString.copyFrom(output.slice().getBytes());
++    }
++
+     private static Object mapOf(long... keysAndValues)
+     {
+         BlockBuilder builder = BIGINT_MAP.createBlockBuilder(null, 1);
+diff --git a/plugin/trino-hive/src/test/java/io/trino/plugin/hive/TestHiveHandleCodecProvider.java b/plugin/trino-hive/src/test/java/io/trino/plugin/hive/TestHiveHandleCodecProvider.java
+index def8fa9a..e8461f37 100644
+--- a/plugin/trino-hive/src/test/java/io/trino/plugin/hive/TestHiveHandleCodecProvider.java
++++ b/plugin/trino-hive/src/test/java/io/trino/plugin/hive/TestHiveHandleCodecProvider.java
+@@ -183,7 +183,8 @@ public class TestHiveHandleCodecProvider
+     public void testDiscreteDomainsRoundTripByValue()
+     {
+         // Domain.singleValue and ValueSet.of build run-length and dictionary encoded blocks tagged as discrete
+-        // sets. The codec rebuilds them the same way, so the handles are equal and re-encode to the same bytes.
++        // sets. The decoded sets are equal and still discrete; their blocks are whatever the block serde read,
++        // as on the JSON control plane, so the encoding is stable from the first decoded copy on.
+         TupleDomain<HiveColumnHandle> predicate = TupleDomain.withColumnDomains(ImmutableMap.of(
+                 DS, Domain.singleValue(VARCHAR, Slices.utf8Slice("2024-01-01")),
+                 ID, Domain.create(ValueSet.of(BIGINT, 1L, 2L, 3L), true)));
+@@ -206,7 +207,8 @@ public class TestHiveHandleCodecProvider
+         for (Domain domain : decoded.getCompactEffectivePredicate().getDomains().orElseThrow().values()) {
+             assertThat(domain.getValues().isDiscreteSet()).isTrue();
+         }
+-        assertThat(codec.serialize(decoded)).isEqualTo(codec.serialize(handle));
++        byte[] reencoded = codec.serialize(decoded);
++        assertThat(codec.serialize(codec.deserialize(reencoded))).isEqualTo(reencoded);
+     }
+ 
+     @Test
+-- 
+2.43.0
+
+
+From dc5301a66657961aeef06f9cad3675a8d73f950d Mon Sep 17 00:00:00 2001
+From: Kristian Rickert <kristian@apache.org>
+Date: Fri, 23 Oct 2026 11:51:34 +0000
+Subject: [PATCH 3/7] Wrap failures of protobuf handle codecs
+
+Handle constructors and connector codecs fail with NullPointerException,
+ClassCastException and the like. Report them as a TrinoException that
+names the catalog, family and handle class.
+---
+ .../ConnectorHandleProtobufCodec.java         | 29 +++++++++++++--
+ .../TestConnectorHandleProtobufCodec.java     | 36 +++++++++++++++++++
+ .../protobuf/handles/ProtobufHandleCodec.java |  6 +++-
+ .../handles/TestProtobufHandleCodec.java      | 31 ++++++++++++++++
+ 4 files changed, 99 insertions(+), 3 deletions(-)
+
+diff --git a/core/trino-main/src/main/java/io/trino/metadata/ConnectorHandleProtobufCodec.java b/core/trino-main/src/main/java/io/trino/metadata/ConnectorHandleProtobufCodec.java
+index 1a9c0b50..1b4e1218 100644
+--- a/core/trino-main/src/main/java/io/trino/metadata/ConnectorHandleProtobufCodec.java
++++ b/core/trino-main/src/main/java/io/trino/metadata/ConnectorHandleProtobufCodec.java
+@@ -57,7 +57,20 @@ public class ConnectorHandleProtobufCodec
+         requireNonNull(family, "family is null");
+         requireNonNull(handle, "handle is null");
+         ConnectorHandleCodec<T> codec = resolveCodec(catalogHandle, family, handle.getClass());
+-        byte[] payload = codec.serialize(handle);
++        byte[] payload;
++        try {
++            payload = codec.serialize(handle);
++        }
++        catch (TrinoException e) {
++            throw e;
++        }
++        catch (RuntimeException e) {
++            throw new TrinoException(GENERIC_INTERNAL_ERROR, format(
++                    "Protobuf handle codec of catalog '%s' failed to encode %s handle %s",
++                    catalogHandle.getCatalogName(),
++                    family,
++                    handle.getClass().getName()), e);
++        }
+         if (payload == null) {
+             throw new TrinoException(GENERIC_INTERNAL_ERROR, format(
+                     "Protobuf handle codec of catalog '%s' returned null for %s handle %s",
+@@ -77,7 +90,19 @@ public class ConnectorHandleProtobufCodec
+         requireNonNull(proto, "proto is null");
+         CatalogHandle catalogHandle = parseCatalogHandle(proto.getCatalogHandle());
+         ConnectorHandleCodec<T> codec = resolveCodec(catalogHandle, family, family.handleClass());
+-        T handle = codec.deserialize(proto.getPayload().toByteArray());
++        T handle;
++        try {
++            handle = codec.deserialize(proto.getPayload().toByteArray());
++        }
++        catch (TrinoException e) {
++            throw e;
++        }
++        catch (RuntimeException e) {
++            throw new TrinoException(GENERIC_INTERNAL_ERROR, format(
++                    "Protobuf handle codec of catalog '%s' failed to decode a %s handle",
++                    catalogHandle.getCatalogName(),
++                    family), e);
++        }
+         if (handle == null) {
+             throw new TrinoException(GENERIC_INTERNAL_ERROR, format(
+                     "Protobuf handle codec of catalog '%s' decoded a %s handle as null",
+diff --git a/core/trino-main/src/test/java/io/trino/metadata/TestConnectorHandleProtobufCodec.java b/core/trino-main/src/test/java/io/trino/metadata/TestConnectorHandleProtobufCodec.java
+index 3b94df0c..f498f730 100644
+--- a/core/trino-main/src/test/java/io/trino/metadata/TestConnectorHandleProtobufCodec.java
++++ b/core/trino-main/src/test/java/io/trino/metadata/TestConnectorHandleProtobufCodec.java
+@@ -292,6 +292,42 @@ public class TestConnectorHandleProtobufCodec
+                 .hasMessageContaining("decoded a split handle as null");
+     }
+ 
++    @Test
++    public void testThrowingCodecIsCategorized()
++    {
++        CatalogHandle catalogHandle = CatalogHandle.createRootCatalogHandle(new CatalogName("throwing"), new CatalogVersion("v1"));
++        ConnectorHandleCodecProvider provider = new ConnectorHandleCodecProvider()
++        {
++            @Override
++            public Optional<ConnectorHandleCodec<ConnectorSplit>> getSplitCodec()
++            {
++                return Optional.of(new ConnectorHandleCodec<>()
++                {
++                    @Override
++                    public byte[] serialize(ConnectorSplit handle)
++                    {
++                        throw new ClassCastException("cannot encode");
++                    }
++
++                    @Override
++                    public ConnectorSplit deserialize(byte[] bytes)
++                    {
++                        throw new IndexOutOfBoundsException("cannot decode");
++                    }
++                });
++            }
++        };
++        ConnectorHandleProtobufCodec throwingCodec = new ConnectorHandleProtobufCodec(singleCatalog(catalogHandle, provider));
++        assertTrinoExceptionThrownBy(() -> throwingCodec.encode(catalogHandle, SPLIT, new TpchSplit(0, 1, ImmutableList.of())))
++                .hasErrorCode(GENERIC_INTERNAL_ERROR)
++                .hasMessage("Protobuf handle codec of catalog 'throwing' failed to encode split handle " + TpchSplit.class.getName())
++                .hasCauseInstanceOf(ClassCastException.class);
++        assertTrinoExceptionThrownBy(() -> throwingCodec.decode(SPLIT, ConnectorHandle.newBuilder().setCatalogHandle(catalogHandle.getId()).build()))
++                .hasErrorCode(GENERIC_INTERNAL_ERROR)
++                .hasMessage("Protobuf handle codec of catalog 'throwing' failed to decode a split handle")
++                .hasCauseInstanceOf(IndexOutOfBoundsException.class);
++    }
++
+     @Test
+     public void testEveryFamilyIsListed()
+     {
+diff --git a/lib/trino-protobuf-handles/src/main/java/io/trino/protobuf/handles/ProtobufHandleCodec.java b/lib/trino-protobuf-handles/src/main/java/io/trino/protobuf/handles/ProtobufHandleCodec.java
+index e252ec95..2408cef6 100644
+--- a/lib/trino-protobuf-handles/src/main/java/io/trino/protobuf/handles/ProtobufHandleCodec.java
++++ b/lib/trino-protobuf-handles/src/main/java/io/trino/protobuf/handles/ProtobufHandleCodec.java
+@@ -84,7 +84,11 @@ public final class ProtobufHandleCodec<F, H extends F, P extends Message>
+         try {
+             return fromProto.apply(proto);
+         }
+-        catch (IllegalArgumentException | IllegalStateException e) {
++        catch (TrinoException e) {
++            throw e;
++        }
++        catch (RuntimeException e) {
++            // handle constructors reject inconsistent state with IllegalArgumentException, NullPointerException and the like
+             throw new TrinoException(GENERIC_INTERNAL_ERROR, "Protobuf %s does not describe a valid handle: %s".formatted(handleClass.getSimpleName(), e.getMessage()), e);
+         }
+     }
+diff --git a/lib/trino-protobuf-handles/src/test/java/io/trino/protobuf/handles/TestProtobufHandleCodec.java b/lib/trino-protobuf-handles/src/test/java/io/trino/protobuf/handles/TestProtobufHandleCodec.java
+index 814c16be..d0c86aef 100644
+--- a/lib/trino-protobuf-handles/src/test/java/io/trino/protobuf/handles/TestProtobufHandleCodec.java
++++ b/lib/trino-protobuf-handles/src/test/java/io/trino/protobuf/handles/TestProtobufHandleCodec.java
+@@ -80,6 +80,37 @@ public class TestProtobufHandleCodec
+                 .hasMessage("Protobuf NumberedSplit does not describe a valid handle: number must not be negative");
+     }
+ 
++    @Test
++    public void testHandleConstructorFailureIsCategorized()
++    {
++        // a handle constructor rejecting a missing field with requireNonNull or a failed cast
++        ConnectorHandleCodec<ConnectorSplit> nullRejecting = protobufHandleCodec(
++                NumberedSplit.class,
++                Int64Value.parser(),
++                split -> Int64Value.of(split.number()),
++                _ -> {
++                    throw new NullPointerException("location is null");
++                });
++        byte[] bytes = codec.serialize(new NumberedSplit(3));
++        assertThatThrownBy(() -> nullRejecting.deserialize(bytes))
++                .isInstanceOf(TrinoException.class)
++                .satisfies(error -> assertThat(((TrinoException) error).getErrorCode()).isEqualTo(GENERIC_INTERNAL_ERROR.toErrorCode()))
++                .hasMessage("Protobuf NumberedSplit does not describe a valid handle: location is null")
++                .hasCauseInstanceOf(NullPointerException.class);
++
++        // categorized errors raised while decoding pass through unchanged
++        TrinoException original = new TrinoException(GENERIC_INTERNAL_ERROR, "already categorized");
++        ConnectorHandleCodec<ConnectorSplit> trinoFailing = protobufHandleCodec(
++                NumberedSplit.class,
++                Int64Value.parser(),
++                split -> Int64Value.of(split.number()),
++                _ -> {
++                    throw original;
++                });
++        assertThatThrownBy(() -> trinoFailing.deserialize(bytes))
++                .isSameAs(original);
++    }
++
+     @Test
+     public void testCorruptBytesAreRejected()
+     {
+-- 
+2.43.0
+
+
+From 97bc865a2990fdfc6560d325ca5e087441aa8383 Mon Sep 17 00:00:00 2001
+From: Kristian Rickert <kristian@apache.org>
+Date: Fri, 23 Oct 2026 11:51:34 +0000
+Subject: [PATCH 4/7] Honor Accept quality on task endpoints
+
+Use the quality of the most specific matching media range, so that q=0.0
+refuses a type and a wildcard cannot override an explicit refusal.
+---
+ .../java/io/trino/server/TaskResource.java    | 29 +++++++++++++++++--
+ .../server/TestTaskResourceEncoding.java      | 10 +++++++
+ 2 files changed, 36 insertions(+), 3 deletions(-)
+
+diff --git a/core/trino-main/src/main/java/io/trino/server/TaskResource.java b/core/trino-main/src/main/java/io/trino/server/TaskResource.java
+index 5839bdc2..66a08be2 100644
+--- a/core/trino-main/src/main/java/io/trino/server/TaskResource.java
++++ b/core/trino-main/src/main/java/io/trino/server/TaskResource.java
+@@ -602,6 +602,9 @@ public class TaskResource
+             return true;
+         }
+         MediaType produced = encoding == ControlPlaneEncoding.PROTOBUF ? APPLICATION_X_PROTOBUF_TYPE : MediaType.APPLICATION_JSON_TYPE;
++        // the most specific media range that matches decides, so "*/*, application/x-protobuf;q=0" excludes protobuf (RFC 9110, section 12.5.1)
++        int bestSpecificity = -1;
++        double bestQuality = 0;
+         for (String entry : Splitter.on(',').trimResults().omitEmptyStrings().split(accept)) {
+             MediaType acceptable;
+             try {
+@@ -610,11 +613,31 @@ public class TaskResource
+             catch (IllegalArgumentException _) {
+                 continue;
+             }
+-            if (acceptable.isCompatible(produced) && !"0".equals(acceptable.getParameters().get("q"))) {
+-                return true;
++            if (!acceptable.isCompatible(produced)) {
++                continue;
++            }
++            int specificity = acceptable.isWildcardType() ? 0 : acceptable.isWildcardSubtype() ? 1 : 2;
++            if (specificity > bestSpecificity) {
++                bestSpecificity = specificity;
++                bestQuality = quality(acceptable);
+             }
+         }
+-        return false;
++        return bestQuality > 0;
++    }
++
++    private static double quality(MediaType mediaType)
++    {
++        String quality = mediaType.getParameters().get("q");
++        if (quality == null) {
++            return 1;
++        }
++        try {
++            return Double.parseDouble(quality);
++        }
++        catch (NumberFormatException _) {
++            // an unparsable weight is treated like an unparsable media range
++            return 0;
++        }
+     }
+ 
+     private void requireRequestEncoding(ControlPlaneEncoding requestEncoding)
+diff --git a/core/trino-main/src/test/java/io/trino/server/TestTaskResourceEncoding.java b/core/trino-main/src/test/java/io/trino/server/TestTaskResourceEncoding.java
+index c1017c9f..87af02b6 100644
+--- a/core/trino-main/src/test/java/io/trino/server/TestTaskResourceEncoding.java
++++ b/core/trino-main/src/test/java/io/trino/server/TestTaskResourceEncoding.java
+@@ -111,6 +111,16 @@ public class TestTaskResourceEncoding
+         assertThat(TaskResource.isAcceptable("application/json", ControlPlaneEncoding.PROTOBUF)).isFalse();
+         assertThat(TaskResource.isAcceptable("application/x-protobuf;q=0", ControlPlaneEncoding.PROTOBUF)).isFalse();
+         assertThat(TaskResource.isAcceptable("text/plain, not a media type", ControlPlaneEncoding.PROTOBUF)).isFalse();
++        // a zero weight may carry up to three decimals
++        assertThat(TaskResource.isAcceptable("application/x-protobuf;q=0.0", ControlPlaneEncoding.PROTOBUF)).isFalse();
++        assertThat(TaskResource.isAcceptable("application/x-protobuf; q=0.000", ControlPlaneEncoding.PROTOBUF)).isFalse();
++        assertThat(TaskResource.isAcceptable("application/x-protobuf;q=0.001", ControlPlaneEncoding.PROTOBUF)).isTrue();
++        assertThat(TaskResource.isAcceptable("application/x-protobuf;q=abc", ControlPlaneEncoding.PROTOBUF)).isFalse();
++        // the most specific matching range decides, whatever the order
++        assertThat(TaskResource.isAcceptable("*/*, application/x-protobuf;q=0", ControlPlaneEncoding.PROTOBUF)).isFalse();
++        assertThat(TaskResource.isAcceptable("application/x-protobuf;q=0, application/*", ControlPlaneEncoding.PROTOBUF)).isFalse();
++        assertThat(TaskResource.isAcceptable("*/*;q=0, application/x-protobuf", ControlPlaneEncoding.PROTOBUF)).isTrue();
++        assertThat(TaskResource.isAcceptable("*/*;q=0", ControlPlaneEncoding.PROTOBUF)).isFalse();
+ 
+         assertThat(TaskResource.isAcceptable("application/json; charset=utf-8", ControlPlaneEncoding.JSON)).isTrue();
+         assertThat(TaskResource.isAcceptable("application/x-protobuf", ControlPlaneEncoding.JSON)).isFalse();
+-- 
+2.43.0
+
+
+From 62c00c1239dff1fdab4a8ba46046735cf5295db4 Mon Sep 17 00:00:00 2001
+From: Kristian Rickert <kristian@apache.org>
+Date: Fri, 23 Oct 2026 11:51:34 +0000
+Subject: [PATCH 5/7] Test class loader safe handle codecs
+
+---
+ .../plugin/base/classloader/TestClassLoaderSafeWrappers.java  | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/lib/trino-plugin-toolkit/src/test/java/io/trino/plugin/base/classloader/TestClassLoaderSafeWrappers.java b/lib/trino-plugin-toolkit/src/test/java/io/trino/plugin/base/classloader/TestClassLoaderSafeWrappers.java
+index 64a52c5d..ace41b90 100644
+--- a/lib/trino-plugin-toolkit/src/test/java/io/trino/plugin/base/classloader/TestClassLoaderSafeWrappers.java
++++ b/lib/trino-plugin-toolkit/src/test/java/io/trino/plugin/base/classloader/TestClassLoaderSafeWrappers.java
+@@ -14,6 +14,8 @@
+ package io.trino.plugin.base.classloader;
+ 
+ import io.trino.spi.connector.ConnectorAccessControl;
++import io.trino.spi.connector.ConnectorHandleCodec;
++import io.trino.spi.connector.ConnectorHandleCodecProvider;
+ import io.trino.spi.connector.ConnectorMergeSink;
+ import io.trino.spi.connector.ConnectorMetadata;
+ import io.trino.spi.connector.ConnectorNodePartitioningProvider;
+@@ -49,6 +51,8 @@ public class TestClassLoaderSafeWrappers
+     {
+         testClassLoaderSafe(ConnectorAccessControl.class, ClassLoaderSafeConnectorAccessControl.class);
+         testClassLoaderSafe(ConnectorMetadata.class, ClassLoaderSafeConnectorMetadata.class);
++        testClassLoaderSafe(ConnectorHandleCodecProvider.class, ClassLoaderSafeConnectorHandleCodecProvider.class);
++        testClassLoaderSafe(ConnectorHandleCodec.class, ClassLoaderSafeConnectorHandleCodec.class);
+         testClassLoaderSafe(ConnectorMergeSink.class, ClassLoaderSafeConnectorMergeSink.class);
+         testClassLoaderSafe(ConnectorPageSink.class, ClassLoaderSafeConnectorPageSink.class);
+         testClassLoaderSafe(ConnectorPageSinkProvider.class, ClassLoaderSafeConnectorPageSinkProvider.class);
+-- 
+2.43.0
+
+
+From d2d0216159b2ad8675b7d83defc95608642b7137 Mon Sep 17 00:00:00 2001
+From: Kristian Rickert <kristian@apache.org>
+Date: Fri, 23 Oct 2026 11:51:34 +0000
+Subject: [PATCH 6/7] Round-trip handles of planned hive queries
+
+Plan scans, bucketed scans, writes and engine-owned tables against a hive
+catalog and round-trip every handle and split the coordinator would ship.
+---
+ ...TestHiveHandleCodecsForPlannedQueries.java | 486 ++++++++++++++++++
+ 1 file changed, 486 insertions(+)
+ create mode 100644 plugin/trino-hive/src/test/java/io/trino/plugin/hive/TestHiveHandleCodecsForPlannedQueries.java
+
+diff --git a/plugin/trino-hive/src/test/java/io/trino/plugin/hive/TestHiveHandleCodecsForPlannedQueries.java b/plugin/trino-hive/src/test/java/io/trino/plugin/hive/TestHiveHandleCodecsForPlannedQueries.java
+new file mode 100644
+index 00000000..a0df9ac5
+--- /dev/null
++++ b/plugin/trino-hive/src/test/java/io/trino/plugin/hive/TestHiveHandleCodecsForPlannedQueries.java
+@@ -0,0 +1,486 @@
++/*
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package io.trino.plugin.hive;
++
++import com.fasterxml.jackson.core.JsonProcessingException;
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import com.fasterxml.jackson.databind.node.ArrayNode;
++import com.fasterxml.jackson.databind.node.ObjectNode;
++import com.google.common.collect.ImmutableList;
++import com.google.common.collect.ImmutableMap;
++import io.airlift.json.JsonMapperProvider;
++import io.airlift.slice.Slices;
++import io.opentelemetry.api.trace.Span;
++import io.trino.Session;
++import io.trino.block.BlockJsonSerde;
++import io.trino.connector.CatalogHandle;
++import io.trino.execution.ScheduledSplit;
++import io.trino.execution.warnings.WarningCollector;
++import io.trino.metadata.ConnectorHandleProtobufCodec;
++import io.trino.metadata.HandleFamily;
++import io.trino.metadata.Split;
++import io.trino.metadata.TableFunctionHandle;
++import io.trino.metadata.TableHandle;
++import io.trino.metastore.Column;
++import io.trino.metastore.Database;
++import io.trino.metastore.HiveBucketProperty;
++import io.trino.metastore.HiveMetastore;
++import io.trino.metastore.HiveMetastoreFactory;
++import io.trino.metastore.Partition;
++import io.trino.metastore.PartitionStatistics;
++import io.trino.metastore.PartitionWithStatistics;
++import io.trino.metastore.SortingColumn;
++import io.trino.metastore.Table;
++import io.trino.server.protobuf.SplitProtoMapper;
++import io.trino.spi.block.Block;
++import io.trino.spi.connector.ColumnHandle;
++import io.trino.spi.security.PrincipalType;
++import io.trino.spi.type.Type;
++import io.trino.spi.type.TypeId;
++import io.trino.split.SplitSource;
++import io.trino.sql.planner.PartitioningHandle;
++import io.trino.sql.planner.PartitioningScheme;
++import io.trino.sql.planner.Plan;
++import io.trino.sql.planner.PlanFragment;
++import io.trino.sql.planner.SubPlan;
++import io.trino.sql.planner.optimizations.PlanNodeSearcher;
++import io.trino.sql.planner.plan.ExchangeNode;
++import io.trino.sql.planner.plan.MergeProcessorNode;
++import io.trino.sql.planner.plan.MergeWriterNode;
++import io.trino.sql.planner.plan.PlanNode;
++import io.trino.sql.planner.plan.PlanNodeId;
++import io.trino.sql.planner.plan.TableDeleteNode;
++import io.trino.sql.planner.plan.TableExecuteNode;
++import io.trino.sql.planner.plan.TableFinishNode;
++import io.trino.sql.planner.plan.TableFunctionNode;
++import io.trino.sql.planner.plan.TableFunctionProcessorNode;
++import io.trino.sql.planner.plan.TableScanNode;
++import io.trino.sql.planner.plan.TableWriterNode;
++import io.trino.sql.planner.plan.TableWriterNode.CreateTarget;
++import io.trino.sql.planner.plan.TableWriterNode.InsertTarget;
++import io.trino.sql.planner.plan.TableWriterNode.MergeTarget;
++import io.trino.sql.planner.plan.TableWriterNode.TableExecuteTarget;
++import io.trino.sql.planner.plan.TableWriterNode.WriterTarget;
++import io.trino.testing.PlanTester;
++import org.intellij.lang.annotations.Language;
++import org.junit.jupiter.api.AfterAll;
++import org.junit.jupiter.api.BeforeAll;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.TestInstance;
++
++import java.io.IOException;
++import java.io.UncheckedIOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.Base64;
++import java.util.HashSet;
++import java.util.Map;
++import java.util.Optional;
++import java.util.Set;
++import java.util.stream.Stream;
++
++import static com.google.common.io.MoreFiles.deleteRecursively;
++import static com.google.common.io.RecursiveDeleteOption.ALLOW_INSECURE;
++import static io.airlift.concurrent.MoreFutures.getFutureValue;
++import static io.trino.execution.querystats.PlanOptimizersStatsCollector.createPlanOptimizersStatsCollector;
++import static io.trino.metadata.HandleFamily.COLUMN;
++import static io.trino.metadata.HandleFamily.INSERT_TABLE;
++import static io.trino.metadata.HandleFamily.MERGE_TABLE;
++import static io.trino.metadata.HandleFamily.OUTPUT_TABLE;
++import static io.trino.metadata.HandleFamily.PARTITIONING;
++import static io.trino.metadata.HandleFamily.TABLE;
++import static io.trino.metadata.HandleFamily.TABLE_EXECUTE;
++import static io.trino.metadata.HandleFamily.TABLE_FUNCTION;
++import static io.trino.metadata.HandleFamily.TRANSACTION;
++import static io.trino.metadata.InternalBlockEncodingSerde.TESTING_BLOCK_ENCODING_SERDE;
++import static io.trino.metastore.PrincipalPrivileges.NO_PRIVILEGES;
++import static io.trino.plugin.hive.TestingHiveUtils.getConnectorService;
++import static io.trino.spi.connector.Constraint.alwaysTrue;
++import static io.trino.spi.connector.DynamicFilter.EMPTY;
++import static io.trino.sql.planner.LogicalPlanner.Stage.OPTIMIZED_AND_VALIDATED;
++import static io.trino.testing.TestingSession.testSessionBuilder;
++import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
++import static org.assertj.core.api.Assertions.assertThat;
++import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
++
++/**
++ * Plans real queries against a Hive catalog and sends every connector handle
++ * a coordinator would ship to a worker, the splits included, through the
++ * protobuf handle codecs. Each decoded handle must serialize to the same JSON
++ * as the original, so the two control-plane encodings carry the same
++ * information for handles the connector actually produces, not only for
++ * handles a test builds by hand.
++ */
++@TestInstance(PER_CLASS)
++public class TestHiveHandleCodecsForPlannedQueries
++{
++    private static final String SCHEMA = "test_schema";
++    private static final Session SESSION = testSessionBuilder()
++            .setCatalog("hive")
++            .setSchema(SCHEMA)
++            .setCatalogSessionProperty("hive", "non_transactional_optimize_enabled", "true")
++            .build();
++    private static final ObjectMapper OBJECT_MAPPER = new JsonMapperProvider()
++            .withJsonSerializers(ImmutableMap.of(Block.class, new BlockJsonSerde.Serializer(TESTING_BLOCK_ENCODING_SERDE)))
++            .get();
++
++    private Path baseDir;
++    private PlanTester planTester;
++    private ConnectorHandleProtobufCodec codec;
++    private SplitProtoMapper splitProtoMapper;
++
++    @BeforeAll
++    public void setUp()
++            throws IOException
++    {
++        baseDir = Files.createTempDirectory("hive-handle-codecs");
++        planTester = PlanTester.create(SESSION);
++        planTester.createCatalog("hive", new TestingHiveConnectorFactory(baseDir), Map.of());
++        HiveMetastore metastore = getConnectorService(planTester, HiveMetastoreFactory.class).createMetastore(Optional.empty());
++        metastore.createDatabase(Database.builder()
++                .setDatabaseName(SCHEMA)
++                .setOwnerName(Optional.of("public"))
++                .setOwnerType(Optional.of(PrincipalType.ROLE))
++                .build());
++        codec = new ConnectorHandleProtobufCodec(planTester.getConnectorServicesProvider());
++        splitProtoMapper = new SplitProtoMapper(codec);
++
++        String rows = "SELECT " +
++                "id, " +
++                "CAST(id AS varchar) AS name, " +
++                "CAST(id AS double) / 3 AS ratio, " +
++                "CAST(id AS decimal(20, 2)) AS amount, " +
++                "CAST(id AS decimal(5, 1)) AS score, " +
++                "date_add('day', id, DATE '2024-01-01') AS day, " +
++                "CAST(from_unixtime(id) AS timestamp(3)) AS created, " +
++                "CAST(ROW(id, CAST(id AS varchar)) AS ROW(a bigint, b varchar)) AS nested, " +
++                "ARRAY[id, id + 1] AS items, " +
++                "CAST(id % 3 AS varchar) AS ds " +
++                "FROM UNNEST(sequence(1, 30)) t(id)";
++        planTester.executeStatement("CREATE TABLE partitioned WITH (partitioned_by = ARRAY['ds']) AS " + rows);
++        // The local executor can neither write bucketed tables nor run DDL, so the bucketed tables go straight
++        // into the metastore, with a data file of the partitioned table as their bucket 0. Only splits are
++        // generated from them, so the rows need not match the bucket.
++        Table partitioned = metastore.getTable(SCHEMA, "partitioned").orElseThrow();
++        Partition partitionOne = metastore.getPartition(partitioned, ImmutableList.of("1")).orElseThrow();
++        Path dataFile;
++        try (Stream<Path> files = Files.list(localPath(partitionOne.getStorage().getLocation()))) {
++            dataFile = files.filter(file -> !file.getFileName().toString().startsWith(".")).findFirst().orElseThrow();
++        }
++        String bucketedLocation = bucketedLocation("bucketed", dataFile);
++        metastore.createTable(Table.builder(partitioned)
++                .setTableName("bucketed")
++                .setDataColumns(ImmutableList.<Column>builder()
++                        .addAll(partitioned.getDataColumns())
++                        .addAll(partitioned.getPartitionColumns())
++                        .build())
++                .setPartitionColumns(ImmutableList.of())
++                .withStorage(storage -> storage
++                        .setLocation(bucketedLocation)
++                        .setBucketProperty(new HiveBucketProperty(
++                                ImmutableList.of("id"),
++                                4,
++                                ImmutableList.of(new SortingColumn("id", SortingColumn.Order.ASCENDING)))))
++                .build(), NO_PRIVILEGES);
++        HiveBucketProperty nameBuckets = new HiveBucketProperty(ImmutableList.of("name"), 2, ImmutableList.of());
++        String bucketedPartitionedLocation = bucketedLocation("bucketed_partitioned", Optional.empty());
++        String bucketedPartitionLocation = bucketedLocation("bucketed_partitioned/ds=1", dataFile);
++        metastore.createTable(Table.builder(partitioned)
++                .setTableName("bucketed_partitioned")
++                .withStorage(storage -> storage
++                        .setLocation(bucketedPartitionedLocation)
++                        .setBucketProperty(nameBuckets))
++                .build(), NO_PRIVILEGES);
++        metastore.addPartitions(SCHEMA, "bucketed_partitioned", ImmutableList.of(new PartitionWithStatistics(
++                Partition.builder(partitionOne)
++                        .setTableName("bucketed_partitioned")
++                        .withStorage(storage -> storage
++                                .setLocation(bucketedPartitionLocation)
++                                .setBucketProperty(nameBuckets))
++                        .build(),
++                "ds=1",
++                PartitionStatistics.empty())));
++        planTester.executeStatement("CREATE TABLE text_table WITH (format = 'TEXTFILE') AS " + rows.replace("ARRAY[id, id + 1] AS items, ", ""));
++    }
++
++    private Path localPath(String location)
++    {
++        assertThat(location).startsWith("local:///");
++        return baseDir.resolve(location.substring("local:///".length()));
++    }
++
++    // the file metastore requires managed tables to live in their schema directory
++    private String bucketedLocation(String directory, Path bucketZero)
++            throws IOException
++    {
++        return bucketedLocation(directory, Optional.of(bucketZero));
++    }
++
++    private String bucketedLocation(String directory, Optional<Path> bucketZero)
++            throws IOException
++    {
++        String location = "local:///hive/%s/%s".formatted(SCHEMA, directory);
++        Path path = Files.createDirectories(localPath(location));
++        if (bucketZero.isPresent()) {
++            Files.copy(bucketZero.get(), path.resolve("000000_0"));
++        }
++        return location;
++    }
++
++    @AfterAll
++    public void tearDown()
++            throws IOException
++    {
++        planTester.close();
++        planTester = null;
++        deleteRecursively(baseDir, ALLOW_INSECURE);
++    }
++
++    @Test
++    public void testScans()
++    {
++        Set<String> handles = new HashSet<>();
++        handles.addAll(assertHandlesRoundTrip("SELECT * FROM partitioned"));
++        handles.addAll(assertHandlesRoundTrip("SELECT * FROM partitioned WHERE ds = '1' AND id > 5 AND ratio < 20.5 AND amount IN (1.00, 2.00, 7.00) " +
++                "AND score BETWEEN 1.0 AND 9.5 AND day > DATE '2024-01-03' AND created < TIMESTAMP '1970-01-01 00:00:20.000' AND name LIKE '1%'"));
++        handles.addAll(assertHandlesRoundTrip("SELECT id FROM partitioned WHERE ds IN ('0', '2') OR ds IS NULL"));
++        handles.addAll(assertHandlesRoundTrip("SELECT nested.b, items[1] FROM partitioned WHERE nested.a = 3"));
++        handles.addAll(assertHandlesRoundTrip("SELECT * FROM text_table WHERE id <> 4 AND name NOT IN ('1', '2')"));
++        handles.addAll(assertHandlesRoundTrip("SELECT \"$path\", \"$file_size\", \"$file_modified_time\", \"$partition\" FROM partitioned WHERE \"$path\" <> 'x' AND \"$file_size\" > 0"));
++        assertThat(handles).contains(
++                "table:HiveTableHandle",
++                "column:HiveColumnHandle",
++                "transaction:HiveTransactionHandle",
++                "split:HiveSplit");
++    }
++
++    @Test
++    public void testBucketedScans()
++    {
++        Set<String> handles = new HashSet<>();
++        handles.addAll(assertHandlesRoundTrip("SELECT count(*) FROM bucketed WHERE id IN (1, 5, 9)"));
++        handles.addAll(assertHandlesRoundTrip("SELECT \"$bucket\", id FROM bucketed WHERE \"$bucket\" = 1"));
++        handles.addAll(assertHandlesRoundTrip("SELECT * FROM bucketed a JOIN bucketed b ON a.id = b.id"));
++        handles.addAll(assertHandlesRoundTrip("SELECT name, count(*) FROM bucketed_partitioned WHERE ds = '1' GROUP BY name"));
++        assertThat(handles).contains(
++                "table:HiveTableHandle",
++                "split:HiveSplit",
++                "partitioning:HivePartitioningHandle");
++    }
++
++    @Test
++    public void testEngineOwnedHandles()
++    {
++        Set<String> handles = new HashSet<>();
++        handles.addAll(assertHandlesRoundTrip("SELECT * FROM \"partitioned$partitions\" WHERE ds = '1'"));
++        handles.addAll(assertHandlesRoundTrip("SELECT * FROM \"partitioned$properties\""));
++        handles.addAll(assertHandlesRoundTrip("SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'test_schema' AND table_name = 'partitioned'"));
++        handles.addAll(assertHandlesRoundTrip("SELECT * FROM information_schema.tables"));
++        handles.addAll(assertHandlesRoundTrip("SELECT * FROM system.runtime.nodes"));
++        assertThat(handles).contains(
++                "table:SystemTableHandle",
++                "split:SystemSplit",
++                "transaction:SystemTransactionHandle",
++                "table:InformationSchemaTableHandle",
++                "split:InformationSchemaSplit",
++                "transaction:InformationSchemaTransactionHandle");
++    }
++
++    @Test
++    public void testWrites()
++    {
++        Set<String> handles = new HashSet<>();
++        handles.addAll(assertHandlesRoundTrip("INSERT INTO partitioned SELECT * FROM partitioned WHERE ds = '1'"));
++        handles.addAll(assertHandlesRoundTrip("INSERT INTO bucketed SELECT * FROM bucketed WHERE id < 10"));
++        handles.addAll(assertHandlesRoundTrip("INSERT INTO bucketed_partitioned SELECT * FROM bucketed_partitioned"));
++        handles.addAll(assertHandlesRoundTrip("CREATE TABLE created_partitioned WITH (partitioned_by = ARRAY['ds'], bucketed_by = ARRAY['id'], bucket_count = 2) AS SELECT * FROM partitioned"));
++        handles.addAll(assertHandlesRoundTrip("CREATE TABLE created_text WITH (format = 'TEXTFILE') AS SELECT * FROM text_table"));
++        handles.addAll(assertHandlesRoundTrip("ALTER TABLE partitioned EXECUTE optimize(file_size_threshold => '10MB')"));
++        handles.addAll(assertHandlesRoundTrip("ANALYZE partitioned WITH (partitions = ARRAY[ARRAY['1'], ARRAY['2']])"));
++        handles.addAll(assertHandlesRoundTrip("DELETE FROM partitioned WHERE ds = '2'"));
++        assertThat(handles).contains(
++                "insert table:HiveInsertTableHandle",
++                "output table:HiveOutputTableHandle",
++                "table execute:HiveTableExecuteHandle",
++                "partitioning:HivePartitioningHandle");
++    }
++
++    private Set<String> assertHandlesRoundTrip(@Language("SQL") String sql)
++    {
++        Set<String> roundTripped = new HashSet<>();
++        planTester.inTransaction(planTester.getDefaultSession(), session -> {
++            // plan as the coordinator does for a cluster, so that remote fragments and their partitionings appear
++            Plan plan = planTester.createPlan(session, sql, planTester.getPlanOptimizers(false), OPTIMIZED_AND_VALIDATED, WarningCollector.NOOP, createPlanOptimizersStatsCollector());
++            SubPlan subPlan = planTester.createSubPlans(session, plan, false);
++            for (PlanFragment fragment : subPlan.getAllFragments()) {
++                assertPartitioningRoundTrip(fragment.getPartitioning(), roundTripped);
++                assertPartitioningRoundTrip(fragment.getOutputPartitioningScheme(), roundTripped);
++                for (PlanNode node : PlanNodeSearcher.searchFrom(fragment.getRoot()).findAll()) {
++                    switch (node) {
++                        case TableScanNode scan -> {
++                            assertTableRoundTrip(scan.getTable(), roundTripped);
++                            for (ColumnHandle column : scan.getAssignments().values()) {
++                                assertRoundTrip(scan.getTable().catalogHandle(), COLUMN, column, roundTripped);
++                            }
++                            SplitSource splits = planTester.getSplitManager().getSplits(session, Span.getInvalid(), scan.getTable(), EMPTY, alwaysTrue());
++                            assertSplitsRoundTrip(splits, scan.getId(), roundTripped);
++                        }
++                        case TableFunctionProcessorNode function -> {
++                            assertTableFunctionRoundTrip(function.getHandle(), roundTripped);
++                            if (function.getSource().isEmpty()) {
++                                SplitSource splits = planTester.getSplitManager().getSplits(session, Span.getInvalid(), function.getHandle());
++                                assertSplitsRoundTrip(splits, function.getId(), roundTripped);
++                            }
++                        }
++                        case TableFunctionNode function -> assertTableFunctionRoundTrip(function.getHandle(), roundTripped);
++                        case TableWriterNode writer -> {
++                            assertWriterTargetRoundTrip(writer.getTarget(), roundTripped);
++                            writer.getPartitioningScheme().ifPresent(scheme -> assertPartitioningRoundTrip(scheme, roundTripped));
++                        }
++                        case TableExecuteNode execute -> {
++                            assertWriterTargetRoundTrip(execute.getTarget(), roundTripped);
++                            execute.getPartitioningScheme().ifPresent(scheme -> assertPartitioningRoundTrip(scheme, roundTripped));
++                        }
++                        case MergeWriterNode merge -> {
++                            assertWriterTargetRoundTrip(merge.getTarget(), roundTripped);
++                            merge.getPartitioningScheme().ifPresent(scheme -> assertPartitioningRoundTrip(scheme, roundTripped));
++                        }
++                        case MergeProcessorNode merge -> assertWriterTargetRoundTrip(merge.getTarget(), roundTripped);
++                        case TableFinishNode finish -> assertWriterTargetRoundTrip(finish.getTarget(), roundTripped);
++                        case TableDeleteNode delete -> assertTableRoundTrip(delete.getTarget(), roundTripped);
++                        case ExchangeNode exchange -> assertPartitioningRoundTrip(exchange.getPartitioningScheme(), roundTripped);
++                        default -> {}
++                    }
++                }
++            }
++            return null;
++        });
++        assertThat(roundTripped).as("handles shipped for %s", sql).isNotEmpty();
++        return roundTripped;
++    }
++
++    private void assertTableRoundTrip(TableHandle table, Set<String> roundTripped)
++    {
++        assertRoundTrip(table.catalogHandle(), TABLE, table.connectorHandle(), roundTripped);
++        assertRoundTrip(table.catalogHandle(), TRANSACTION, table.transaction(), roundTripped);
++    }
++
++    private void assertTableFunctionRoundTrip(TableFunctionHandle function, Set<String> roundTripped)
++    {
++        assertRoundTrip(function.catalogHandle(), TABLE_FUNCTION, function.functionHandle(), roundTripped);
++        assertRoundTrip(function.catalogHandle(), TRANSACTION, function.transactionHandle(), roundTripped);
++    }
++
++    private void assertWriterTargetRoundTrip(WriterTarget target, Set<String> roundTripped)
++    {
++        switch (target) {
++            case CreateTarget create -> {
++                assertRoundTrip(create.getHandle().catalogHandle(), OUTPUT_TABLE, create.getHandle().connectorHandle(), roundTripped);
++                assertRoundTrip(create.getHandle().catalogHandle(), TRANSACTION, create.getHandle().transactionHandle(), roundTripped);
++            }
++            case InsertTarget insert -> {
++                assertRoundTrip(insert.getHandle().catalogHandle(), INSERT_TABLE, insert.getHandle().connectorHandle(), roundTripped);
++                assertRoundTrip(insert.getHandle().catalogHandle(), TRANSACTION, insert.getHandle().transactionHandle(), roundTripped);
++            }
++            case TableExecuteTarget execute -> {
++                assertRoundTrip(execute.getExecuteHandle().catalogHandle(), TABLE_EXECUTE, execute.getExecuteHandle().connectorHandle(), roundTripped);
++                assertRoundTrip(execute.getExecuteHandle().catalogHandle(), TABLE, execute.getExecuteHandle().tableHandle(), roundTripped);
++                execute.getSourceHandle().ifPresent(source -> assertTableRoundTrip(source, roundTripped));
++            }
++            case MergeTarget merge -> {
++                assertTableRoundTrip(merge.getHandle(), roundTripped);
++                merge.getMergeHandle().ifPresent(handle -> assertRoundTrip(handle.tableHandle().catalogHandle(), MERGE_TABLE, handle.connectorMergeHandle(), roundTripped));
++            }
++            default -> {}
++        }
++    }
++
++    private void assertPartitioningRoundTrip(PartitioningScheme scheme, Set<String> roundTripped)
++    {
++        assertPartitioningRoundTrip(scheme.getPartitioning().getHandle(), roundTripped);
++    }
++
++    private void assertPartitioningRoundTrip(PartitioningHandle partitioning, Set<String> roundTripped)
++    {
++        partitioning.getCatalogHandle().ifPresent(catalogHandle -> {
++            assertRoundTrip(catalogHandle, PARTITIONING, partitioning.getConnectorHandle(), roundTripped);
++            partitioning.getTransactionHandle().ifPresent(transaction -> assertRoundTrip(catalogHandle, TRANSACTION, transaction, roundTripped));
++        });
++    }
++
++    private void assertSplitsRoundTrip(SplitSource splitSource, PlanNodeId planNodeId, Set<String> roundTripped)
++    {
++        try (splitSource) {
++            long sequenceId = 0;
++            while (!splitSource.isFinished()) {
++                for (Split split : getFutureValue(splitSource.getNextBatch(1000)).getSplits()) {
++                    ScheduledSplit scheduled = new ScheduledSplit(sequenceId++, planNodeId, split);
++                    ScheduledSplit decoded = splitProtoMapper.fromProto(splitProtoMapper.toProto(scheduled));
++                    assertThat(decoded.sequenceId()).isEqualTo(scheduled.sequenceId());
++                    assertThat(decoded.planNodeId()).isEqualTo(planNodeId);
++                    assertThat(decoded.split().getCatalogHandle()).isEqualTo(split.getCatalogHandle());
++                    assertSameJson(decoded.split().getConnectorSplit(), split.getConnectorSplit());
++                    roundTripped.add("split:" + split.getConnectorSplit().getClass().getSimpleName());
++                }
++            }
++        }
++    }
++
++    private <T> void assertRoundTrip(CatalogHandle catalogHandle, HandleFamily<T> family, T handle, Set<String> roundTripped)
++    {
++        T decoded = codec.decode(family, codec.encode(catalogHandle, family, handle));
++        assertThat(decoded.getClass()).isEqualTo(handle.getClass());
++        assertSameJson(decoded, handle);
++        roundTripped.add(family + ":" + handle.getClass().getSimpleName());
++    }
++
++    private static void assertSameJson(Object decoded, Object original)
++    {
++        assertThat(jsonTree(decoded))
++                .as("JSON of decoded %s", original.getClass().getSimpleName())
++                .isEqualTo(jsonTree(original));
++    }
++
++    private static JsonNode jsonTree(Object value)
++    {
++        try {
++            // The marker of a range set that is not discrete is a cache: the sender may have computed it as
++            // NON_DISCRETE, the receiver recomputes it on first use.
++            String json = OBJECT_MAPPER.writeValueAsString(value)
++                    .replace("\"discreteSetMarker\":\"NON_DISCRETE\"", "\"discreteSetMarker\":\"UNKNOWN\"");
++            JsonNode tree = OBJECT_MAPPER.readTree(json);
++            replaceRangeBlocksWithValues(tree);
++            return tree;
++        }
++        catch (JsonProcessingException e) {
++            throw new UncheckedIOException(e);
++        }
++    }
++
++    // A range set's block may be flat or a dictionary, depending on how it was built,
++    // so range sets are compared by the values in their block
++    private static void replaceRangeBlocksWithValues(JsonNode node)
++    {
++        if (node instanceof ObjectNode object && object.has("sortedRanges") && object.has("type")) {
++            Type type = TESTING_TYPE_MANAGER.getType(TypeId.of(object.get("type").asText()));
++            Block block = TESTING_BLOCK_ENCODING_SERDE.readBlock(Slices.wrappedBuffer(Base64.getDecoder().decode(object.get("sortedRanges").asText())).getInput());
++            ArrayNode values = object.putArray("sortedRanges");
++            for (int position = 0; position < block.getPositionCount(); position++) {
++                values.add(block.isNull(position) ? "null" : String.valueOf(type.getObjectValue(block, position)));
++            }
++        }
++        node.forEach(TestHiveHandleCodecsForPlannedQueries::replaceRangeBlocksWithValues);
++    }
++}
+-- 
+2.43.0
+
+
+From 877310d13a6a4ac48906a479e8bb42e9df05b721 Mon Sep 17 00:00:00 2001
+From: Kristian Rickert <kristian@apache.org>
+Date: Fri, 23 Oct 2026 11:51:34 +0000
+Subject: [PATCH 7/7] Document phase 3 review fixes
+
+---
+ docs/briefs/protobuf-control-plane-results.md | 74 ++++++++++++++++---
+ 1 file changed, 65 insertions(+), 9 deletions(-)
+
+diff --git a/docs/briefs/protobuf-control-plane-results.md b/docs/briefs/protobuf-control-plane-results.md
+index 7f768a09..2eeee11e 100644
+--- a/docs/briefs/protobuf-control-plane-results.md
++++ b/docs/briefs/protobuf-control-plane-results.md
+@@ -111,11 +111,12 @@ loops over `TaskStatusProtoMapper` / `JsonCodec<TaskStatus>` and
+ 
+ ## Tests run for this branch
+ 
+-- `lib/trino-protobuf-handles`: `TestDomainProtoCodec` (12, incl. a lying
++- `lib/trino-protobuf-handles`: `TestDomainProtoCodec` (18, incl. a lying
+   discrete marker, duplicate discrete values, corrupt blocks, mismatched
+-  inclusive flags, null in equatable values, unknown types),
+-  `TestProtobufHandleCodec` (4).
+-- `core/trino-main`: `TestConnectorHandleProtobufCodec` (12),
++  inclusive flags, null in equatable values, unknown and invalid types,
++  blocks of the wrong class, trailing bytes, unordered values and NaN),
++  `TestProtobufHandleCodec` (5).
++- `core/trino-main`: `TestConnectorHandleProtobufCodec` (13),
+   `TestSplitProtoMapper` (11), `TestSystemHandleCodecProvider` (9),
+   `TestInformationSchemaHandleCodecProvider` (7),
+   `TestGlobalSystemHandleCodecProvider` (5), `TestTaskProtoMappers` (15),
+@@ -124,7 +125,8 @@ loops over `TaskStatusProtoMapper` / `JsonCodec<TaskStatus>` and
+ - `plugin/trino-tpch`: `TestTpchHandleCodecProvider` (15).
+ - `plugin/trino-memory`: `TestMemoryHandleCodecProvider` (12) and the full
+   `TestMemoryConnectorTest` (306, 81 skipped as on master).
+-- `plugin/trino-hive`: `TestHiveHandleCodecProvider` (15), `TestHivePlugin`
++- `plugin/trino-hive`: `TestHiveHandleCodecProvider` (15),
++  `TestHiveHandleCodecsForPlannedQueries` (4), `TestHivePlugin`
+   (11), `TestHiveConnectorFactory` (1), `TestHiveSplit`, `TestHiveTableHandle`,
+   `TestHiveColumnHandle`.
+ - `testing/trino-tests`: `TestProtobufControlPlane` (6) under `PROTOBUF`.
+@@ -136,9 +138,56 @@ loops over `TaskStatusProtoMapper` / `JsonCodec<TaskStatus>` and
+   root pom; `test-compile -P errorprone-compiler` passes for the same
+   modules.
+ 
++After the review fixes, `mvn install -DskipTests` with all checks passes
++for the same modules plus `lib/trino-hive-formats`, and the effective pom of
++`plugin/trino-kafka` no longer carries the main proto directories (its
++build could not be repeated in the review container, which had no access to
++the Confluent repository that day). Error Prone, `sortpom:verify` on the
++root and the suites above pass again.
++
+ Not run: full `trino-main` and hive test suites, any multi-node/SF100
+ benchmark.
+ 
++## Review fixes
++
++An adversarial review of phase 3 found and fixed the following.
++
++- Build: the root pom put the protoc source and include directories into
++  `pluginManagement`, so every module that runs protoc inherited
++  `src/main/proto`. `trino-hive-formats` has no such directory and failed to
++  build; the earlier verification missed it because that module came from a
++  stale local repository. The directories now sit in each module's own
++  execution, and the root keeps only the version and protoc artifact.
++- `DomainProtoCodec` rejected bad input with raw `ClassCastException` and
++  `IllegalArgumentException`: a block of the wrong class for the type, an
++  invalid type id, and trailing bytes after the block (which were silently
++  ignored). Each now fails as a `TrinoException` that names the type.
++- Decoding a large discrete set was slower than JSON, because every value
++  was rebuilt as a `Range`. A set that is verifiably normalized (every
++  range a single inclusive value, no null, no NaN, strictly ascending) now
++  goes straight to `SortedRangeSet.fromJson` with the `DISCRETE` marker,
++  as the JSON deserializer does. Anything else still takes the checked
++  path. On the 4-core review machine, decoding
++  `VersionedDynamicFilterDomains` with 10,000 bigint values went from about
++  5.0 ms to 1.0 ms, and with 1,000,000 values from 221 ms to 81 ms; JSON
++  took 1.7–4.4 ms and 150–350 ms across runs. Single runs, directional only.
++- `ProtobufHandleCodec` and `ConnectorHandleProtobufCodec` let a handle
++  constructor's or a connector codec's `NullPointerException`,
++  `ClassCastException` and the like escape unwrapped. They are now wrapped
++  in a `TrinoException` that names the catalog, family and class, and a
++  `TrinoException` passes through unchanged.
++- `/v1/task` content negotiation ignored `q=0` with any other spelling than
++  `q=0` and let a broad `*/*` override a specific `q=0`. It now takes the
++  most specific matching range and its quality, per RFC 9110 section
++  12.5.1.
++- `TestClassLoaderSafeWrappers` did not cover the two new wrappers.
++- New `TestHiveHandleCodecsForPlannedQueries`: plans real queries on a hive
++  catalog for a cluster, then round-trips every table, column, split,
++  transaction, insert, output, table-execute, merge and partitioning handle
++  in every fragment, including bucketed and partitioned tables, synthesized
++  columns, `$partitions`, `information_schema`, `system.runtime`, CTAS,
++  `INSERT`, `OPTIMIZE`, `ANALYZE` and `DELETE`.
++
+ ## Remaining work (brief phases 4–6)
+ 
+ - Plan and expressions: `PlanFragment`, 45 `PlanNode` subtypes, 16 IR
+@@ -162,10 +211,17 @@ benchmark.
+   `RemoteTransactionHandle` has no connector either.
+ - Handle codecs for every other connector; hive, tpch, memory and the
+   engine-owned connectors are done.
+-- `SortedRangeSet` decoded from protobuf is rebuilt through the SPI
+-  constructors, so a set the sender marked `NON_DISCRETE` comes back as
+-  `UNKNOWN` and is classified again on first use. Preserving it would need a
+-  public SPI constructor that takes the marker.
++- A `SortedRangeSet` that is not a normalized discrete set is rebuilt from
++  its ranges, so a set the sender marked `NON_DISCRETE` comes back as
++  `UNKNOWN` and is classified again on first use. The marker is only a
++  cache. Keeping it would mean trusting it from the wire through
++  `SortedRangeSet.fromJson`, which the codec only does for `DISCRETE` sets
++  that it has checked itself.
++- Protobuf handle decoding resolves codecs through the catalog, so when
++  `TaskUpdateRequest` moves to protobuf (phase 5) the worker must decode it
++  after `ensureCatalogsLoaded`, not inside a JAX-RS reader as the JSON path
++  does today.
++- The lakehouse connector uses hive handles but declares no codec provider.
+ - Low-volume internal endpoints still on JSON: `/v1/announce`, `/v1/info`,
+   `/v1/status`, `/v1/memory`, `/v1/node`.
+ - Phase-6 benchmark on 1 coordinator + at least 3 workers, TPC-H/TPC-DS
+-- 
+2.43.0
+

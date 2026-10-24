@@ -1,0 +1,1063 @@
+From e49622aed57cacf9a41846700e91fdcaa48843e0 Mon Sep 17 00:00:00 2001
+From: Kristian <kristian@apache.org>
+Date: Fri, 23 Oct 2026 18:37:23 +0000
+Subject: [PATCH 1/2] Read protobuf fields as the reader schema reads them
+
+Mapping columns to writer fields by number accepted any writer field of
+the same wire encoding, but returned the writer's value unconverted, so
+a change between types of one encoding that protobuf allows failed
+queries over records written before it: an int32 field that became a
+bool, an enum that became an int32, or bytes that became a string were
+decoded with the wrong Java type, a uint32 widened to int64 read as a
+negative number, and an enum value that was renamed kept its old name.
+Convert the writer value to the value protobuf reads from the same bytes
+with the reader field, which is what parsing the record with the reader
+schema yields. A map field is compatible only if its key and value are,
+and a google.protobuf.Timestamp or Any field, which have column types of
+their own, only maps to a field of the same message type.
+
+Field numbers identify fields within one message type, so a record of a
+message type other than the reader's is matched by name, as before.
+
+NULL is now written to, and read from, every field that tracks presence
+alike: an unset proto2 optional field and an unset oneof member decode
+as NULL, as message fields and proto3 optional fields do, since the
+encoder leaves them unset for NULL. A proto2 required field rejects NULL
+with CONSTRAINT_VIOLATION, as the message could not be built without it.
+
+A row decoder without columns no longer looks the reader schema up,
+which can take a schema registry request.
+---
+ docs/src/main/sphinx/connector/kafka.md       |  26 +-
+ .../protobuf/DynamicMessageProvider.java      |   8 +-
+ .../protobuf/ProtobufColumnDecoder.java       |  12 +-
+ .../protobuf/ProtobufFieldMapping.java        | 144 +++++++-
+ .../decoder/protobuf/ProtobufRowDecoder.java  |   3 +-
+ .../protobuf/ProtobufValueProvider.java       |  49 +--
+ .../decoder/protobuf/TestProtobufDecoder.java | 308 ++++++++++++++++++
+ .../encoder/protobuf/ProtobufRowEncoder.java  |   4 +
+ ...ithSchemaRegistryMinimalFunctionality.java |  53 +++
+ .../kafka/protobuf/TestProtobufEncoder.java   |  46 +++
+ 10 files changed, 598 insertions(+), 55 deletions(-)
+
+diff --git a/docs/src/main/sphinx/connector/kafka.md b/docs/src/main/sphinx/connector/kafka.md
+index 7d2a81d8..229c721d 100644
+--- a/docs/src/main/sphinx/connector/kafka.md
++++ b/docs/src/main/sphinx/connector/kafka.md
+@@ -381,8 +381,11 @@ table description supplier are:
+ - Some Protobuf specific types like `oneof` and `any` are supported and mapped to JSON.
+ - Protobuf records are decoded with the schema they were written with, so a
+   topic can hold records written with different versions of its schema. A field
+-  is identified by its field number, so a renamed field keeps its column.
+-  Columns whose field a record's schema does not define are `NULL`.
++  is identified by its field number, so a renamed field keeps its column, and
++  a field whose type changed to another type with the same encoding, such as
++  `int32` to `int64`, is read the way the latest schema reads it. Enum values
++  are identified by their number as well. Columns whose field a record's schema
++  does not define, or defines with an incompatible type, are `NULL`.
+ - Protobuf schemas that reference other subjects are resolved through the
+   schema registry. Imports of the Google well-known types
+   (`google/protobuf/*.proto`), the Google common types (`google/type/*.proto`)
+@@ -539,10 +542,12 @@ then the corresponding Trino row includes a column named
+ 
+ A proto3 field declared with the `optional` keyword is mapped to a column of
+ the field's type, like other fields. The column is `NULL` when the field is not
+-set, while scalar fields without the `optional` keyword have their default
+-value. A field of a message type, such as a `ROW` column or a `TIMESTAMP`
+-column mapped from `google.protobuf.Timestamp`, is also `NULL` when it is not
+-set, as opposed to holding an empty message.
++set, while proto3 scalar fields without the `optional` keyword have their
++default value. Every other field that tracks presence is also `NULL` when it
++is not set: a proto2 `optional` or `required` field, even one with a declared
++default value, a member of a `oneof`, and a field of a message type, such as a
++`ROW` column or a `TIMESTAMP` column mapped from `google.protobuf.Timestamp`,
++as opposed to holding an empty message.
+ 
+ (kafka-sql-inserts)=
+ ## Kafka inserts
+@@ -1054,10 +1059,11 @@ The following field attributes are supported:
+   original Protobuf schema, then a write operation fails.
+ 
+ A `NULL` value leaves a field that tracks presence unset: a field declared
+-`optional`, or a field of a message type. Reading the record back yields `NULL`
+-for such a field. Other fields, including `repeated` and `map` fields and
+-proto3 fields without the `optional` keyword, have no representation for
+-`NULL`, and writing `NULL` to them fails. The same applies to `NULL` fields of
++`optional`, a member of a `oneof`, or a field of a message type. Reading the
++record back yields `NULL` for such a field. Other fields, including `repeated`
++and `map` fields and proto3 fields without the `optional` keyword, have no
++representation for `NULL`, and writing `NULL` to them fails, as does writing
++`NULL` to a proto2 `required` field. The same applies to `NULL` fields of
+ a `ROW` value and to `NULL` elements of an `ARRAY` or `MAP` value.
+ 
+ The following table lists supported Trino data types, which can be used in `type`
+diff --git a/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/DynamicMessageProvider.java b/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/DynamicMessageProvider.java
+index abbbccf0..6786de75 100644
+--- a/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/DynamicMessageProvider.java
++++ b/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/DynamicMessageProvider.java
+@@ -26,10 +26,10 @@ public interface DynamicMessageProvider
+     DynamicMessage parseDynamicMessage(byte[] data);
+ 
+     /**
+-     * The message type the table columns were derived from. Fields of a parsed message are
+-     * looked up by the number this type assigns to the column's field, so a field keeps its
+-     * column across renames, as it keeps its identity on the wire. Without a reader type, fields
+-     * are looked up by name.
++     * The message type the table columns were derived from. Fields of a parsed message of this
++     * type are looked up by the number this type assigns to the column's field, so a field keeps
++     * its column across renames, as it keeps its identity on the wire. Without a reader type, and
++     * in messages of another type, fields are looked up by name.
+      */
+     default Optional<Descriptor> getReaderDescriptor()
+     {
+diff --git a/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtobufColumnDecoder.java b/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtobufColumnDecoder.java
+index e07e1325..3ae1c521 100644
+--- a/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtobufColumnDecoder.java
++++ b/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtobufColumnDecoder.java
+@@ -58,8 +58,11 @@ import static com.fasterxml.jackson.databind.SerializationFeature.ORDER_MAP_ENTR
+ import static com.google.common.base.Preconditions.checkArgument;
+ import static com.google.common.collect.ImmutableList.toImmutableList;
+ import static com.google.common.collect.ImmutableSet.toImmutableSet;
++import static io.trino.decoder.protobuf.ProtobufFieldMapping.findReaderField;
+ import static io.trino.decoder.protobuf.ProtobufFieldMapping.findWriterField;
+ import static io.trino.decoder.protobuf.ProtobufFieldMapping.getReaderFieldType;
++import static io.trino.decoder.protobuf.ProtobufFieldMapping.getReaderType;
++import static io.trino.decoder.protobuf.ProtobufFieldMapping.toReaderValue;
+ import static io.trino.decoder.protobuf.ProtobufValueProvider.isUnsetPresenceField;
+ import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
+ import static io.trino.spi.StandardErrorCode.GENERIC_USER_ERROR;
+@@ -158,11 +161,12 @@ public class ProtobufColumnDecoder
+     {
+         Object value = message;
+         Optional<Descriptor> valueDescriptor = Optional.of(message.getDescriptorForType());
+-        Optional<Descriptor> readerType = readerDescriptor;
++        Optional<Descriptor> readerType = getReaderType(readerDescriptor, message.getDescriptorForType());
+         for (String pathElement : Splitter.on('/').omitEmptyStrings().split(columnMapping)) {
++            Optional<FieldDescriptor> readerField = findReaderField(readerType, pathElement);
+             FieldDescriptor fieldDescriptor = null;
+             if (valueDescriptor.isPresent()) {
+-                fieldDescriptor = findWriterField(valueDescriptor.get(), readerType, pathElement);
++                fieldDescriptor = findWriterField(valueDescriptor.get(), readerField, pathElement);
+             }
+             if (fieldDescriptor == null) {
+                 // Search the message to see if this column is oneof type
+@@ -178,9 +182,9 @@ public class ProtobufColumnDecoder
+             if (isUnsetPresenceField((DynamicMessage) value, fieldDescriptor)) {
+                 return new LocatedValue(null, Optional.empty());
+             }
+-            value = ((DynamicMessage) value).getField(fieldDescriptor);
++            value = toReaderValue(readerField, fieldDescriptor, ((DynamicMessage) value).getField(fieldDescriptor));
+             valueDescriptor = getDescriptor(fieldDescriptor);
+-            readerType = getReaderFieldType(readerType, pathElement);
++            readerType = getReaderFieldType(readerField);
+         }
+ 
+         if (valueDescriptor.isPresent() && valueDescriptor.get().getFullName().equals(ANY_TYPE_NAME)) {
+diff --git a/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtobufFieldMapping.java b/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtobufFieldMapping.java
+index 13611122..7f61193f 100644
+--- a/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtobufFieldMapping.java
++++ b/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtobufFieldMapping.java
+@@ -13,38 +13,69 @@
+  */
+ package io.trino.decoder.protobuf;
+ 
++import com.google.common.collect.ImmutableSet;
++import com.google.protobuf.ByteString;
+ import com.google.protobuf.Descriptors.Descriptor;
++import com.google.protobuf.Descriptors.EnumValueDescriptor;
+ import com.google.protobuf.Descriptors.FieldDescriptor;
+ import com.google.protobuf.Descriptors.FieldDescriptor.JavaType;
+ import jakarta.annotation.Nullable;
+ 
++import java.util.List;
+ import java.util.Optional;
++import java.util.Set;
++
++import static com.google.common.collect.ImmutableList.toImmutableList;
++import static com.google.protobuf.CodedInputStream.decodeZigZag32;
++import static com.google.protobuf.CodedInputStream.decodeZigZag64;
++import static com.google.protobuf.CodedOutputStream.encodeZigZag64;
+ 
+ /**
+  * Maps the field a column names in the reader schema (the schema the table columns were derived
+  * from) to the field of the schema a record was written with. A field is identified by its
+  * number on the wire, so the writer field is the one with the reader field's number, provided
+- * it is encoded the same way; a renamed field keeps its column, and a column whose field the
+- * writer does not have, or has reused for a different kind of value, is {@code NULL}.
++ * it is encoded the same way, and its value is read as the reader field's type would read it;
++ * a renamed field keeps its column, and a column whose field the writer does not have, or has
++ * reused for a different kind of value, is {@code NULL}.
+  */
+ final class ProtobufFieldMapping
+ {
++    // message types that are mapped to a column type of their own rather than to a ROW of their fields
++    private static final Set<String> MAPPED_MESSAGE_TYPES = ImmutableSet.of("google.protobuf.Any", "google.protobuf.Timestamp");
++
+     private ProtobufFieldMapping() {}
+ 
++    /**
++     * The reader type to map the fields of a record with: the reader descriptor, if the record is
++     * of the same message type. A record of another message type has no field numbers in common
++     * with the columns, so its fields are looked up by name.
++     */
++    static Optional<Descriptor> getReaderType(Optional<Descriptor> readerDescriptor, Descriptor writerType)
++    {
++        return readerDescriptor.filter(reader -> reader.getFullName().equals(writerType.getFullName()));
++    }
++
++    /**
++     * The reader field a column path element names, if there is a reader type that declares it.
++     */
++    static Optional<FieldDescriptor> findReaderField(Optional<Descriptor> readerType, String name)
++    {
++        return readerType.map(type -> type.findFieldByName(name));
++    }
++
+     /**
+      * The writer field a column path element selects, or {@code null} if the writer has no
+-     * compatible field for it. Without a reader type, or when the reader does not declare the
+-     * name (which is the case for a {@code oneof} column), the name identifies the field.
++     * compatible field for it. Without a reader field, which is the case without a reader type
++     * or for a {@code oneof} column, the name identifies the field.
+      */
+     @Nullable
+-    static FieldDescriptor findWriterField(Descriptor writerType, Optional<Descriptor> readerType, String name)
++    static FieldDescriptor findWriterField(Descriptor writerType, Optional<FieldDescriptor> readerField, String name)
+     {
+-        FieldDescriptor readerField = readerType.map(type -> type.findFieldByName(name)).orElse(null);
+-        if (readerField == null) {
++        if (readerField.isEmpty()) {
+             return writerType.findFieldByName(name);
+         }
+-        FieldDescriptor writerField = writerType.findFieldByNumber(readerField.getNumber());
+-        if (writerField == null || !isSameEncoding(readerField, writerField)) {
++        FieldDescriptor writerField = writerType.findFieldByNumber(readerField.get().getNumber());
++        if (writerField == null || !isCompatible(readerField.get(), writerField)) {
+             return null;
+         }
+         return writerField;
+@@ -53,18 +84,101 @@ final class ProtobufFieldMapping
+     /**
+      * The reader type of the values of a message-typed field, for mapping the fields nested in it.
+      */
+-    static Optional<Descriptor> getReaderFieldType(Optional<Descriptor> readerType, String name)
++    static Optional<Descriptor> getReaderFieldType(Optional<FieldDescriptor> readerField)
+     {
+-        return readerType.map(type -> type.findFieldByName(name))
++        return readerField
+                 .filter(field -> field.getJavaType() == JavaType.MESSAGE)
+                 .map(FieldDescriptor::getMessageType);
+     }
+ 
+-    private static boolean isSameEncoding(FieldDescriptor readerField, FieldDescriptor writerField)
++    /**
++     * Converts the value of a writer field to the value the reader field reads from the same
++     * bytes, following the conversions of the "Updating A Message Type" rules of the protobuf
++     * language guide. Values of a message type are not converted, as their fields are mapped
++     * when the message is read.
++     */
++    @Nullable
++    static Object toReaderValue(Optional<FieldDescriptor> readerField, FieldDescriptor writerField, @Nullable Object value)
++    {
++        if (value == null || readerField.isEmpty() || readerField.get().getJavaType() == JavaType.MESSAGE) {
++            return value;
++        }
++        FieldDescriptor reader = readerField.get();
++        if (reader == writerField || (reader.getType() == writerField.getType() && reader.getJavaType() != JavaType.ENUM)) {
++            return value;
++        }
++        if (value instanceof List<?> list) {
++            return list.stream()
++                    .map(element -> toReaderScalar(reader, writerField, element))
++                    .collect(toImmutableList());
++        }
++        return toReaderScalar(reader, writerField, value);
++    }
++
++    private static Object toReaderScalar(FieldDescriptor reader, FieldDescriptor writer, Object value)
++    {
++        return switch (encoding(reader.getType())) {
++            case VARINT, ZIGZAG_VARINT -> fromVarint(reader, toVarint(writer, value));
++            case LENGTH_DELIMITED -> {
++                if (value instanceof ByteString bytes && reader.getJavaType() == JavaType.STRING) {
++                    yield bytes.toStringUtf8();
++                }
++                if (value instanceof String string && reader.getJavaType() == JavaType.BYTE_STRING) {
++                    yield ByteString.copyFromUtf8(string);
++                }
++                yield value;
++            }
++            // the other types replace only types that are read into the same Java type
++            case FIXED32, FIXED64, FLOAT, DOUBLE, MESSAGE, GROUP -> value;
++        };
++    }
++
++    // the value of a varint field as the 64 bit integer on the wire
++    private static long toVarint(FieldDescriptor field, Object value)
++    {
++        return switch (field.getType()) {
++            case UINT32 -> Integer.toUnsignedLong((Integer) value);
++            case BOOL -> ((Boolean) value) ? 1 : 0;
++            case ENUM -> ((EnumValueDescriptor) value).getNumber();
++            case SINT32, SINT64 -> encodeZigZag64(((Number) value).longValue());
++            default -> ((Number) value).longValue();
++        };
++    }
++
++    // the value a varint field reads from the 64 bit integer on the wire; 32 bit fields read its low 32 bits
++    private static Object fromVarint(FieldDescriptor field, long value)
+     {
+-        return readerField.isRepeated() == writerField.isRepeated()
+-                && readerField.isMapField() == writerField.isMapField()
+-                && encoding(readerField.getType()) == encoding(writerField.getType());
++        return switch (field.getType()) {
++            case INT32, UINT32 -> (int) value;
++            case BOOL -> value != 0;
++            case ENUM -> field.getEnumType().findValueByNumberCreatingIfUnknown((int) value);
++            case SINT32 -> decodeZigZag32((int) value);
++            case SINT64 -> decodeZigZag64(value);
++            default -> value;
++        };
++    }
++
++    private static boolean isCompatible(FieldDescriptor readerField, FieldDescriptor writerField)
++    {
++        if (readerField.isRepeated() != writerField.isRepeated()
++                || readerField.isMapField() != writerField.isMapField()
++                || encoding(readerField.getType()) != encoding(writerField.getType())) {
++            return false;
++        }
++        if (readerField.isMapField()) {
++            // the key and value of a map are read like fields of their own
++            Descriptor readerEntry = readerField.getMessageType();
++            Descriptor writerEntry = writerField.getMessageType();
++            return isCompatible(readerEntry.findFieldByNumber(1), writerEntry.findFieldByNumber(1))
++                    && isCompatible(readerEntry.findFieldByNumber(2), writerEntry.findFieldByNumber(2));
++        }
++        if (readerField.getJavaType() == JavaType.MESSAGE) {
++            String readerTypeName = readerField.getMessageType().getFullName();
++            String writerTypeName = writerField.getMessageType().getFullName();
++            return readerTypeName.equals(writerTypeName)
++                    || (!MAPPED_MESSAGE_TYPES.contains(readerTypeName) && !MAPPED_MESSAGE_TYPES.contains(writerTypeName));
++        }
++        return true;
+     }
+ 
+     /**
+diff --git a/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtobufRowDecoder.java b/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtobufRowDecoder.java
+index 3cb453ff..b037e215 100644
+--- a/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtobufRowDecoder.java
++++ b/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtobufRowDecoder.java
+@@ -39,7 +39,8 @@ public class ProtobufRowDecoder
+     public ProtobufRowDecoder(DynamicMessageProvider dynamicMessageProvider, Set<DecoderColumnHandle> columns, TypeManager typeManager, DescriptorProvider descriptorProvider)
+     {
+         this.dynamicMessageProvider = requireNonNull(dynamicMessageProvider, "dynamicMessageProvider is null");
+-        Optional<Descriptor> readerDescriptor = dynamicMessageProvider.getReaderDescriptor();
++        // looking the reader schema up can take a schema registry request, which a decoder without columns does not need
++        Optional<Descriptor> readerDescriptor = columns.isEmpty() ? Optional.empty() : dynamicMessageProvider.getReaderDescriptor();
+         this.columnDecoders = columns.stream()
+                 .collect(toImmutableMap(
+                         identity(),
+diff --git a/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtobufValueProvider.java b/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtobufValueProvider.java
+index cf9e06ef..0e5064f9 100644
+--- a/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtobufValueProvider.java
++++ b/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtobufValueProvider.java
+@@ -58,8 +58,10 @@ import static com.google.common.base.Preconditions.checkState;
+ import static com.google.common.collect.ImmutableList.toImmutableList;
+ import static io.airlift.slice.Slices.utf8Slice;
+ import static io.trino.decoder.DecoderErrorCode.DECODER_CONVERSION_NOT_SUPPORTED;
++import static io.trino.decoder.protobuf.ProtobufFieldMapping.findReaderField;
+ import static io.trino.decoder.protobuf.ProtobufFieldMapping.findWriterField;
+ import static io.trino.decoder.protobuf.ProtobufFieldMapping.getReaderFieldType;
++import static io.trino.decoder.protobuf.ProtobufFieldMapping.toReaderValue;
+ import static io.trino.spi.block.MapValueBuilder.buildMapValue;
+ import static io.trino.spi.block.RowValueBuilder.buildRowValue;
+ import static io.trino.spi.type.StandardTypes.JSON;
+@@ -269,25 +271,33 @@ public class ProtobufValueProvider
+                 .collect(toImmutableList());
+         Type keyType = type.getKeyType();
+         Type valueType = type.getValueType();
+-        // the reader type is the map entry message, whose value field is number 2
+-        Optional<Descriptor> valueReaderType = readerType
+-                .map(entryType -> entryType.findFieldByNumber(2))
+-                .filter(field -> field.getJavaType() == FieldDescriptor.JavaType.MESSAGE)
+-                .map(FieldDescriptor::getMessageType);
++        // the reader type is the map entry message, whose key and value fields are numbers 1 and 2
++        Optional<FieldDescriptor> keyReaderField = readerType.map(entryType -> entryType.findFieldByNumber(1));
++        Optional<FieldDescriptor> valueReaderField = readerType.map(entryType -> entryType.findFieldByNumber(2));
+ 
+         if (parentBlockBuilder != null) {
+-            ((MapBlockBuilder) parentBlockBuilder).buildEntry((keyBuilder, valueBuilder) -> buildMap(columnName, dynamicMessages, valueReaderType, keyType, valueType, keyBuilder, valueBuilder));
++            ((MapBlockBuilder) parentBlockBuilder).buildEntry((keyBuilder, valueBuilder) -> buildMap(columnName, dynamicMessages, keyReaderField, valueReaderField, keyType, valueType, keyBuilder, valueBuilder));
+             return null;
+         }
+-        return buildMapValue(type, dynamicMessages.size(), (keyBuilder, valueBuilder) -> buildMap(columnName, dynamicMessages, valueReaderType, keyType, valueType, keyBuilder, valueBuilder));
++        return buildMapValue(type, dynamicMessages.size(), (keyBuilder, valueBuilder) -> buildMap(columnName, dynamicMessages, keyReaderField, valueReaderField, keyType, valueType, keyBuilder, valueBuilder));
+     }
+ 
+-    private void buildMap(String columnName, Collection<DynamicMessage> dynamicMessages, Optional<Descriptor> valueReaderType, Type keyType, Type valueType, BlockBuilder keyBuilder, BlockBuilder valueBuilder)
++    private void buildMap(
++            String columnName,
++            Collection<DynamicMessage> dynamicMessages,
++            Optional<FieldDescriptor> keyReaderField,
++            Optional<FieldDescriptor> valueReaderField,
++            Type keyType,
++            Type valueType,
++            BlockBuilder keyBuilder,
++            BlockBuilder valueBuilder)
+     {
+         for (DynamicMessage dynamicMessage : dynamicMessages) {
+-            if (dynamicMessage.getField(dynamicMessage.getDescriptorForType().findFieldByNumber(1)) != null) {
+-                serializeObject(keyBuilder, dynamicMessage.getField(getFieldDescriptor(dynamicMessage, 1)), Optional.empty(), keyType, columnName);
+-                serializeObject(valueBuilder, dynamicMessage.getField(getFieldDescriptor(dynamicMessage, 2)), valueReaderType, valueType, columnName);
++            FieldDescriptor keyField = getFieldDescriptor(dynamicMessage, 1);
++            FieldDescriptor valueField = getFieldDescriptor(dynamicMessage, 2);
++            if (dynamicMessage.getField(keyField) != null) {
++                serializeObject(keyBuilder, toReaderValue(keyReaderField, keyField, dynamicMessage.getField(keyField)), Optional.empty(), keyType, columnName);
++                serializeObject(valueBuilder, toReaderValue(valueReaderField, valueField, dynamicMessage.getField(valueField)), getReaderFieldType(valueReaderField), valueType, columnName);
+             }
+         }
+     }
+@@ -316,7 +326,8 @@ public class ProtobufValueProvider
+             Field field = fields.get(i);
+             checkState(field.getName().isPresent(), "field name not found");
+             String fieldName = field.getName().get();
+-            FieldDescriptor fieldDescriptor = findWriterField(record.getDescriptorForType(), readerType, fieldName);
++            Optional<FieldDescriptor> readerField = findReaderField(readerType, fieldName);
++            FieldDescriptor fieldDescriptor = findWriterField(record.getDescriptorForType(), readerField, fieldName);
+             if (fieldDescriptor == null || isUnsetPresenceField(record, fieldDescriptor)) {
+                 // the record was written with a schema that does not have this field, or the field is not set
+                 fieldBuilders.get(i).appendNull();
+@@ -324,8 +335,8 @@ public class ProtobufValueProvider
+             }
+             serializeObject(
+                     fieldBuilders.get(i),
+-                    record.getField(fieldDescriptor),
+-                    getReaderFieldType(readerType, fieldName),
++                    toReaderValue(readerField, fieldDescriptor, record.getField(fieldDescriptor)),
++                    getReaderFieldType(readerField),
+                     field.getType(),
+                     columnName);
+         }
+@@ -360,15 +371,11 @@ public class ProtobufValueProvider
+ 
+     /**
+      * A field that tracks presence is {@code NULL} when it is not set, rather than the default value
+-     * of its type: a proto3 field declared {@code optional}, and a field of a message type, for which
+-     * being unset differs from holding an empty message.
++     * of its type: a field declared {@code optional} or {@code required}, a member of a {@code oneof}
++     * and a field of a message type, for which being unset differs from holding an empty message.
+      */
+     static boolean isUnsetPresenceField(DynamicMessage message, FieldDescriptor fieldDescriptor)
+     {
+-        if (fieldDescriptor.isRepeated()) {
+-            return false;
+-        }
+-        boolean proto3Optional = fieldDescriptor.getContainingOneof() != null && fieldDescriptor.getRealContainingOneof() == null;
+-        return (proto3Optional || fieldDescriptor.getJavaType() == FieldDescriptor.JavaType.MESSAGE) && !message.hasField(fieldDescriptor);
++        return fieldDescriptor.hasPresence() && !message.hasField(fieldDescriptor);
+     }
+ }
+diff --git a/lib/trino-record-decoder/src/test/java/io/trino/decoder/protobuf/TestProtobufDecoder.java b/lib/trino-record-decoder/src/test/java/io/trino/decoder/protobuf/TestProtobufDecoder.java
+index db2138f2..38503d52 100644
+--- a/lib/trino-record-decoder/src/test/java/io/trino/decoder/protobuf/TestProtobufDecoder.java
++++ b/lib/trino-record-decoder/src/test/java/io/trino/decoder/protobuf/TestProtobufDecoder.java
+@@ -20,6 +20,7 @@ import com.google.common.collect.ImmutableMap;
+ import com.google.common.collect.ImmutableSet;
+ import com.google.common.io.Resources;
+ import com.google.protobuf.Any;
++import com.google.protobuf.ByteString;
+ import com.google.protobuf.Descriptors;
+ import com.google.protobuf.Descriptors.Descriptor;
+ import com.google.protobuf.Descriptors.FieldDescriptor;
+@@ -75,6 +76,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
+ import static java.util.stream.Collectors.joining;
+ import static java.util.stream.IntStream.range;
+ import static org.assertj.core.api.Assertions.assertThat;
++import static org.assertj.core.api.Assertions.assertThatNoException;
+ 
+ public class TestProtobufDecoder
+ {
+@@ -975,6 +977,312 @@ public class TestProtobufDecoder
+         checkValue(decodedRow, totalColumn, 6L);
+     }
+ 
++    @Test
++    public void testWireCompatibleTypeChangesAreReadAsReaderType()
++            throws Exception
++    {
++        // the writer changed each field to another type with the same encoding, which reads the same bytes differently
++        Descriptor reader = messageDescriptor(
++                """
++                syntax = "proto3";
++                message schema {
++                  bool flag = 1;
++                  int32 small = 2;
++                  int64 large = 3;
++                  enum Color {
++                    RED = 0;
++                    GREEN = 1;
++                    BLUE = 2;
++                  }
++                  Color color = 4;
++                  int64 color_number = 5;
++                  string text = 6;
++                  bytes data = 7;
++                  sint64 delta = 8;
++                  repeated int64 counts = 9;
++                  map<string, int64> totals = 10;
++                  enum Size {
++                    SMALL = 0;
++                    LARGE = 1;
++                  }
++                  Size size = 11;
++                  sint32 narrow = 12;
++                }
++                """);
++        Descriptor writer = messageDescriptor(
++                """
++                syntax = "proto3";
++                message schema {
++                  int32 flag = 1;
++                  int64 small = 2;
++                  uint32 large = 3;
++                  int32 color = 4;
++                  enum Color {
++                    RED = 0;
++                    GREEN = 1;
++                    BLUE = 2;
++                  }
++                  Color color_number = 5;
++                  bytes text = 6;
++                  string data = 7;
++                  sint32 delta = 8;
++                  repeated int32 counts = 9;
++                  map<string, int32> totals = 10;
++                  enum Size {
++                    TINY = 0;
++                    HUGE = 1;
++                  }
++                  Size size = 11;
++                  sint64 narrow = 12;
++                }
++                """);
++        DecoderTestColumnHandle flagColumn = new DecoderTestColumnHandle(0, "flag", BOOLEAN, "flag", null, null, false, false, false);
++        DecoderTestColumnHandle smallColumn = new DecoderTestColumnHandle(1, "small", INTEGER, "small", null, null, false, false, false);
++        DecoderTestColumnHandle largeColumn = new DecoderTestColumnHandle(2, "large", BIGINT, "large", null, null, false, false, false);
++        DecoderTestColumnHandle colorColumn = new DecoderTestColumnHandle(3, "color", VARCHAR, "color", null, null, false, false, false);
++        DecoderTestColumnHandle colorNumberColumn = new DecoderTestColumnHandle(4, "color_number", BIGINT, "color_number", null, null, false, false, false);
++        DecoderTestColumnHandle textColumn = new DecoderTestColumnHandle(5, "text", VARCHAR, "text", null, null, false, false, false);
++        DecoderTestColumnHandle dataColumn = new DecoderTestColumnHandle(6, "data", VARBINARY, "data", null, null, false, false, false);
++        DecoderTestColumnHandle deltaColumn = new DecoderTestColumnHandle(7, "delta", BIGINT, "delta", null, null, false, false, false);
++        DecoderTestColumnHandle countsColumn = new DecoderTestColumnHandle(8, "counts", new ArrayType(BIGINT), "counts", null, null, false, false, false);
++        MapType totalsType = new MapType(VARCHAR, BIGINT, TESTING_TYPE_MANAGER.getTypeOperators());
++        DecoderTestColumnHandle totalsColumn = new DecoderTestColumnHandle(9, "totals", totalsType, "totals", null, null, false, false, false);
++        DecoderTestColumnHandle sizeColumn = new DecoderTestColumnHandle(10, "size", VARCHAR, "size", null, null, false, false, false);
++        DecoderTestColumnHandle narrowColumn = new DecoderTestColumnHandle(11, "narrow", INTEGER, "narrow", null, null, false, false, false);
++        ProtobufRowDecoder decoder = new ProtobufRowDecoder(
++                new EvolvedSchemaProvider(writer, Optional.of(reader)),
++                ImmutableSet.of(flagColumn, smallColumn, largeColumn, colorColumn, colorNumberColumn, textColumn, dataColumn, deltaColumn, countsColumn, totalsColumn, sizeColumn, narrowColumn),
++                TESTING_TYPE_MANAGER,
++                new FileDescriptorProvider());
++
++        Descriptor totalsEntry = writer.findFieldByName("totals").getMessageType();
++        byte[] record = DynamicMessage.newBuilder(writer)
++                .setField(writer.findFieldByName("flag"), 7)
++                .setField(writer.findFieldByName("small"), (1L << 32) + 5)
++                .setField(writer.findFieldByName("large"), (int) 3_000_000_000L)
++                .setField(writer.findFieldByName("color"), 2)
++                .setField(writer.findFieldByName("color_number"), writer.findEnumTypeByName("Color").findValueByName("BLUE"))
++                .setField(writer.findFieldByName("text"), ByteString.copyFromUtf8("héllo"))
++                .setField(writer.findFieldByName("data"), "bytes")
++                .setField(writer.findFieldByName("delta"), -5)
++                .addRepeatedField(writer.findFieldByName("counts"), 1)
++                .addRepeatedField(writer.findFieldByName("counts"), -2)
++                .addRepeatedField(writer.findFieldByName("totals"), DynamicMessage.newBuilder(totalsEntry)
++                        .setField(totalsEntry.findFieldByName("key"), "a")
++                        .setField(totalsEntry.findFieldByName("value"), -3)
++                        .build())
++                .setField(writer.findFieldByName("size"), writer.findEnumTypeByName("Size").findValueByName("HUGE"))
++                .setField(writer.findFieldByName("narrow"), (1L << 31) + 7)
++                .build()
++                .toByteArray();
++        Map<DecoderColumnHandle, FieldValueProvider> decodedRow = decoder.decodeRow(record).orElseThrow();
++
++        checkValue(decodedRow, flagColumn, true);
++        checkValue(decodedRow, smallColumn, 5);
++        checkValue(decodedRow, largeColumn, 3_000_000_000L);
++        checkValue(decodedRow, colorColumn, "BLUE");
++        checkValue(decodedRow, colorNumberColumn, 2);
++        checkValue(decodedRow, textColumn, "héllo");
++        checkValue(decodedRow, dataColumn, Slices.utf8Slice("bytes"));
++        checkValue(decodedRow, deltaColumn, -5);
++        Block counts = (Block) decodedRow.get(countsColumn).getObject();
++        assertThat(counts.getPositionCount()).isEqualTo(2);
++        assertThat(BIGINT.getLong(counts, 0)).isEqualTo(1);
++        assertThat(BIGINT.getLong(counts, 1)).isEqualTo(-2);
++        SqlMap totals = (SqlMap) decodedRow.get(totalsColumn).getObject();
++        assertThat(totals.getSize()).isEqualTo(1);
++        assertThat(BIGINT.getLong(totals.getRawValueBlock(), totals.getRawOffset())).isEqualTo(-3);
++        // an enum value renamed in the reader schema reads with its new name
++        checkValue(decodedRow, sizeColumn, "LARGE");
++        // a 32 bit field reads the low 32 bits of the zigzag encoded value
++        checkValue(decodedRow, narrowColumn, 7);
++
++        // these are the values protobuf reads with the reader schema
++        DynamicMessage readerMessage = DynamicMessage.parseFrom(reader, record);
++        assertThat(readerMessage.getField(reader.findFieldByName("flag"))).isEqualTo(true);
++        assertThat(readerMessage.getField(reader.findFieldByName("small"))).isEqualTo(5);
++        assertThat(readerMessage.getField(reader.findFieldByName("large"))).isEqualTo(3_000_000_000L);
++        assertThat(readerMessage.getField(reader.findFieldByName("color"))).hasToString("BLUE");
++        assertThat(readerMessage.getField(reader.findFieldByName("color_number"))).isEqualTo(2L);
++        assertThat(readerMessage.getField(reader.findFieldByName("delta"))).isEqualTo(-5L);
++        assertThat(readerMessage.getField(reader.findFieldByName("counts"))).isEqualTo(ImmutableList.of(1L, -2L));
++        assertThat(readerMessage.getField(reader.findFieldByName("size"))).hasToString("LARGE");
++        assertThat(readerMessage.getField(reader.findFieldByName("narrow"))).isEqualTo(7);
++    }
++
++    @Test
++    public void testIncompatibleMessageTypesAreNull()
++    {
++        Descriptor reader = messageDescriptor(
++                """
++                syntax = "proto3";
++                import "google/protobuf/timestamp.proto";
++                message schema {
++                  google.protobuf.Timestamp created = 1;
++                  message Detail {
++                    int64 seconds = 1;
++                  }
++                  Detail detail = 2;
++                  map<string, string> labels = 3;
++                  map<string, string> notes = 4;
++                }
++                """);
++        Descriptor writer = messageDescriptor(
++                """
++                syntax = "proto3";
++                import "google/protobuf/timestamp.proto";
++                message schema {
++                  message Instant {
++                    int64 seconds = 1;
++                  }
++                  Instant created = 1;
++                  google.protobuf.Timestamp detail = 2;
++                  map<int32, string> labels = 3;
++                  map<string, bytes> notes = 4;
++                }
++                """);
++        DecoderTestColumnHandle createdColumn = new DecoderTestColumnHandle(0, "created", TIMESTAMP_MICROS, "created", null, null, false, false, false);
++        DecoderTestColumnHandle detailColumn = new DecoderTestColumnHandle(1, "detail", RowType.from(ImmutableList.of(RowType.field("seconds", BIGINT))), "detail", null, null, false, false, false);
++        DecoderTestColumnHandle labelsColumn = new DecoderTestColumnHandle(2, "labels", new MapType(VARCHAR, VARCHAR, TESTING_TYPE_MANAGER.getTypeOperators()), "labels", null, null, false, false, false);
++        DecoderTestColumnHandle notesColumn = new DecoderTestColumnHandle(3, "notes", new MapType(VARCHAR, VARCHAR, TESTING_TYPE_MANAGER.getTypeOperators()), "notes", null, null, false, false, false);
++        ProtobufRowDecoder decoder = new ProtobufRowDecoder(
++                new EvolvedSchemaProvider(writer, Optional.of(reader)),
++                ImmutableSet.of(createdColumn, detailColumn, labelsColumn, notesColumn),
++                TESTING_TYPE_MANAGER,
++                new FileDescriptorProvider());
++
++        Descriptor instant = writer.findFieldByName("created").getMessageType();
++        Descriptor labelsEntry = writer.findFieldByName("labels").getMessageType();
++        Descriptor notesEntry = writer.findFieldByName("notes").getMessageType();
++        byte[] record = DynamicMessage.newBuilder(writer)
++                .setField(writer.findFieldByName("created"), DynamicMessage.newBuilder(instant).setField(instant.findFieldByName("seconds"), 1L).build())
++                .setField(writer.findFieldByName("detail"), Timestamp.newBuilder().setSeconds(2).build())
++                .addRepeatedField(writer.findFieldByName("labels"), DynamicMessage.newBuilder(labelsEntry)
++                        .setField(labelsEntry.findFieldByName("key"), 1)
++                        .setField(labelsEntry.findFieldByName("value"), "one")
++                        .build())
++                .addRepeatedField(writer.findFieldByName("notes"), DynamicMessage.newBuilder(notesEntry)
++                        .setField(notesEntry.findFieldByName("key"), "a")
++                        .setField(notesEntry.findFieldByName("value"), ByteString.copyFromUtf8("b"))
++                        .build())
++                .build()
++                .toByteArray();
++        Map<DecoderColumnHandle, FieldValueProvider> decodedRow = decoder.decodeRow(record).orElseThrow();
++
++        // a message type mapped to a column type of its own is not interchangeable with other message types
++        assertThat(decodedRow.get(createdColumn).isNull()).isTrue();
++        assertThat(decodedRow.get(detailColumn).isNull()).isTrue();
++        // the key and value of a map must be compatible like fields
++        assertThat(decodedRow.get(labelsColumn).isNull()).isTrue();
++        SqlMap notes = (SqlMap) decodedRow.get(notesColumn).getObject();
++        assertThat(VARCHAR.getSlice(notes.getRawValueBlock(), notes.getRawOffset()).toStringUtf8()).isEqualTo("b");
++    }
++
++    @Test
++    public void testRecordOfAnotherMessageTypeIsReadByName()
++    {
++        Descriptor reader = messageDescriptor(
++                """
++                syntax = "proto3";
++                message schema {
++                  string name = 1;
++                  int64 count = 2;
++                }
++                """);
++        Descriptor writer = ProtobufUtils.getFileDescriptor(
++                """
++                syntax = "proto3";
++                message other {
++                  int64 count = 1;
++                  string name = 2;
++                }
++                """).findMessageTypeByName("other");
++        DecoderTestColumnHandle nameColumn = new DecoderTestColumnHandle(0, "name", VARCHAR, "name", null, null, false, false, false);
++        DecoderTestColumnHandle countColumn = new DecoderTestColumnHandle(1, "count", BIGINT, "count", null, null, false, false, false);
++        ProtobufRowDecoder decoder = new ProtobufRowDecoder(
++                new EvolvedSchemaProvider(writer, Optional.of(reader)),
++                ImmutableSet.of(nameColumn, countColumn),
++                TESTING_TYPE_MANAGER,
++                new FileDescriptorProvider());
++
++        byte[] record = DynamicMessage.newBuilder(writer)
++                .setField(writer.findFieldByName("count"), 3L)
++                .setField(writer.findFieldByName("name"), "Trino")
++                .build()
++                .toByteArray();
++        Map<DecoderColumnHandle, FieldValueProvider> decodedRow = decoder.decodeRow(record).orElseThrow();
++
++        // field numbers identify fields only within a message type
++        checkValue(decodedRow, nameColumn, "Trino");
++        checkValue(decodedRow, countColumn, 3);
++    }
++
++    @Test
++    public void testUnsetFieldsWithPresenceAreNull()
++    {
++        Descriptor descriptor = messageDescriptor(
++                """
++                syntax = "proto2";
++                message schema {
++                  optional int64 count = 1;
++                  optional string label = 2 [default = "none"];
++                  required int32 id = 3;
++                  oneof choice {
++                    int64 number = 4;
++                    string word = 5;
++                  }
++                  repeated int64 values = 6;
++                }
++                """);
++        DecoderTestColumnHandle countColumn = new DecoderTestColumnHandle(0, "count", BIGINT, "count", null, null, false, false, false);
++        DecoderTestColumnHandle labelColumn = new DecoderTestColumnHandle(1, "label", VARCHAR, "label", null, null, false, false, false);
++        DecoderTestColumnHandle idColumn = new DecoderTestColumnHandle(2, "id", INTEGER, "id", null, null, false, false, false);
++        DecoderTestColumnHandle numberColumn = new DecoderTestColumnHandle(3, "number", BIGINT, "number", null, null, false, false, false);
++        DecoderTestColumnHandle wordColumn = new DecoderTestColumnHandle(4, "word", VARCHAR, "word", null, null, false, false, false);
++        DecoderTestColumnHandle valuesColumn = new DecoderTestColumnHandle(5, "values", new ArrayType(BIGINT), "values", null, null, false, false, false);
++        ProtobufRowDecoder decoder = new ProtobufRowDecoder(
++                new FixedSchemaDynamicMessageProvider(descriptor),
++                ImmutableSet.of(countColumn, labelColumn, idColumn, numberColumn, wordColumn, valuesColumn),
++                TESTING_TYPE_MANAGER,
++                new FileDescriptorProvider());
++
++        byte[] record = DynamicMessage.newBuilder(descriptor)
++                .setField(descriptor.findFieldByName("id"), 1)
++                .setField(descriptor.findFieldByName("word"), "w")
++                .build()
++                .toByteArray();
++        Map<DecoderColumnHandle, FieldValueProvider> decodedRow = decoder.decodeRow(record).orElseThrow();
++
++        // an unset field that tracks presence is NULL, even with a declared default value
++        assertThat(decodedRow.get(countColumn).isNull()).isTrue();
++        assertThat(decodedRow.get(labelColumn).isNull()).isTrue();
++        assertThat(decodedRow.get(numberColumn).isNull()).isTrue();
++        checkValue(decodedRow, idColumn, 1);
++        checkValue(decodedRow, wordColumn, "w");
++        // a repeated field has no presence: unset, it is empty
++        assertThat(((Block) decodedRow.get(valuesColumn).getObject()).getPositionCount()).isZero();
++    }
++
++    @Test
++    public void testDecoderWithoutColumnsDoesNotLookUpReaderSchema()
++    {
++        DynamicMessageProvider provider = new DynamicMessageProvider()
++        {
++            @Override
++            public DynamicMessage parseDynamicMessage(byte[] data)
++            {
++                throw new UnsupportedOperationException();
++            }
++
++            @Override
++            public Optional<Descriptor> getReaderDescriptor()
++            {
++                throw new AssertionError("reader schema looked up");
++            }
++        };
++        assertThatNoException().isThrownBy(() -> new ProtobufRowDecoder(provider, ImmutableSet.of(), TESTING_TYPE_MANAGER, new FileDescriptorProvider()));
++    }
++
+     private static Descriptor messageDescriptor(String protoFile)
+     {
+         return ProtobufUtils.getFileDescriptor(protoFile).findMessageTypeByName(DEFAULT_MESSAGE);
+diff --git a/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/encoder/protobuf/ProtobufRowEncoder.java b/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/encoder/protobuf/ProtobufRowEncoder.java
+index 93a3fe1b..27a8efa1 100644
+--- a/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/encoder/protobuf/ProtobufRowEncoder.java
++++ b/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/encoder/protobuf/ProtobufRowEncoder.java
+@@ -146,6 +146,10 @@ public class ProtobufRowEncoder
+ 
+     private static void checkNullAllowed(FieldDescriptor fieldDescriptor)
+     {
++        if (fieldDescriptor.isRequired()) {
++            // a message without a required field cannot be built
++            throw new TrinoException(CONSTRAINT_VIOLATION, format("NULL value not allowed for required protobuf field '%s'", fieldDescriptor.getFullName()));
++        }
+         if (fieldDescriptor.hasPresence()) {
+             return;
+         }
+diff --git a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/protobuf/TestKafkaProtobufWithSchemaRegistryMinimalFunctionality.java b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/protobuf/TestKafkaProtobufWithSchemaRegistryMinimalFunctionality.java
+index f166b297..ef5dcd21 100644
+--- a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/protobuf/TestKafkaProtobufWithSchemaRegistryMinimalFunctionality.java
++++ b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/protobuf/TestKafkaProtobufWithSchemaRegistryMinimalFunctionality.java
+@@ -349,6 +349,59 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
+                 io.airlift.units.Duration.valueOf("5s"));
+     }
+ 
++    @Test
++    public void testWidenedFieldsAndRenamedEnumValues()
++            throws Exception
++    {
++        String topic = "topic-widened-fields";
++        assertNotExists(topic);
++
++        Descriptor initial = getFileDescriptor(
++                """
++                syntax = "proto3";
++                message schema {
++                  int32 count = 1;
++                  enum Status {
++                    ACTIVE = 0;
++                    RETIRED = 1;
++                  }
++                  Status status = 2;
++                }
++                """).findMessageTypeByName(DEFAULT_MESSAGE);
++        DynamicMessage initialMessage = DynamicMessage.newBuilder(initial)
++                .setField(initial.findFieldByName("count"), -5)
++                .setField(initial.findFieldByName("status"), initial.findEnumTypeByName("Status").findValueByName("RETIRED"))
++                .build();
++        testingKafka.sendMessages(Stream.of(new ProducerRecord<>(topic, createKeySchema(0, getKeySchema()), initialMessage)), producerProperties());
++        waitUntilTableExists(topic);
++        assertQuery(format("SELECT count, status FROM %s", toDoubleQuoted(topic)), "VALUES (-5, 'RETIRED')");
++
++        Descriptor evolved = getFileDescriptor(
++                """
++                syntax = "proto3";
++                message schema {
++                  int64 count = 1;
++                  enum Status {
++                    ACTIVE = 0;
++                    INACTIVE = 1;
++                  }
++                  Status status = 2;
++                }
++                """).findMessageTypeByName(DEFAULT_MESSAGE);
++        DynamicMessage evolvedMessage = DynamicMessage.newBuilder(evolved)
++                .setField(evolved.findFieldByName("count"), 1L << 40)
++                .setField(evolved.findFieldByName("status"), evolved.findEnumTypeByName("Status").findValueByName("INACTIVE"))
++                .build();
++        testingKafka.sendMessages(Stream.of(new ProducerRecord<>(topic, createKeySchema(1, getKeySchema()), evolvedMessage)), producerProperties());
++
++        // records written before the change are read the way the latest schema reads their bytes
++        assertQueryEventually(
++                getSession(),
++                format("SELECT key, count, status FROM %s", toDoubleQuoted(topic)),
++                "VALUES (0, -5, 'INACTIVE'), (1, 1099511627776, 'INACTIVE')",
++                io.airlift.units.Duration.valueOf("5s"));
++    }
++
+     @Test
+     public void testUnsupportedRecursiveDataTypes()
+             throws Exception
+diff --git a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/protobuf/TestProtobufEncoder.java b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/protobuf/TestProtobufEncoder.java
+index 08676ca3..21907f4e 100644
+--- a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/protobuf/TestProtobufEncoder.java
++++ b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/protobuf/TestProtobufEncoder.java
+@@ -14,10 +14,16 @@
+ package io.trino.plugin.kafka.protobuf;
+ 
+ import com.google.common.collect.ImmutableList;
++import com.google.common.collect.ImmutableSet;
+ import com.google.protobuf.ByteString;
+ import com.google.protobuf.Descriptors.Descriptor;
+ import com.google.protobuf.DynamicMessage;
+ import com.google.protobuf.Timestamp;
++import io.trino.decoder.DecoderColumnHandle;
++import io.trino.decoder.FieldValueProvider;
++import io.trino.decoder.protobuf.FileDescriptorProvider;
++import io.trino.decoder.protobuf.FixedSchemaDynamicMessageProvider;
++import io.trino.decoder.protobuf.ProtobufRowDecoder;
+ import io.trino.plugin.kafka.KafkaColumnHandle;
+ import io.trino.plugin.kafka.encoder.EncoderColumnHandle;
+ import io.trino.plugin.kafka.encoder.RowEncoder;
+@@ -40,6 +46,7 @@ import org.junit.jupiter.api.Test;
+ 
+ import java.time.LocalDateTime;
+ import java.util.List;
++import java.util.Map;
+ import java.util.Optional;
+ 
+ import static io.airlift.slice.Slices.utf8Slice;
+@@ -586,6 +593,45 @@ public class TestProtobufEncoder
+         assertNullRejected(descriptor, createEncoderColumnHandle("attributes", attributesType, "attributes"), mapBlockBuilder.build(), "NULL map value not allowed for protobuf field 'schema.attributes'");
+     }
+ 
++    @Test
++    public void testNullValuesOfProto2Fields()
++    {
++        Descriptor descriptor = getFileDescriptor(
++                """
++                syntax = "proto2";
++                message schema {
++                  required string name = 1;
++                  optional int64 count = 2 [default = 7];
++                  oneof choice {
++                    int64 number = 3;
++                    string word = 4;
++                  }
++                }
++                """).findMessageTypeByName(DEFAULT_MESSAGE);
++        EncoderColumnHandle nameColumn = createEncoderColumnHandle("name", VARCHAR, "name");
++        KafkaColumnHandle countColumn = new KafkaColumnHandle("count", BIGINT, "count", null, null, false, false, false);
++        KafkaColumnHandle numberColumn = new KafkaColumnHandle("number", BIGINT, "number", null, null, false, false, false);
++
++        // optional fields and oneof members are left unset, and read back as NULL
++        RowEncoder encoder = new ProtobufRowEncoder(descriptor, TestingConnectorSession.SESSION, ImmutableList.of(nameColumn, countColumn, numberColumn));
++        encoder.appendColumnValue(nativeValueBlock(VARCHAR, utf8Slice("Trino")), 0);
++        encoder.appendColumnValue(nullBlock(BIGINT), 0);
++        encoder.appendColumnValue(nullBlock(BIGINT), 0);
++        byte[] record = encoder.toByteArray();
++        assertThat(record).isEqualTo(DynamicMessage.newBuilder(descriptor).setField(descriptor.findFieldByName("name"), "Trino").build().toByteArray());
++        Map<DecoderColumnHandle, FieldValueProvider> decodedRow = new ProtobufRowDecoder(
++                new FixedSchemaDynamicMessageProvider(descriptor),
++                ImmutableSet.of(countColumn, numberColumn),
++                TESTING_TYPE_MANAGER,
++                new FileDescriptorProvider())
++                .decodeRow(record)
++                .orElseThrow();
++        assertThat(decodedRow.values()).allMatch(FieldValueProvider::isNull);
++
++        // a message without a required field cannot be built
++        assertNullRejected(descriptor, nameColumn, nullBlock(VARCHAR), "NULL value not allowed for required protobuf field 'schema.name'");
++    }
++
+     private static void assertNullRejected(Descriptor descriptor, EncoderColumnHandle column, Block block, String message)
+     {
+         RowEncoder encoder = new ProtobufRowEncoder(descriptor, TestingConnectorSession.SESSION, ImmutableList.of(column));
+-- 
+2.43.0
+
+
+From e7b7257cf57bd94a8ec6ac8f5382aaf2fdf5e739 Mon Sep 17 00:00:00 2001
+From: Kristian <kristian@apache.org>
+Date: Fri, 23 Oct 2026 18:37:24 +0000
+Subject: [PATCH 2/2] Update PR draft for field mapping review
+
+---
+ .../feature-kafka-confluent-protobuf-pr.md    | 47 +++++++++++++------
+ 1 file changed, 33 insertions(+), 14 deletions(-)
+
+diff --git a/docs/briefs/feature-kafka-confluent-protobuf-pr.md b/docs/briefs/feature-kafka-confluent-protobuf-pr.md
+index 992c39bb..c845751f 100644
+--- a/docs/briefs/feature-kafka-confluent-protobuf-pr.md
++++ b/docs/briefs/feature-kafka-confluent-protobuf-pr.md
+@@ -30,9 +30,14 @@ using only Apache-licensed dependencies:
+   schema names the registry id of the schema the columns were derived from,
+   and the decoder maps each column's field to the writer field with the same
+   number and encoding, at the top level and within `ROW`, `ARRAY` and `MAP`
+-  columns. A renamed field keeps its column; fields that an older writer
+-  schema lacks, or that it encodes differently under the same number,
+-  decode as `NULL` (fixes trinodb/trino#20204).
++  columns, and converts its value the way protobuf reads it with the reader
++  type (`int32` to `int64`, `int64` to `int32`, `bool`, enums by number,
++  zigzag and `string`/`bytes` changes). A renamed field or enum value keeps
++  its column and name; fields that an older writer schema lacks, that it
++  encodes differently under the same number, or that change between
++  `google.protobuf.Timestamp` or `Any` and another message type decode as
++  `NULL` (fixes trinodb/trino#20204). Records of another message type than
++  the table's are matched by name.
+   The message index path is resolved the way Confluent's deserializer does,
+   counting the map entry messages that registered schema text declares
+   explicitly, and such explicit entries are read as maps.
+@@ -47,11 +52,12 @@ using only Apache-licensed dependencies:
+   with a null key; tables without a value subject reject `INSERT`, since a
+   null value would be a tombstone.
+ * The protobuf encoder writes `NULL` as an unset field when the field tracks
+-  presence (`optional` or message typed), for columns, flattened columns and
+-  `ROW` fields alike, and rejects it with `CONSTRAINT_VIOLATION` and a
+-  message naming the field for the others (proto3 scalars without
+-  `optional`, `repeated` and `map` fields, `ARRAY` elements and `MAP`
+-  values). Previously every `NULL` failed with `GENERIC_INTERNAL_ERROR`.
++  presence (`optional`, `oneof` member or message typed), for columns,
++  flattened columns and `ROW` fields alike, and rejects it with
++  `CONSTRAINT_VIOLATION` and a message naming the field for the others
++  (proto3 scalars without `optional`, proto2 `required` fields, `repeated`
++  and `map` fields, `ARRAY` elements and `MAP` values). Previously every
++  `NULL` failed with `GENERIC_INTERNAL_ERROR`.
+ * New `kafka.confluent-schema-registry.basic-auth.*` and
+   `kafka.confluent-schema-registry.ssl.*` properties configure basic
+   authentication, a trust store, a client key store and host name
+@@ -79,6 +85,10 @@ Behavior changes worth calling out for reviewers:
+   1970-01-01 no longer stands in for a field that was never set. This is
+   what makes `INSERT` of `NULL` into such a field round-trip. Applies to the
+   file-based protobuf decoder as well.
++* The same holds for every field that tracks presence: an unset proto2
++  `optional` field (even with a declared default) and an unset `oneof`
++  member decode as `NULL` instead of the default value, matching the
++  encoder, which leaves such fields unset for `NULL`.
+ * File-based protobuf tables (`FileTableDescriptionSupplier`) gain the same
+   descriptor builder; oneof fields no longer get dropped from their
+   descriptors.
+@@ -119,14 +129,18 @@ Tests:
+   map entry naming, groups, duplicates, package-less files, proto2 defaults
+   including escaped bytes and special float values, reserved declarations)
+   and `TestProtobufDecoder` (including renamed fields read by number, a
+-  number reused with another encoding, and name lookup without a reader
+-  schema); `verify -P ci` and the error-prone compile pass.
++  number reused with another encoding, name lookup without a reader
++  schema, wire-compatible type changes checked against protobuf's own
++  parse with the reader schema, incompatible message and map types, records
++  of another message type, proto2 and oneof presence, and a decoder without
++  columns); `verify -P ci` and the error-prone compile pass.
+ * `plugin/trino-kafka`: `TestConfluentProtobufWireFormat` (including a
+   byte-for-byte comparison with Confluent's `MessageIndexes`),
+   `TestConfluentProtobufSchema`, `TestConfluentSchemaRegistryDynamicMessageProvider`
+   (including the reader schema reference and a rename evolution),
+   `TestConfluentContentSchemaProvider`, `TestProtobufEncoder` (`NULL` left
+-  unset or rejected per field),
++  unset or rejected per field, proto2 `required`, `optional` and `oneof`
++  fields read back as `NULL`),
+   `TestConfluentProtobufRowEncoderFactory`, `TestConfluentProtobufSchemaRegistryRest`
+   (in-process HTTP and HTTPS registries: decode with references, encode
+   with the latest schema, basic auth from the security config, 401, 404,
+@@ -141,7 +155,8 @@ Tests:
+   cases in `TestConfluentSchemaRegistryTableDescriptionSupplier`, and new
+   Docker cases in `TestKafkaProtobufWithSchemaRegistryMinimalFunctionality`
+   (INSERT round trip, INSERT without key subject, schema references, nested
+-  schema evolution, renamed fields read by number).
++  schema evolution, renamed fields read by number, a widened field and a
++  renamed enum value).
+ 
+ ## Release notes
+ 
+@@ -163,10 +178,14 @@ Tests:
+   `disabled` to restore the previous behavior.
+ * Fix query failure when a protobuf record was written with a schema that
+   lacks a field of a `ROW` column. ({issue}`20204`)
+-* Fix `NULL` results for protobuf records written before a field was renamed
+-  in the Confluent table description supplier.
++* Fix `NULL` results for protobuf records written before a field was renamed,
++  and old names for records written before an enum value was renamed, in the
++  Confluent table description supplier.
+ * Allow `INSERT` of `NULL` into protobuf fields that track presence, and fail
+   with a clear error instead of an internal error for the others.
++* {{breaking}} Return `NULL` for protobuf fields that track presence and are not
++  set, such as message typed fields, proto2 `optional` fields and `oneof`
++  members, instead of an empty message or the field's default value.
+ * {{breaking}} Map protobuf fields declared `optional` in proto3 schemas of the
+   Confluent table description supplier to columns of the field's type, instead
+   of `JSON` columns named after their synthetic oneof.
+-- 
+2.43.0
+

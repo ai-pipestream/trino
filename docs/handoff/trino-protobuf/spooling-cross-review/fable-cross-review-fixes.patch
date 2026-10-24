@@ -1,0 +1,1963 @@
+From 34a977e3cbb0852420e0b1bcdf5b2375bc12ac53 Mon Sep 17 00:00:00 2001
+From: Kristian <kristian@apache.org>
+Date: Sat, 24 Oct 2026 03:10:29 +0000
+Subject: [PATCH 1/4] Format protobuf client values without java.time and
+ BigInteger
+
+The client turns dates, times, timestamps and decimals into the text
+the json encoding carries, and on a type-rich result that made it
+decode slower than json. Write each value into a byte array of its
+exact length and make a Latin-1 string of it: the civil date comes
+from the epoch day arithmetically, a decimal of up to 128 bits is
+converted by dividing its words, and only a wider one goes through
+BigInteger. The formats are pinned to LocalDate, DateTimeFormatter and
+BigDecimal by tests over the ends of each range and random values.
+
+A column of timestamps with time zone usually holds one zone, so the
+decoder keeps the previous zone id and reuses it when the bytes match,
+instead of decoding the text for every value.
+
+On the generated type-rich table of BenchmarkQueryDataEncoding the
+protobuf decode goes from 1.7x slower than json to 1.2x slower.
+---
+ .../protobuf/ProtobufValueDecoders.java       | 305 +++++--------
+ .../protobuf/ProtobufValueFormatter.java      | 420 ++++++++++++++++++
+ .../encoding/protobuf/ProtobufWireReader.java |  41 +-
+ .../TestProtobufQueryDataDecoder.java         |  65 ++-
+ .../protobuf/TestProtobufValueFormatter.java  | 283 ++++++++++++
+ 5 files changed, 889 insertions(+), 225 deletions(-)
+ create mode 100644 client/trino-client/src/main/java/io/trino/client/spooling/encoding/protobuf/ProtobufValueFormatter.java
+ create mode 100644 client/trino-client/src/test/java/io/trino/client/spooling/encoding/protobuf/TestProtobufValueFormatter.java
+
+diff --git a/client/trino-client/src/main/java/io/trino/client/spooling/encoding/protobuf/ProtobufValueDecoders.java b/client/trino-client/src/main/java/io/trino/client/spooling/encoding/protobuf/ProtobufValueDecoders.java
+index 3b9cdd02..0ec00352 100644
+--- a/client/trino-client/src/main/java/io/trino/client/spooling/encoding/protobuf/ProtobufValueDecoders.java
++++ b/client/trino-client/src/main/java/io/trino/client/spooling/encoding/protobuf/ProtobufValueDecoders.java
+@@ -14,7 +14,6 @@
+ package io.trino.client.spooling.encoding.protobuf;
+ 
+ import com.fasterxml.jackson.databind.json.JsonMapper;
+-import com.google.common.annotations.VisibleForTesting;
+ import com.google.common.collect.ImmutableList;
+ import com.google.common.net.InetAddresses;
+ import io.trino.client.ClientTypeSignature;
+@@ -31,9 +30,6 @@ import java.math.BigDecimal;
+ import java.math.BigInteger;
+ import java.net.InetAddress;
+ import java.net.UnknownHostException;
+-import java.time.LocalDate;
+-import java.time.LocalDateTime;
+-import java.time.ZoneOffset;
+ import java.util.ArrayList;
+ import java.util.HashMap;
+ import java.util.List;
+@@ -137,11 +133,9 @@ import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.WIRE
+ import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.WIRETYPE_VARINT;
+ import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.fieldNumber;
+ import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.wireType;
+-import static java.lang.Math.abs;
+-import static java.lang.Math.floorDiv;
+-import static java.lang.Math.floorMod;
+ import static java.lang.Math.toIntExact;
+ import static java.lang.String.format;
++import static java.nio.charset.StandardCharsets.UTF_8;
+ import static java.util.Collections.unmodifiableList;
+ import static java.util.Collections.unmodifiableMap;
+ 
+@@ -151,33 +145,14 @@ import static java.util.Collections.unmodifiableMap;
+  */
+ public final class ProtobufValueDecoders
+ {
+-    private static final long MICROSECONDS_PER_SECOND = 1_000_000;
+-    private static final long MILLISECONDS_PER_SECOND = 1_000;
+     private static final long PICOSECONDS_PER_MICROSECOND = 1_000_000;
+     private static final long PICOSECONDS_PER_MILLISECOND = 1_000_000_000;
+     private static final long PICOSECONDS_PER_SECOND = 1_000_000_000_000L;
+-    private static final long PICOSECONDS_PER_MINUTE = 60 * PICOSECONDS_PER_SECOND;
+-    private static final long PICOSECONDS_PER_HOUR = 60 * PICOSECONDS_PER_MINUTE;
+-    private static final long PICOSECONDS_PER_DAY = 24 * PICOSECONDS_PER_HOUR;
++    private static final long PICOSECONDS_PER_DAY = 24 * 60 * 60 * PICOSECONDS_PER_SECOND;
+     private static final int MAX_PRECISION = 12;
+     // java.time and Trino limits of zone offsets
+     private static final int MAX_OFFSET_SECONDS = 18 * 60 * 60;
+     private static final int MAX_TIME_ZONE_OFFSET_MINUTES = 14 * 60;
+-    private static final long[] POWERS_OF_TEN = {
+-            1L,
+-            10L,
+-            100L,
+-            1000L,
+-            10_000L,
+-            100_000L,
+-            1_000_000L,
+-            10_000_000L,
+-            100_000_000L,
+-            1_000_000_000L,
+-            10_000_000_000L,
+-            100_000_000_000L,
+-            1_000_000_000_000L,
+-    };
+ 
+     private static final ValueDecoder BOOLEAN_DECODER = new BooleanDecoder();
+     private static final ValueDecoder TINYINT_DECODER = new TinyintDecoder();
+@@ -194,7 +169,6 @@ public final class ProtobufValueDecoders
+     private static final ValueDecoder TIME_DECODER = new TimeDecoder();
+     private static final ValueDecoder TIME_WITH_TIME_ZONE_DECODER = new TimeWithTimeZoneDecoder();
+     private static final ValueDecoder TIMESTAMP_DECODER = new TimestampDecoder();
+-    private static final ValueDecoder TIMESTAMP_WITH_TIME_ZONE_DECODER = new TimestampWithTimeZoneDecoder();
+     private static final ValueDecoder INTERVAL_YEAR_TO_MONTH_DECODER = new IntervalYearToMonthDecoder();
+     private static final ValueDecoder INTERVAL_DAY_TO_SECOND_DECODER = new IntervalDayToSecondDecoder();
+     private static final ValueDecoder UUID_DECODER = new UuidDecoder();
+@@ -260,7 +234,8 @@ public final class ProtobufValueDecoders
+             case TIMESTAMP:
+                 return TIMESTAMP_DECODER;
+             case TIMESTAMP_WITH_TIME_ZONE:
+-                return TIMESTAMP_WITH_TIME_ZONE_DECODER;
++                // one per column: it caches the zone id of the last value
++                return new TimestampWithTimeZoneDecoder();
+             case INTERVAL_YEAR_TO_MONTH:
+                 return INTERVAL_YEAR_TO_MONTH_DECODER;
+             case INTERVAL_DAY_TO_SECOND:
+@@ -536,7 +511,7 @@ public final class ProtobufValueDecoders
+         @Override
+         Object decodeValue(ProtobufWireReader reader)
+         {
+-            return LocalDate.ofEpochDay(reader.readSint32()).toString();
++            return ProtobufValueFormatter.formatDate(reader.readSint32());
+         }
+     }
+ 
+@@ -640,62 +615,71 @@ public final class ProtobufValueDecoders
+         @Override
+         Object decodeMessage(ProtobufWireReader reader)
+         {
+-            DecimalValue decimal = readDecimal(reader);
+-            if (decimal.scale < 0) {
+-                throw new ProtobufFormatException("Invalid decimal scale: " + decimal.scale);
++            boolean hasUnscaled = false;
++            long unscaledLong = 0;
++            byte[] unscaledBytes = null;
++            int scale = 0;
++            while (reader.hasRemaining()) {
++                int tag = reader.readTag();
++                switch (fieldNumber(tag)) {
++                    case DECIMAL_UNSCALED_LONG:
++                        expectWireType(tag, WIRETYPE_VARINT);
++                        unscaledLong = reader.readSint64();
++                        unscaledBytes = null;
++                        hasUnscaled = true;
++                        break;
++                    case DECIMAL_UNSCALED_BYTES:
++                        expectWireType(tag, WIRETYPE_LENGTH_DELIMITED);
++                        unscaledBytes = readUnscaledBytes(reader);
++                        hasUnscaled = true;
++                        break;
++                    case DECIMAL_SCALE:
++                        expectWireType(tag, WIRETYPE_VARINT);
++                        scale = reader.readSint32();
++                        break;
++                    default:
++                        reader.skipField(tag);
++                }
++            }
++            if (!hasUnscaled) {
++                throw new ProtobufFormatException("Decimal has no unscaled value");
++            }
++            if (scale < 0) {
++                throw new ProtobufFormatException("Invalid decimal scale: " + scale);
++            }
++            if (unscaledBytes == null) {
++                return ProtobufValueFormatter.formatDecimal(unscaledLong, scale);
+             }
+-            return formatDecimal(decimal);
++            return ProtobufValueFormatter.formatDecimal(unscaledBytes, scale);
+         }
+     }
+ 
+-    private static final class DecimalValue
++    private static byte[] readUnscaledBytes(ProtobufWireReader reader)
+     {
+-        private final long unscaledLong;
+-        // null when the unscaled value is unscaledLong
+-        private final BigInteger unscaledBig;
+-        private final int scale;
+-
+-        private DecimalValue(long unscaledLong, BigInteger unscaledBig, int scale)
+-        {
+-            this.unscaledLong = unscaledLong;
+-            this.unscaledBig = unscaledBig;
+-            this.scale = scale;
+-        }
+-
+-        BigInteger unscaled()
+-        {
+-            return unscaledBig == null ? BigInteger.valueOf(unscaledLong) : unscaledBig;
+-        }
+-
+-        String unscaledText()
+-        {
+-            return unscaledBig == null ? Long.toString(unscaledLong) : unscaledBig.toString();
++        byte[] bytes = reader.readBytes(reader.readLength());
++        if (bytes.length == 0) {
++            throw new ProtobufFormatException("Decimal has empty unscaled bytes");
+         }
++        return bytes;
+     }
+ 
+-    private static DecimalValue readDecimal(ProtobufWireReader reader)
++    /**
++     * Reads a {@code Decimal} message as a {@code BigDecimal}, for the types that render through one.
++     */
++    private static BigDecimal readBigDecimal(ProtobufWireReader reader)
+     {
+-        boolean hasUnscaled = false;
+-        long unscaledLong = 0;
+-        BigInteger unscaledBig = null;
++        BigInteger unscaled = null;
+         int scale = 0;
+         while (reader.hasRemaining()) {
+             int tag = reader.readTag();
+             switch (fieldNumber(tag)) {
+                 case DECIMAL_UNSCALED_LONG:
+                     expectWireType(tag, WIRETYPE_VARINT);
+-                    unscaledLong = reader.readSint64();
+-                    unscaledBig = null;
+-                    hasUnscaled = true;
++                    unscaled = BigInteger.valueOf(reader.readSint64());
+                     break;
+                 case DECIMAL_UNSCALED_BYTES:
+                     expectWireType(tag, WIRETYPE_LENGTH_DELIMITED);
+-                    byte[] bytes = reader.readBytes(reader.readLength());
+-                    if (bytes.length == 0) {
+-                        throw new ProtobufFormatException("Decimal has empty unscaled bytes");
+-                    }
+-                    unscaledBig = new BigInteger(bytes);
+-                    hasUnscaled = true;
++                    unscaled = new BigInteger(readUnscaledBytes(reader));
+                     break;
+                 case DECIMAL_SCALE:
+                     expectWireType(tag, WIRETYPE_VARINT);
+@@ -705,10 +689,10 @@ public final class ProtobufValueDecoders
+                     reader.skipField(tag);
+             }
+         }
+-        if (!hasUnscaled) {
++        if (unscaled == null) {
+             throw new ProtobufFormatException("Decimal has no unscaled value");
+         }
+-        return new DecimalValue(unscaledLong, unscaledBig, scale);
++        return new BigDecimal(unscaled, scale);
+     }
+ 
+     private static class TimeDecoder
+@@ -740,9 +724,7 @@ public final class ProtobufValueDecoders
+                 }
+             }
+             checkRange("picos", picos, 0, PICOSECONDS_PER_DAY - 1);
+-            StringBuilder builder = new StringBuilder(8 + (precision == 0 ? 0 : 1 + precision));
+-            formatTime(picos, checkPrecision(precision), builder);
+-            return builder.toString();
++            return ProtobufValueFormatter.formatTime(checkPrecision(precision), picos);
+         }
+     }
+ 
+@@ -781,13 +763,7 @@ public final class ProtobufValueDecoders
+             }
+             checkRange("picos", picos, 0, PICOSECONDS_PER_DAY - 1);
+             checkRange("offset minutes", offsetMinutes, -MAX_TIME_ZONE_OFFSET_MINUTES, MAX_TIME_ZONE_OFFSET_MINUTES);
+-            StringBuilder builder = new StringBuilder(14 + (precision == 0 ? 0 : 1 + precision));
+-            formatTime(picos, checkPrecision(precision), builder);
+-            builder.append(offsetMinutes >= 0 ? '+' : '-');
+-            appendTwoDigits(abs(offsetMinutes / 60), builder);
+-            builder.append(':');
+-            appendTwoDigits(abs(offsetMinutes % 60), builder);
+-            return builder.toString();
++            return ProtobufValueFormatter.formatTimeWithTimeZone(checkPrecision(precision), picos, offsetMinutes);
+         }
+     }
+ 
+@@ -825,13 +801,18 @@ public final class ProtobufValueDecoders
+                 }
+             }
+             checkRange("picos of micro", picosOfMicro, 0, PICOSECONDS_PER_MICROSECOND - 1);
+-            return formatTimestamp(checkPrecision(precision), epochMicros, picosOfMicro);
++            return ProtobufValueFormatter.formatTimestamp(checkPrecision(precision), epochMicros, picosOfMicro);
+         }
+     }
+ 
+     private static class TimestampWithTimeZoneDecoder
+             extends MessageDecoder
+     {
++        // The zone id of the last value: a column usually holds one zone, so the text is decoded
++        // once. The entry is immutable and the field is only a hint, so a racing thread sees either
++        // a complete entry or none
++        private ZoneId lastZoneId;
++
+         TimestampWithTimeZoneDecoder()
+         {
+             super(VALUE_TIMESTAMP_WITH_TIME_ZONE);
+@@ -843,7 +824,7 @@ public final class ProtobufValueDecoders
+             long epochMillis = 0;
+             int picosOfMilli = 0;
+             int precision = 0;
+-            String zoneId = null;
++            ZoneId zoneId = null;
+             int offsetSeconds = 0;
+             while (reader.hasRemaining()) {
+                 int tag = reader.readTag();
+@@ -862,7 +843,7 @@ public final class ProtobufValueDecoders
+                         break;
+                     case TIMESTAMP_WITH_TIME_ZONE_ZONE_ID:
+                         expectWireType(tag, WIRETYPE_LENGTH_DELIMITED);
+-                        zoneId = reader.readString(reader.readLength());
++                        zoneId = readZoneId(reader);
+                         break;
+                     case TIMESTAMP_WITH_TIME_ZONE_OFFSET_SECONDS:
+                         expectWireType(tag, WIRETYPE_VARINT);
+@@ -879,7 +860,44 @@ public final class ProtobufValueDecoders
+             checkRange("offset seconds", offsetSeconds, -MAX_OFFSET_SECONDS, MAX_OFFSET_SECONDS);
+             // The server resolves the offset with its own time zone rules, so the client renders the
+             // local date-time the json encoding would have, even for a zone the client does not know
+-            return formatTimestampWithTimeZone(checkPrecision(precision), epochMillis, picosOfMilli, ZoneOffset.ofTotalSeconds(offsetSeconds), zoneId);
++            return ProtobufValueFormatter.formatTimestampWithTimeZone(checkPrecision(precision), epochMillis, picosOfMilli, offsetSeconds, zoneId.id, zoneId.ascii);
++        }
++
++        private ZoneId readZoneId(ProtobufWireReader reader)
++        {
++            int length = reader.readLength();
++            ZoneId cached = lastZoneId;
++            if (cached != null && reader.skipIfEqual(length, cached.utf8)) {
++                return cached;
++            }
++            ZoneId zoneId = new ZoneId(reader.readBytes(length));
++            lastZoneId = zoneId;
++            return zoneId;
++        }
++    }
++
++    private static final class ZoneId
++    {
++        private final byte[] utf8;
++        private final String id;
++        // the bytes again when they are all ASCII, which every zone id Trino knows is, otherwise null
++        private final byte[] ascii;
++
++        private ZoneId(byte[] utf8)
++        {
++            this.utf8 = utf8;
++            this.id = new String(utf8, UTF_8);
++            this.ascii = isAscii(utf8) ? utf8 : null;
++        }
++
++        private static boolean isAscii(byte[] bytes)
++        {
++            for (byte b : bytes) {
++                if (b < 0) {
++                    return false;
++                }
++            }
++            return true;
+         }
+     }
+ 
+@@ -956,10 +974,9 @@ public final class ProtobufValueDecoders
+                     case NUMBER_DECIMAL:
+                         expectWireType(tag, WIRETYPE_LENGTH_DELIMITED);
+                         int previousLimit = reader.pushLimit(reader.readLength());
+-                        DecimalValue decimal = readDecimal(reader);
+-                        reader.popLimit(previousLimit);
+                         // NUMBER renders through BigDecimal, which switches to scientific notation for small values
+-                        value = new BigDecimal(decimal.unscaled(), decimal.scale).toString();
++                        value = readBigDecimal(reader).toString();
++                        reader.popLimit(previousLimit);
+                         break;
+                     case NUMBER_SPECIAL:
+                         expectWireType(tag, WIRETYPE_VARINT);
+@@ -1224,118 +1241,4 @@ public final class ProtobufValueDecoders
+         }
+         return precision;
+     }
+-
+-    // The formatting below mirrors SqlDecimal, SqlTime, SqlTimeWithTimeZone, SqlTimestamp and
+-    // SqlTimestampWithTimeZone in trino-spi, which the client cannot depend on.
+-
+-    private static String formatDecimal(DecimalValue decimal)
+-    {
+-        String unscaled = decimal.unscaledText();
+-        int scale = decimal.scale;
+-        StringBuilder result = new StringBuilder(unscaled.length() + 2);
+-        if (unscaled.startsWith("-")) {
+-            result.append('-');
+-            unscaled = unscaled.substring(1);
+-        }
+-        if (unscaled.length() <= scale) {
+-            result.append('0');
+-        }
+-        else {
+-            result.append(unscaled, 0, unscaled.length() - scale);
+-        }
+-        if (scale > 0) {
+-            result.append('.');
+-            for (int i = unscaled.length(); i < scale; i++) {
+-                result.append('0');
+-            }
+-            result.append(unscaled, Math.max(0, unscaled.length() - scale), unscaled.length());
+-        }
+-        return result.toString();
+-    }
+-
+-    private static void formatTime(long picos, int precision, StringBuilder builder)
+-    {
+-        appendTwoDigits((int) (picos / PICOSECONDS_PER_HOUR), builder);
+-        builder.append(':');
+-        appendTwoDigits((int) ((picos / PICOSECONDS_PER_MINUTE) % 60), builder);
+-        builder.append(':');
+-        appendTwoDigits((int) ((picos / PICOSECONDS_PER_SECOND) % 60), builder);
+-        if (precision > 0) {
+-            appendFraction((picos % PICOSECONDS_PER_SECOND) / POWERS_OF_TEN[MAX_PRECISION - precision], precision, builder);
+-        }
+-    }
+-
+-    static String formatTimestamp(int precision, long epochMicros, int picosOfMicro)
+-    {
+-        LocalDateTime dateTime = LocalDateTime.ofEpochSecond(floorDiv(epochMicros, MICROSECONDS_PER_SECOND), 0, ZoneOffset.UTC);
+-        long picoFraction = floorMod(epochMicros, MICROSECONDS_PER_SECOND) * PICOSECONDS_PER_MICROSECOND + picosOfMicro;
+-        StringBuilder builder = new StringBuilder(19 + (precision == 0 ? 0 : precision + 1));
+-        formatTimestamp(precision, dateTime, picoFraction, builder);
+-        return builder.toString();
+-    }
+-
+-    static String formatTimestampWithTimeZone(int precision, long epochMillis, int picosOfMilli, ZoneOffset offset, String zoneId)
+-    {
+-        LocalDateTime dateTime = LocalDateTime.ofEpochSecond(floorDiv(epochMillis, MILLISECONDS_PER_SECOND), 0, offset);
+-        long picoFraction = floorMod(epochMillis, MILLISECONDS_PER_SECOND) * PICOSECONDS_PER_MILLISECOND + picosOfMilli;
+-        StringBuilder builder = new StringBuilder(20 + (precision == 0 ? 0 : precision + 1) + zoneId.length());
+-        formatTimestamp(precision, dateTime, picoFraction, builder);
+-        return builder.append(' ').append(zoneId).toString();
+-    }
+-
+-    private static void formatTimestamp(int precision, LocalDateTime dateTime, long picoFraction, StringBuilder builder)
+-    {
+-        formatDateTime(dateTime, builder);
+-        if (precision > 0) {
+-            appendFraction(picoFraction / POWERS_OF_TEN[MAX_PRECISION - precision], precision, builder);
+-        }
+-    }
+-
+-    /**
+-     * Formats like {@code DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss")}, the server's pattern, without
+-     * the formatter's overhead: a year beyond 9999 gets a plus sign, a negative year a minus sign.
+-     */
+-    @VisibleForTesting
+-    static void formatDateTime(LocalDateTime dateTime, StringBuilder builder)
+-    {
+-        int year = dateTime.getYear();
+-        if (year > 9999) {
+-            builder.append('+');
+-        }
+-        else if (year < 0) {
+-            builder.append('-');
+-        }
+-        int absoluteYear = Math.abs(year);
+-        if (absoluteYear < 1000) {
+-            builder.append(absoluteYear < 10 ? "000" : absoluteYear < 100 ? "00" : "0");
+-        }
+-        builder.append(absoluteYear).append('-');
+-        appendTwoDigits(dateTime.getMonthValue(), builder);
+-        builder.append('-');
+-        appendTwoDigits(dateTime.getDayOfMonth(), builder);
+-        builder.append(' ');
+-        appendTwoDigits(dateTime.getHour(), builder);
+-        builder.append(':');
+-        appendTwoDigits(dateTime.getMinute(), builder);
+-        builder.append(':');
+-        appendTwoDigits(dateTime.getSecond(), builder);
+-    }
+-
+-    private static void appendFraction(long scaledFraction, int precision, StringBuilder builder)
+-    {
+-        builder.append('.');
+-        String digits = Long.toString(scaledFraction);
+-        for (int i = digits.length(); i < precision; i++) {
+-            builder.append('0');
+-        }
+-        builder.append(digits);
+-    }
+-
+-    private static void appendTwoDigits(int value, StringBuilder builder)
+-    {
+-        if (value < 10) {
+-            builder.append('0');
+-        }
+-        builder.append(value);
+-    }
+ }
+diff --git a/client/trino-client/src/main/java/io/trino/client/spooling/encoding/protobuf/ProtobufValueFormatter.java b/client/trino-client/src/main/java/io/trino/client/spooling/encoding/protobuf/ProtobufValueFormatter.java
+new file mode 100644
+index 00000000..01991911
+--- /dev/null
++++ b/client/trino-client/src/main/java/io/trino/client/spooling/encoding/protobuf/ProtobufValueFormatter.java
+@@ -0,0 +1,420 @@
++/*
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package io.trino.client.spooling.encoding.protobuf;
++
++import java.math.BigDecimal;
++import java.math.BigInteger;
++
++import static java.lang.Math.floorDiv;
++import static java.lang.Math.floorMod;
++import static java.nio.charset.StandardCharsets.ISO_8859_1;
++
++/**
++ * Formats the temporal and decimal values of the protobuf encoding as the text the json encoding
++ * carries, which is what the client API exposes. The json encoding formats on the server through
++ * {@code SqlDecimal}, {@code SqlDate}, {@code SqlTime}, {@code SqlTimestamp} and their time zone
++ * variants in trino-spi, which the client cannot depend on; the formats here are pinned to them by
++ * tests.
++ * <p>
++ * The text is written into a byte array of the exact length and turned into a Latin-1 string, which
++ * is one array copy. This is the hot path of a result with many decimals or timestamps, where the
++ * json decoder gets the text preformatted.
++ */
++final class ProtobufValueFormatter
++{
++    private static final long MICROSECONDS_PER_SECOND = 1_000_000;
++    private static final long MILLISECONDS_PER_SECOND = 1_000;
++    private static final long PICOSECONDS_PER_MICROSECOND = 1_000_000;
++    private static final long PICOSECONDS_PER_MILLISECOND = 1_000_000_000;
++    private static final long PICOSECONDS_PER_SECOND = 1_000_000_000_000L;
++    private static final int SECONDS_PER_DAY = 24 * 60 * 60;
++    private static final int MAX_PRECISION = 12;
++    private static final long[] POWERS_OF_TEN = {
++            1L,
++            10L,
++            100L,
++            1000L,
++            10_000L,
++            100_000L,
++            1_000_000L,
++            10_000_000L,
++            100_000_000L,
++            1_000_000_000L,
++            10_000_000_000L,
++            100_000_000_000L,
++            1_000_000_000_000L,
++            10_000_000_000_000L,
++            100_000_000_000_000L,
++            1_000_000_000_000_000L,
++            10_000_000_000_000_000L,
++            100_000_000_000_000_000L,
++            1_000_000_000_000_000_000L,
++    };
++    // digits of one 128-bit decimal word: the magnitude is divided by this until it is zero
++    private static final long DECIMAL_WORD = 1_000_000_000L;
++    private static final int DECIMAL_WORD_DIGITS = 9;
++    // 2^127 has 39 digits, which is five words
++    private static final int MAX_DECIMAL_DIGITS = 5 * DECIMAL_WORD_DIGITS;
++
++    private ProtobufValueFormatter() {}
++
++    /**
++     * Formats like {@code LocalDate.toString()}: {@code uuuu-MM-dd}, a year beyond 9999 with a plus
++     * sign, a negative year with a minus sign, both padded to four digits.
++     */
++    static String formatDate(long epochDay)
++    {
++        long date = civilDate(epochDay);
++        int year = yearOf(date);
++        int yearLength = yearLength(year);
++        byte[] buffer = new byte[yearLength + 6];
++        int index = writeYear(buffer, year, yearLength);
++        buffer[index++] = '-';
++        index = writeTwoDigits(buffer, index, monthOf(date));
++        buffer[index++] = '-';
++        writeTwoDigits(buffer, index, dayOf(date));
++        return latin1(buffer);
++    }
++
++    /**
++     * Formats like {@code SqlTime}: {@code HH:mm:ss}, followed by {@code precision} fraction digits
++     * after a point when {@code precision} is positive.
++     */
++    static String formatTime(int precision, long picos)
++    {
++        byte[] buffer = new byte[8 + fractionLength(precision)];
++        writeTime(buffer, 0, precision, picos);
++        return latin1(buffer);
++    }
++
++    /**
++     * Formats like {@code SqlTimeWithTimeZone}: the time followed by the offset as {@code +HH:mm}.
++     */
++    static String formatTimeWithTimeZone(int precision, long picos, int offsetMinutes)
++    {
++        byte[] buffer = new byte[8 + fractionLength(precision) + 6];
++        int index = writeTime(buffer, 0, precision, picos);
++        writeOffset(buffer, index, offsetMinutes);
++        return latin1(buffer);
++    }
++
++    /**
++     * Formats like {@code SqlTimestamp}: {@code uuuu-MM-dd HH:mm:ss} as {@code DateTimeFormatter}
++     * renders it, followed by {@code precision} fraction digits after a point when {@code precision}
++     * is positive.
++     */
++    static String formatTimestamp(int precision, long epochMicros, int picosOfMicro)
++    {
++        long epochSecond = floorDiv(epochMicros, MICROSECONDS_PER_SECOND);
++        long picoFraction = floorMod(epochMicros, MICROSECONDS_PER_SECOND) * PICOSECONDS_PER_MICROSECOND + picosOfMicro;
++        long date = civilDate(floorDiv(epochSecond, SECONDS_PER_DAY));
++        byte[] buffer = new byte[dateTimeLength(date, precision)];
++        writeDateTime(buffer, date, epochSecond, picoFraction, precision);
++        return latin1(buffer);
++    }
++
++    /**
++     * Formats like {@code SqlTimestampWithTimeZone}: the local date-time at {@code offsetSeconds}
++     * followed by a space and the zone id. The zone id is given as text and, when it is ASCII, as the
++     * bytes of that text, so a cached zone id costs no conversion.
++     */
++    static String formatTimestampWithTimeZone(int precision, long epochMillis, int picosOfMilli, int offsetSeconds, String zoneId, byte[] asciiZoneId)
++    {
++        long epochSecond = floorDiv(epochMillis, MILLISECONDS_PER_SECOND) + offsetSeconds;
++        long picoFraction = floorMod(epochMillis, MILLISECONDS_PER_SECOND) * PICOSECONDS_PER_MILLISECOND + picosOfMilli;
++        long date = civilDate(floorDiv(epochSecond, SECONDS_PER_DAY));
++        int dateTimeLength = dateTimeLength(date, precision);
++        if (asciiZoneId == null) {
++            byte[] buffer = new byte[dateTimeLength];
++            writeDateTime(buffer, date, epochSecond, picoFraction, precision);
++            return latin1(buffer) + " " + zoneId;
++        }
++        byte[] buffer = new byte[dateTimeLength + 1 + asciiZoneId.length];
++        int index = writeDateTime(buffer, date, epochSecond, picoFraction, precision);
++        buffer[index++] = ' ';
++        System.arraycopy(asciiZoneId, 0, buffer, index, asciiZoneId.length);
++        return latin1(buffer);
++    }
++
++    /**
++     * Formats like {@code SqlDecimal}: plain notation with exactly {@code scale} fraction digits, and
++     * a zero before the point when the value is below one.
++     */
++    static String formatDecimal(long unscaled, int scale)
++    {
++        boolean negative = unscaled < 0;
++        // the magnitude is kept negative, which has room for Long.MIN_VALUE
++        long magnitude = negative ? unscaled : -unscaled;
++        int digits = digitsOfNegative(magnitude);
++        byte[] buffer = new byte[decimalLength(negative, digits, scale)];
++        int index = buffer.length;
++        if (scale > 0) {
++            for (int i = 0; i < scale; i++) {
++                buffer[--index] = (byte) ('0' - (magnitude % 10));
++                magnitude /= 10;
++            }
++            buffer[--index] = '.';
++        }
++        if (magnitude == 0) {
++            buffer[--index] = '0';
++        }
++        while (magnitude != 0) {
++            buffer[--index] = (byte) ('0' - (magnitude % 10));
++            magnitude /= 10;
++        }
++        if (negative) {
++            buffer[--index] = '-';
++        }
++        return latin1(buffer);
++    }
++
++    /**
++     * Formats the unscaled value given as big-endian two's complement bytes, as {@code BigInteger}
++     * writes it. A value of up to 128 bits, which covers every Trino decimal, is converted without
++     * a {@code BigInteger}.
++     */
++    static String formatDecimal(byte[] unscaled, int scale)
++    {
++        if (unscaled.length > 16) {
++            return new BigDecimal(new BigInteger(unscaled), scale).toPlainString();
++        }
++        long high = unscaled[0] < 0 ? -1 : 0;
++        long low = high;
++        for (byte b : unscaled) {
++            high = (high << 8) | (low >>> 56);
++            low = (low << 8) | (b & 0xFF);
++        }
++        boolean negative = high < 0;
++        if (negative) {
++            low = -low;
++            high = ~high + (low == 0 ? 1 : 0);
++        }
++        if (high == 0 && low >= 0) {
++            return formatDecimal(negative ? -low : low, scale);
++        }
++
++        // Divide the unsigned 128-bit magnitude, as four 32-bit words, by 10^9 until it is zero;
++        // each remainder is nine digits
++        long word0 = high >>> 32;
++        long word1 = high & 0xFFFF_FFFFL;
++        long word2 = low >>> 32;
++        long word3 = low & 0xFFFF_FFFFL;
++        byte[] digits = new byte[MAX_DECIMAL_DIGITS];
++        int start = digits.length;
++        while ((word0 | word1 | word2 | word3) != 0) {
++            long remainder = word0 % DECIMAL_WORD;
++            word0 /= DECIMAL_WORD;
++            long current = (remainder << 32) | word1;
++            word1 = current / DECIMAL_WORD;
++            remainder = current % DECIMAL_WORD;
++            current = (remainder << 32) | word2;
++            word2 = current / DECIMAL_WORD;
++            remainder = current % DECIMAL_WORD;
++            current = (remainder << 32) | word3;
++            word3 = current / DECIMAL_WORD;
++            remainder = current % DECIMAL_WORD;
++            for (int i = 0; i < DECIMAL_WORD_DIGITS; i++) {
++                digits[--start] = (byte) ('0' + (remainder % 10));
++                remainder /= 10;
++            }
++        }
++        while (start < digits.length - 1 && digits[start] == '0') {
++            start++;
++        }
++        int digitCount = digits.length - start;
++
++        byte[] buffer = new byte[decimalLength(negative, digitCount, scale)];
++        int index = 0;
++        if (negative) {
++            buffer[index++] = '-';
++        }
++        if (digitCount <= scale) {
++            buffer[index++] = '0';
++        }
++        else {
++            System.arraycopy(digits, start, buffer, index, digitCount - scale);
++            index += digitCount - scale;
++        }
++        if (scale > 0) {
++            buffer[index++] = '.';
++            for (int i = digitCount; i < scale; i++) {
++                buffer[index++] = '0';
++            }
++            System.arraycopy(digits, start + Math.max(0, digitCount - scale), buffer, index, Math.min(digitCount, scale));
++        }
++        return latin1(buffer);
++    }
++
++    private static int decimalLength(boolean negative, int digits, int scale)
++    {
++        return (negative ? 1 : 0) + (digits <= scale ? 1 : digits - scale) + (scale > 0 ? scale + 1 : 0);
++    }
++
++    private static int digitsOfNegative(long value)
++    {
++        for (int digits = 1; digits < POWERS_OF_TEN.length; digits++) {
++            if (value > -POWERS_OF_TEN[digits]) {
++                return digits;
++            }
++        }
++        return POWERS_OF_TEN.length;
++    }
++
++    private static int dateTimeLength(long date, int precision)
++    {
++        return yearLength(yearOf(date)) + 15 + fractionLength(precision);
++    }
++
++    private static int fractionLength(int precision)
++    {
++        return precision == 0 ? 0 : precision + 1;
++    }
++
++    /**
++     * Writes {@code uuuu-MM-dd HH:mm:ss} and the fraction, and returns the index after them. The date is
++     * the packed civil date of the day of {@code epochSecond}.
++     */
++    private static int writeDateTime(byte[] buffer, long date, long epochSecond, long picoFraction, int precision)
++    {
++        int secondOfDay = (int) floorMod(epochSecond, SECONDS_PER_DAY);
++        int year = yearOf(date);
++        int index = writeYear(buffer, year, yearLength(year));
++        buffer[index++] = '-';
++        index = writeTwoDigits(buffer, index, monthOf(date));
++        buffer[index++] = '-';
++        index = writeTwoDigits(buffer, index, dayOf(date));
++        buffer[index++] = ' ';
++        index = writeTwoDigits(buffer, index, secondOfDay / 3600);
++        buffer[index++] = ':';
++        index = writeTwoDigits(buffer, index, (secondOfDay / 60) % 60);
++        buffer[index++] = ':';
++        index = writeTwoDigits(buffer, index, secondOfDay % 60);
++        return writeFraction(buffer, index, precision, picoFraction);
++    }
++
++    private static int writeTime(byte[] buffer, int index, int precision, long picos)
++    {
++        int secondOfDay = (int) (picos / PICOSECONDS_PER_SECOND);
++        index = writeTwoDigits(buffer, index, secondOfDay / 3600);
++        buffer[index++] = ':';
++        index = writeTwoDigits(buffer, index, (secondOfDay / 60) % 60);
++        buffer[index++] = ':';
++        index = writeTwoDigits(buffer, index, secondOfDay % 60);
++        return writeFraction(buffer, index, precision, picos % PICOSECONDS_PER_SECOND);
++    }
++
++    private static int writeFraction(byte[] buffer, int index, int precision, long picoFraction)
++    {
++        if (precision == 0) {
++            return index;
++        }
++        buffer[index++] = '.';
++        long fraction = picoFraction / POWERS_OF_TEN[MAX_PRECISION - precision];
++        for (int i = index + precision - 1; i >= index; i--) {
++            buffer[i] = (byte) ('0' + (fraction % 10));
++            fraction /= 10;
++        }
++        return index + precision;
++    }
++
++    private static void writeOffset(byte[] buffer, int index, int offsetMinutes)
++    {
++        buffer[index++] = (byte) (offsetMinutes >= 0 ? '+' : '-');
++        int magnitude = Math.abs(offsetMinutes);
++        index = writeTwoDigits(buffer, index, magnitude / 60);
++        buffer[index++] = ':';
++        writeTwoDigits(buffer, index, magnitude % 60);
++    }
++
++    private static int yearLength(int year)
++    {
++        if (year < 0) {
++            return 1 + Math.max(4, digitsOfNegative(year));
++        }
++        if (year > 9999) {
++            return 1 + digitsOfNegative(-year);
++        }
++        return 4;
++    }
++
++    /**
++     * Writes the year as {@code uuuu} of {@code DateTimeFormatter} and {@code LocalDate.toString()}
++     * do: at least four digits, a minus sign for a negative year and a plus sign beyond 9999.
++     */
++    private static int writeYear(byte[] buffer, int year, int yearLength)
++    {
++        int index = 0;
++        if (year < 0) {
++            buffer[index++] = '-';
++        }
++        else if (year > 9999) {
++            buffer[index++] = '+';
++        }
++        // negative, which has room for Integer.MIN_VALUE
++        int magnitude = year < 0 ? year : -year;
++        for (int i = yearLength - 1; i >= index; i--) {
++            buffer[i] = (byte) ('0' - (magnitude % 10));
++            magnitude /= 10;
++        }
++        return yearLength;
++    }
++
++    private static int writeTwoDigits(byte[] buffer, int index, int value)
++    {
++        buffer[index] = (byte) ('0' + value / 10);
++        buffer[index + 1] = (byte) ('0' + value % 10);
++        return index + 2;
++    }
++
++    /**
++     * The proleptic Gregorian year, month and day of a day since 1970-01-01, packed as
++     * {@code year << 16 | month << 8 | day}. The year is in the range of {@code LocalDate}, and the
++     * day is in the range of Trino's temporal types.
++     */
++    private static long civilDate(long epochDay)
++    {
++        // Days since 0000-03-01, in eras of 400 years (146,097 days); the year starts in March so
++        // that the leap day is the last day of the year
++        long shifted = epochDay + 719_468;
++        long era = floorDiv(shifted, 146_097);
++        long dayOfEra = shifted - era * 146_097;
++        long yearOfEra = (dayOfEra - dayOfEra / 1460 + dayOfEra / 36_524 - dayOfEra / 146_096) / 365;
++        long dayOfYear = dayOfEra - (365 * yearOfEra + yearOfEra / 4 - yearOfEra / 100);
++        long shiftedMonth = (5 * dayOfYear + 2) / 153;
++        long day = dayOfYear - (153 * shiftedMonth + 2) / 5 + 1;
++        long month = shiftedMonth < 10 ? shiftedMonth + 3 : shiftedMonth - 9;
++        long year = yearOfEra + era * 400 + (month <= 2 ? 1 : 0);
++        return (year << 16) | (month << 8) | day;
++    }
++
++    private static int yearOf(long packed)
++    {
++        return (int) (packed >> 16);
++    }
++
++    private static int monthOf(long packed)
++    {
++        return (int) ((packed >> 8) & 0xFF);
++    }
++
++    private static int dayOf(long packed)
++    {
++        return (int) (packed & 0xFF);
++    }
++
++    private static String latin1(byte[] buffer)
++    {
++        return new String(buffer, ISO_8859_1);
++    }
++}
+diff --git a/client/trino-client/src/main/java/io/trino/client/spooling/encoding/protobuf/ProtobufWireReader.java b/client/trino-client/src/main/java/io/trino/client/spooling/encoding/protobuf/ProtobufWireReader.java
+index 9d21d928..7c10bab6 100644
+--- a/client/trino-client/src/main/java/io/trino/client/spooling/encoding/protobuf/ProtobufWireReader.java
++++ b/client/trino-client/src/main/java/io/trino/client/spooling/encoding/protobuf/ProtobufWireReader.java
+@@ -32,6 +32,8 @@ import static java.nio.charset.StandardCharsets.UTF_8;
+  */
+ public final class ProtobufWireReader
+ {
++    private static final int MAX_VARINT_SIZE = 10;
++
+     private byte[] buffer = new byte[0];
+     private int position;
+     private int limit;
+@@ -107,12 +109,32 @@ public final class ProtobufWireReader
+     }
+ 
+     public long readVarint64()
++    {
++        byte[] buffer = this.buffer;
++        int position = this.position;
++        if (limit - position < MAX_VARINT_SIZE) {
++            return readVarint64Checked();
++        }
++        // enough bytes for the longest varint: no bounds check per byte
++        long result = 0;
++        for (int shift = 0; shift < 64; shift += 7) {
++            byte b = buffer[position++];
++            result |= (long) (b & 0x7F) << shift;
++            if (b >= 0) {
++                this.position = position;
++                return result;
++            }
++        }
++        throw new ProtobufFormatException("Malformed varint at position " + this.position);
++    }
++
++    private long readVarint64Checked()
+     {
+         long result = 0;
+         for (int shift = 0; shift < 64; shift += 7) {
+             byte b = readByte();
+             result |= (long) (b & 0x7F) << shift;
+-            if ((b & 0x80) == 0) {
++            if (b >= 0) {
+                 return result;
+             }
+         }
+@@ -196,6 +218,23 @@ public final class ProtobufWireReader
+         return result;
+     }
+ 
++    /**
++     * Consumes the next {@code length} bytes when they are exactly {@code expected}, and returns whether
++     * they were; otherwise nothing is consumed.
++     */
++    public boolean skipIfEqual(int length, byte[] expected)
++    {
++        if (length != expected.length) {
++            return false;
++        }
++        ensureRemaining(length);
++        if (!Arrays.equals(buffer, position, position + length, expected, 0, length)) {
++            return false;
++        }
++        position += length;
++        return true;
++    }
++
+     public void skip(int length)
+     {
+         ensureRemaining(length);
+diff --git a/client/trino-client/src/test/java/io/trino/client/spooling/encoding/protobuf/TestProtobufQueryDataDecoder.java b/client/trino-client/src/test/java/io/trino/client/spooling/encoding/protobuf/TestProtobufQueryDataDecoder.java
+index d7179c24..d4cb4dd8 100644
+--- a/client/trino-client/src/test/java/io/trino/client/spooling/encoding/protobuf/TestProtobufQueryDataDecoder.java
++++ b/client/trino-client/src/test/java/io/trino/client/spooling/encoding/protobuf/TestProtobufQueryDataDecoder.java
+@@ -52,9 +52,6 @@ import java.io.IOException;
+ import java.io.InputStream;
+ import java.io.UncheckedIOException;
+ import java.math.BigInteger;
+-import java.time.LocalDateTime;
+-import java.time.ZoneOffset;
+-import java.time.format.DateTimeFormatter;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.HashMap;
+@@ -92,6 +89,7 @@ import static io.trino.client.ClientStandardTypes.VARBINARY;
+ import static io.trino.client.ClientStandardTypes.VARCHAR;
+ import static io.trino.client.ClientStandardTypes.VARIANT;
+ import static io.trino.client.ClientTypeSignature.VARCHAR_UNBOUNDED_LENGTH;
++import static java.lang.String.format;
+ import static java.util.Collections.singletonList;
+ import static org.assertj.core.api.Assertions.assertThat;
+ import static org.assertj.core.api.Assertions.assertThatThrownBy;
+@@ -291,26 +289,6 @@ public class TestProtobufQueryDataDecoder
+                 .isInstanceOf(ProtobufFormatException.class);
+     }
+ 
+-    @Test
+-    public void testDateTimeFormatMatchesServerPattern()
+-    {
+-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss");
+-        List<LocalDateTime> values = new ArrayList<>();
+-        for (int year : new int[] {-292275, -10000, -9999, -1000, -999, -100, -99, -10, -9, -1, 0, 1, 9, 10, 99, 100, 999, 1000, 1970, 9999, 10000, 99999, 294247}) {
+-            values.add(LocalDateTime.of(year, 1, 1, 0, 0, 0));
+-            values.add(LocalDateTime.of(year, 12, 31, 23, 59, 59));
+-        }
+-        Random random = new Random(1);
+-        for (int i = 0; i < 10_000; i++) {
+-            values.add(LocalDateTime.ofEpochSecond((long) ((random.nextDouble() * 2 - 1) * 9_223_372_036_854L), 0, ZoneOffset.UTC));
+-        }
+-        for (LocalDateTime value : values) {
+-            StringBuilder builder = new StringBuilder();
+-            ProtobufValueDecoders.formatDateTime(value, builder);
+-            assertThat(builder.toString()).as("%s", value).isEqualTo(formatter.format(value));
+-        }
+-    }
+-
+     @Test
+     public void testIntervals()
+     {
+@@ -712,6 +690,47 @@ public class TestProtobufQueryDataDecoder
+         assertThat(closed[0]).isTrue();
+     }
+ 
++    @Test
++    public void testZoneIdIsReused()
++    {
++        // The zone id of the previous value is reused when the bytes match, and only then
++        Column column = column(TIMESTAMP_WITH_TIME_ZONE);
++        List<String> zones = ImmutableList.of("UTC", "UTC", "UTX", "UTC", "America/Los_Angeles", "America/Los_Angelos", "Zone/Zürich", "Zone/Zürich", "UTC", "+05:30", "-05:30");
++        Segment.Builder segment = Segment.newBuilder();
++        List<List<Object>> expected = new ArrayList<>();
++        for (int i = 0; i < zones.size(); i++) {
++            segment.addRows(io.trino.client.spooling.encoding.protobuf.generated.Row.newBuilder()
++                    .addValues(Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(i * 1000L).setPrecision(3).setZoneId(zones.get(i)).setOffsetSeconds(i)))
++                    .addValues(Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(0).setPrecision(0).setZoneId("Europe/Warsaw").setOffsetSeconds(3600))));
++            expected.add(ImmutableList.of(format("1970-01-01 00:00:%02d.000 %s", 2 * i, zones.get(i)), "1970-01-01 01:00:00 Europe/Warsaw"));
++        }
++        assertThat(decode(ImmutableList.of(column, column), segment.build().toByteArray(), false)).isEqualTo(expected);
++        assertThatThrownBy(() -> decode(column, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(0).setPrecision(0).setZoneId(""))))
++                .isInstanceOf(ProtobufFormatException.class)
++                .hasMessage("Timestamp with time zone has no zone id");
++    }
++
++    @Test
++    public void testDecimalBytesForms()
++    {
++        Column decimal = column(DECIMAL);
++        BigInteger value = new BigInteger("-123456789012345678901234567890");
++        // the minimal two's complement form, the 16 bytes of a 128-bit integer, and a longer sign extension
++        for (int length : new int[] {13, 16, 20}) {
++            byte[] bytes = new byte[length];
++            Arrays.fill(bytes, (byte) 0xFF);
++            byte[] minimal = value.toByteArray();
++            System.arraycopy(minimal, 0, bytes, length - minimal.length, minimal.length);
++            assertDecodes(decimal, Value.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledBytes(ByteString.copyFrom(bytes)).setScale(10)), "-12345678901234567890.1234567890");
++        }
++        // a positive value with the leading zero byte that keeps it positive
++        assertDecodes(decimal, Value.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledBytes(ByteString.copyFrom(BigInteger.ONE.shiftLeft(63).toByteArray())).setScale(0)), "9223372036854775808");
++        assertDecodes(decimal, Value.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledBytes(ByteString.copyFrom(BigInteger.ONE.shiftLeft(127).negate().toByteArray())).setScale(38)), "-1.70141183460469231731687303715884105728");
++        assertDecodes(decimal, Value.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledBytes(ByteString.copyFrom(BigInteger.ONE.shiftLeft(127).subtract(BigInteger.ONE).toByteArray())).setScale(0)), "170141183460469231731687303715884105727");
++        // the last of two unscaled fields wins, as for any proto3 field
++        assertDecodes(decimal, Value.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledBytes(ByteString.copyFrom(BigInteger.TEN.toByteArray())).setUnscaledLong(5).setScale(1)), "0.5");
++    }
++
+     @Test
+     public void testCompressedEncodings()
+             throws IOException
+diff --git a/client/trino-client/src/test/java/io/trino/client/spooling/encoding/protobuf/TestProtobufValueFormatter.java b/client/trino-client/src/test/java/io/trino/client/spooling/encoding/protobuf/TestProtobufValueFormatter.java
+new file mode 100644
+index 00000000..39ec1829
+--- /dev/null
++++ b/client/trino-client/src/test/java/io/trino/client/spooling/encoding/protobuf/TestProtobufValueFormatter.java
+@@ -0,0 +1,283 @@
++/*
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package io.trino.client.spooling.encoding.protobuf;
++
++import org.junit.jupiter.api.Test;
++
++import java.math.BigDecimal;
++import java.math.BigInteger;
++import java.time.LocalDate;
++import java.time.LocalDateTime;
++import java.time.LocalTime;
++import java.time.ZoneOffset;
++import java.time.format.DateTimeFormatter;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.List;
++import java.util.Random;
++
++import static io.trino.client.spooling.encoding.protobuf.ProtobufValueFormatter.formatDate;
++import static io.trino.client.spooling.encoding.protobuf.ProtobufValueFormatter.formatDecimal;
++import static io.trino.client.spooling.encoding.protobuf.ProtobufValueFormatter.formatTime;
++import static io.trino.client.spooling.encoding.protobuf.ProtobufValueFormatter.formatTimeWithTimeZone;
++import static io.trino.client.spooling.encoding.protobuf.ProtobufValueFormatter.formatTimestamp;
++import static io.trino.client.spooling.encoding.protobuf.ProtobufValueFormatter.formatTimestampWithTimeZone;
++import static java.lang.Math.floorDiv;
++import static java.lang.Math.floorMod;
++import static java.nio.charset.StandardCharsets.UTF_8;
++import static org.assertj.core.api.Assertions.assertThat;
++
++/**
++ * Pins the hand-written formats to the java.time and BigDecimal formats the server uses for the json
++ * encoding, over the edges of each range and random values.
++ */
++public class TestProtobufValueFormatter
++{
++    private static final DateTimeFormatter DATE_TIME_FORMATTER = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss");
++    private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
++    private static final long PICOSECONDS_PER_SECOND = 1_000_000_000_000L;
++    private static final long PICOSECONDS_PER_DAY = 24 * 60 * 60 * PICOSECONDS_PER_SECOND;
++    private static final int[] YEARS = {-999_999_999, -292_275, -10000, -9999, -1000, -999, -100, -99, -10, -9, -1, 0, 1, 9, 10, 99, 100, 999, 1000, 1582, 1600, 1900, 1970, 2000, 2024, 9999, 10000, 99999, 294247, 999_999_999};
++
++    @Test
++    public void testDate()
++    {
++        List<Long> days = new ArrayList<>();
++        for (int year : YEARS) {
++            for (int month = 1; month <= 12; month++) {
++                LocalDate first = LocalDate.of(year, month, 1);
++                days.add(first.toEpochDay());
++                days.add(first.toEpochDay() + first.lengthOfMonth() - 1);
++            }
++        }
++        for (long day = -1000; day <= 1000; day++) {
++            days.add(day);
++        }
++        days.add((long) Integer.MIN_VALUE);
++        days.add((long) Integer.MAX_VALUE);
++        Random random = new Random(1);
++        for (int i = 0; i < 100_000; i++) {
++            days.add((long) random.nextInt());
++        }
++        for (long day : days) {
++            assertThat(formatDate(day)).as("day %s", day).isEqualTo(LocalDate.ofEpochDay(day).toString());
++        }
++    }
++
++    @Test
++    public void testTimestamp()
++    {
++        List<Long> values = new ArrayList<>();
++        for (int year : YEARS) {
++            if (year < -292_275 || year > 292_277) {
++                // outside the range of epoch microseconds
++                continue;
++            }
++            values.add(LocalDateTime.of(year, 1, 1, 0, 0, 0).toEpochSecond(ZoneOffset.UTC) * 1_000_000);
++            values.add(LocalDateTime.of(year, 12, 31, 23, 59, 59).toEpochSecond(ZoneOffset.UTC) * 1_000_000 + 999_999);
++            values.add(LocalDateTime.of(year, 2, 28, 12, 0, 0).toEpochSecond(ZoneOffset.UTC) * 1_000_000 + 1);
++        }
++        for (long micros = -2_000_000; micros <= 2_000_000; micros += 7) {
++            values.add(micros);
++        }
++        values.add(Long.MIN_VALUE);
++        values.add(Long.MAX_VALUE);
++        Random random = new Random(2);
++        for (int i = 0; i < 20_000; i++) {
++            values.add(random.nextLong());
++        }
++        for (long epochMicros : values) {
++            int picosOfMicro = random.nextInt(1_000_000);
++            for (int precision = 0; precision <= 12; precision++) {
++                String expected = expectedTimestamp(precision, epochMicros, picosOfMicro, 0);
++                assertThat(formatTimestamp(precision, epochMicros, picosOfMicro))
++                        .as("micros %s picos %s precision %s", epochMicros, picosOfMicro, precision)
++                        .isEqualTo(expected);
++            }
++        }
++    }
++
++    @Test
++    public void testTimestampWithTimeZone()
++    {
++        Random random = new Random(3);
++        String[] zones = {"UTC", "America/Los_Angeles", "+05:30", "-18:00", "Europe/Warsaw", "Etc/GMT+12", "Mars/Olympus_Mons"};
++        List<Long> values = new ArrayList<>();
++        for (long millis = -2000; millis <= 2000; millis++) {
++            values.add(millis);
++        }
++        values.add(Long.MIN_VALUE);
++        values.add(Long.MAX_VALUE);
++        for (int i = 0; i < 50_000; i++) {
++            values.add(random.nextLong() >> random.nextInt(64));
++        }
++        for (long epochMillis : values) {
++            int picosOfMilli = random.nextInt(1_000_000_000);
++            int offsetSeconds = random.nextInt(2 * 18 * 3600 + 1) - 18 * 3600;
++            int precision = random.nextInt(13);
++            String zone = zones[random.nextInt(zones.length)];
++            String expected = expectedDateTime(precision, floorDiv(epochMillis, 1000), floorMod(epochMillis, 1000L) * 1_000_000_000 + picosOfMilli, offsetSeconds) + " " + zone;
++            assertThat(formatTimestampWithTimeZone(precision, epochMillis, picosOfMilli, offsetSeconds, zone, zone.getBytes(UTF_8)))
++                    .as("millis %s picos %s offset %s precision %s zone %s", epochMillis, picosOfMilli, offsetSeconds, precision, zone)
++                    .isEqualTo(expected);
++            // the zone id text without its bytes, the path of a zone id that is not ASCII
++            assertThat(formatTimestampWithTimeZone(precision, epochMillis, picosOfMilli, offsetSeconds, zone, null)).isEqualTo(expected);
++        }
++        assertThat(formatTimestampWithTimeZone(3, 0, 0, 0, "Zone/Zürich", null)).isEqualTo("1970-01-01 00:00:00.000 Zone/Zürich");
++        assertThat(formatTimestampWithTimeZone(0, Long.MAX_VALUE, 999_999_999, 18 * 3600, "+18:00", "+18:00".getBytes(UTF_8)))
++                .isEqualTo(expectedDateTime(0, floorDiv(Long.MAX_VALUE, 1000), 0, 18 * 3600) + " +18:00");
++        assertThat(formatTimestampWithTimeZone(12, Long.MIN_VALUE, 0, -18 * 3600, "-18:00", "-18:00".getBytes(UTF_8)))
++                .isEqualTo(expectedDateTime(12, floorDiv(Long.MIN_VALUE, 1000), floorMod(Long.MIN_VALUE, 1000L) * 1_000_000_000, -18 * 3600) + " -18:00");
++    }
++
++    @Test
++    public void testTime()
++    {
++        List<Long> values = new ArrayList<>();
++        for (long picos = 0; picos < 3_000_000_000_000L; picos += 999_999_999_999L / 7) {
++            values.add(picos);
++        }
++        values.add(PICOSECONDS_PER_DAY - 1);
++        values.add(PICOSECONDS_PER_DAY - PICOSECONDS_PER_SECOND);
++        values.add(12 * 3600 * PICOSECONDS_PER_SECOND);
++        Random random = new Random(4);
++        for (int i = 0; i < 20_000; i++) {
++            values.add(floorMod(random.nextLong(), PICOSECONDS_PER_DAY));
++        }
++        for (long picos : values) {
++            for (int precision = 0; precision <= 12; precision++) {
++                String expected = TIME_FORMATTER.format(LocalTime.ofSecondOfDay(picos / PICOSECONDS_PER_SECOND)) + fraction(precision, picos % PICOSECONDS_PER_SECOND);
++                assertThat(formatTime(precision, picos)).as("picos %s precision %s", picos, precision).isEqualTo(expected);
++                int offsetMinutes = random.nextInt(2 * 14 * 60 + 1) - 14 * 60;
++                String offset = String.format("%s%02d:%02d", offsetMinutes < 0 ? "-" : "+", Math.abs(offsetMinutes) / 60, Math.abs(offsetMinutes) % 60);
++                assertThat(formatTimeWithTimeZone(precision, picos, offsetMinutes)).as("picos %s precision %s offset %s", picos, precision, offsetMinutes).isEqualTo(expected + offset);
++            }
++        }
++        assertThat(formatTimeWithTimeZone(0, 0, 0)).isEqualTo("00:00:00+00:00");
++        assertThat(formatTimeWithTimeZone(0, 0, -1)).isEqualTo("00:00:00-00:01");
++        assertThat(formatTimeWithTimeZone(0, 0, -14 * 60)).isEqualTo("00:00:00-14:00");
++        assertThat(formatTimeWithTimeZone(0, 0, 14 * 60)).isEqualTo("00:00:00+14:00");
++    }
++
++    @Test
++    public void testDecimalFromLong()
++    {
++        List<Long> values = new ArrayList<>();
++        for (long value = -1200; value <= 1200; value++) {
++            values.add(value);
++        }
++        for (int digits = 1; digits <= 19; digits++) {
++            long power = (long) Math.pow(10, digits - 1);
++            values.add(power);
++            values.add(-power);
++            values.add(power - 1);
++            values.add(1 - power);
++            values.add(power * 9 - 1);
++        }
++        values.add(Long.MIN_VALUE);
++        values.add(Long.MIN_VALUE + 1);
++        values.add(Long.MAX_VALUE);
++        values.add(Long.MAX_VALUE - 1);
++        Random random = new Random(5);
++        for (int i = 0; i < 20_000; i++) {
++            values.add(random.nextLong() >> random.nextInt(64));
++        }
++        for (long unscaled : values) {
++            for (int scale = 0; scale <= 40; scale++) {
++                String expected = new BigDecimal(BigInteger.valueOf(unscaled), scale).toPlainString();
++                assertThat(formatDecimal(unscaled, scale)).as("unscaled %s scale %s", unscaled, scale).isEqualTo(expected);
++            }
++        }
++    }
++
++    @Test
++    public void testDecimalFromBytes()
++    {
++        List<BigInteger> values = new ArrayList<>();
++        for (int bits = 0; bits <= 127; bits++) {
++            BigInteger power = BigInteger.ONE.shiftLeft(bits);
++            values.add(power);
++            values.add(power.negate());
++            values.add(power.subtract(BigInteger.ONE));
++            values.add(power.subtract(BigInteger.ONE).negate());
++            values.add(power.add(BigInteger.ONE));
++            values.add(power.add(BigInteger.ONE).negate());
++        }
++        for (int digits = 1; digits <= 39; digits++) {
++            BigInteger power = BigInteger.TEN.pow(digits - 1);
++            values.add(power);
++            values.add(power.negate());
++            values.add(power.multiply(BigInteger.TEN).subtract(BigInteger.ONE));
++            values.add(power.multiply(BigInteger.TEN).subtract(BigInteger.ONE).negate());
++        }
++        // the ends of the 128-bit range, and the largest Trino decimals
++        values.add(BigInteger.ONE.shiftLeft(127).negate());
++        values.add(BigInteger.ONE.shiftLeft(127).subtract(BigInteger.ONE));
++        values.add(BigInteger.TEN.pow(38).subtract(BigInteger.ONE));
++        values.add(BigInteger.TEN.pow(38).subtract(BigInteger.ONE).negate());
++        Random random = new Random(6);
++        for (int i = 0; i < 20_000; i++) {
++            BigInteger value = new BigInteger(random.nextInt(128), random);
++            values.add(random.nextBoolean() ? value : value.negate());
++        }
++        for (BigInteger unscaled : values) {
++            if (unscaled.bitLength() > 127) {
++                // outside the two's complement range of 128 bits
++                continue;
++            }
++            for (int scale : new int[] {0, 1, 2, 9, 10, 18, 19, 20, 37, 38, 39, 40, 45}) {
++                String expected = new BigDecimal(unscaled, scale).toPlainString();
++                assertThat(formatDecimal(unscaled.toByteArray(), scale)).as("unscaled %s scale %s", unscaled, scale).isEqualTo(expected);
++                // the same value sign-extended to 16 bytes, the raw form of a 128-bit integer
++                assertThat(formatDecimal(signExtend(unscaled, 16), scale)).as("unscaled %s scale %s, 16 bytes", unscaled, scale).isEqualTo(expected);
++            }
++        }
++        // beyond 128 bits, which no Trino decimal reaches, through BigInteger
++        BigInteger huge = BigInteger.ONE.shiftLeft(200).add(BigInteger.valueOf(12345));
++        assertThat(formatDecimal(huge.toByteArray(), 3)).isEqualTo(new BigDecimal(huge, 3).toPlainString());
++        assertThat(formatDecimal(huge.negate().toByteArray(), 0)).isEqualTo(huge.negate().toString());
++        assertThat(formatDecimal(signExtend(BigInteger.valueOf(-5), 20), 2)).isEqualTo("-0.05");
++    }
++
++    private static byte[] signExtend(BigInteger value, int length)
++    {
++        byte[] minimal = value.toByteArray();
++        byte[] extended = new byte[length];
++        if (value.signum() < 0) {
++            Arrays.fill(extended, (byte) 0xFF);
++        }
++        System.arraycopy(minimal, 0, extended, length - minimal.length, minimal.length);
++        return extended;
++    }
++
++    private static String expectedTimestamp(int precision, long epochMicros, int picosOfMicro, int offsetSeconds)
++    {
++        return expectedDateTime(precision, floorDiv(epochMicros, 1_000_000), floorMod(epochMicros, 1_000_000L) * 1_000_000 + picosOfMicro, offsetSeconds);
++    }
++
++    private static String expectedDateTime(int precision, long epochSecond, long picoFraction, int offsetSeconds)
++    {
++        LocalDateTime dateTime = LocalDateTime.ofEpochSecond(epochSecond, 0, ZoneOffset.ofTotalSeconds(offsetSeconds));
++        return DATE_TIME_FORMATTER.format(dateTime) + fraction(precision, picoFraction);
++    }
++
++    private static String fraction(int precision, long picoFraction)
++    {
++        if (precision == 0) {
++            return "";
++        }
++        long scaled = picoFraction / (long) Math.pow(10, 12 - precision);
++        return "." + String.format("%0" + precision + "d", scaled);
++    }
++}
+-- 
+2.43.0
+
+
+From 3e38e7ebf5e1420ec9309a789034ed1f191fb30b Mon Sep 17 00:00:00 2001
+From: Kristian <kristian@apache.org>
+Date: Sat, 24 Oct 2026 03:10:29 +0000
+Subject: [PATCH 2/4] Read protobuf segments in chunks
+
+The row iterator read the tag and length of every row byte by byte
+from the input stream, and copied each row into its own buffer. Read
+the segment into a buffer in large chunks instead and decode each row
+in place; a row larger than the buffer still grows it only as its
+bytes arrive, so a corrupt length cannot make the client allocate more
+than the segment holds. The wire reader reads a varint without a
+bounds check per byte when enough bytes remain.
+---
+ .../protobuf/ProtobufRowIterator.java         | 86 ++++++++++--------
+ .../TestProtobufQueryDataDecoder.java         | 89 +++++++++++++++++++
+ 2 files changed, 139 insertions(+), 36 deletions(-)
+
+diff --git a/client/trino-client/src/main/java/io/trino/client/spooling/encoding/protobuf/ProtobufRowIterator.java b/client/trino-client/src/main/java/io/trino/client/spooling/encoding/protobuf/ProtobufRowIterator.java
+index 25aca6b7..4caffc37 100644
+--- a/client/trino-client/src/main/java/io/trino/client/spooling/encoding/protobuf/ProtobufRowIterator.java
++++ b/client/trino-client/src/main/java/io/trino/client/spooling/encoding/protobuf/ProtobufRowIterator.java
+@@ -45,11 +45,16 @@ public class ProtobufRowIterator
+         implements CloseableIterator<List<Object>>
+ {
+     private static final int MAX_ROW_SIZE = Integer.MAX_VALUE - 8;
++    private static final int INITIAL_BUFFER_SIZE = 64 * 1024;
+ 
+     private final InputStream input;
+     private final ValueDecoder[] decoders;
+     private final ProtobufWireReader reader = new ProtobufWireReader();
+-    private byte[] rowBuffer = new byte[1024];
++    // The segment is read in chunks, and each row is decoded in place from [position, limit)
++    private byte[] buffer = new byte[INITIAL_BUFFER_SIZE];
++    private int position;
++    private int limit;
++    private boolean endOfInput;
+     private List<Object> nextRow;
+     private boolean finished;
+ 
+@@ -101,10 +106,11 @@ public class ProtobufRowIterator
+             throws IOException
+     {
+         while (true) {
+-            long value = readVarint();
+-            if (value == -1) {
++            if (!ensureAvailable(1)) {
++                // a clean end of input
+                 return null;
+             }
++            long value = readVarint();
+             if (value > 0xFFFFFFFFL || fieldNumber((int) value) == 0) {
+                 throw new ProtobufFormatException("Invalid segment field tag: " + value);
+             }
+@@ -118,35 +124,48 @@ public class ProtobufRowIterator
+                 throw new ProtobufFormatException(format("Unexpected wire type %s for segment rows", wireType(tag)));
+             }
+             long length = readVarint();
+-            if (length < 0 || length > MAX_ROW_SIZE) {
++            if (length > MAX_ROW_SIZE) {
+                 throw new ProtobufFormatException("Invalid row length: " + length);
+             }
+             int rowLength = (int) length;
+-            readRowBytes(rowLength);
+-            reader.reset(rowBuffer, 0, rowLength);
++            if (!ensureAvailable(rowLength)) {
++                throw new EOFException(format("Truncated row: expected %s bytes but got %s", rowLength, limit - position));
++            }
++            reader.reset(buffer, position, rowLength);
++            position += rowLength;
+             return decodeRow();
+         }
+     }
+ 
+     /**
+-     * Reads the row into the row buffer. The buffer grows with the bytes actually read, so a corrupt
+-     * length cannot make the client allocate more memory than the segment holds.
++     * Reads from the input until at least {@code length} unread bytes are buffered, or the input ends.
++     * The buffer grows with the bytes actually read, so a corrupt length cannot make the client allocate
++     * more memory than the segment holds.
+      */
+-    private void readRowBytes(int rowLength)
++    private boolean ensureAvailable(int length)
+             throws IOException
+     {
+-        int position = 0;
+-        while (position < rowLength) {
+-            if (position == rowBuffer.length) {
+-                rowBuffer = Arrays.copyOf(rowBuffer, (int) Math.min(rowLength, 2L * rowBuffer.length));
++        while (limit - position < length) {
++            if (endOfInput) {
++                return false;
++            }
++            if (position > 0 && (position == limit || buffer.length - position < length)) {
++                System.arraycopy(buffer, position, buffer, 0, limit - position);
++                limit -= position;
++                position = 0;
++            }
++            if (limit == buffer.length) {
++                buffer = Arrays.copyOf(buffer, (int) Math.min(length, 2L * buffer.length));
+             }
+-            int chunk = Math.min(rowLength, rowBuffer.length) - position;
+-            int read = input.readNBytes(rowBuffer, position, chunk);
+-            position += read;
+-            if (read != chunk) {
+-                throw new EOFException(format("Truncated row: expected %s bytes but got %s", rowLength, position));
++            int read = input.read(buffer, limit, buffer.length - limit);
++            if (read == -1) {
++                endOfInput = true;
++            }
++            else {
++                limit += read;
+             }
+         }
++        return true;
+     }
+ 
+     private List<Object> decodeRow()
+@@ -173,22 +192,19 @@ public class ProtobufRowIterator
+     }
+ 
+     /**
+-     * Reads a varint from the stream, or returns -1 at a clean end of input.
++     * Reads a varint of the segment itself. The caller has checked that at least one byte is available.
+      */
+     private long readVarint()
+             throws IOException
+     {
+         long result = 0;
+         for (int shift = 0; shift < 64; shift += 7) {
+-            int b = input.read();
+-            if (b == -1) {
+-                if (shift == 0) {
+-                    return -1;
+-                }
++            if (!ensureAvailable(1)) {
+                 throw new EOFException("Truncated varint");
+             }
++            byte b = buffer[position++];
+             result |= (long) (b & 0x7F) << shift;
+-            if ((b & 0x80) == 0) {
++            if (b >= 0) {
+                 if (result < 0) {
+                     throw new ProtobufFormatException("Varint out of range: " + result);
+                 }
+@@ -203,16 +219,14 @@ public class ProtobufRowIterator
+     {
+         switch (wireType(tag)) {
+             case WIRETYPE_VARINT:
+-                if (readVarint() == -1) {
+-                    throw new EOFException("Truncated varint");
+-                }
++                readVarint();
+                 break;
+             case WIRETYPE_FIXED64:
+                 skip(8);
+                 break;
+             case WIRETYPE_LENGTH_DELIMITED:
+                 long length = readVarint();
+-                if (length < 0 || length > MAX_ROW_SIZE) {
++                if (length > MAX_ROW_SIZE) {
+                     throw new ProtobufFormatException("Invalid field length: " + length);
+                 }
+                 skip((int) length);
+@@ -228,14 +242,14 @@ public class ProtobufRowIterator
+     private void skip(int length)
+             throws IOException
+     {
+-        long skipped = input.skip(length);
+-        if (skipped != length) {
+-            // skip is allowed to stop early, so read the rest
+-            for (long i = skipped; i < length; i++) {
+-                if (input.read() == -1) {
+-                    throw new EOFException("Truncated segment");
+-                }
++        int remaining = length;
++        while (remaining > 0) {
++            if (position == limit && !ensureAvailable(1)) {
++                throw new EOFException("Truncated segment");
+             }
++            int chunk = Math.min(remaining, limit - position);
++            position += chunk;
++            remaining -= chunk;
+         }
+     }
+ 
+diff --git a/client/trino-client/src/test/java/io/trino/client/spooling/encoding/protobuf/TestProtobufQueryDataDecoder.java b/client/trino-client/src/test/java/io/trino/client/spooling/encoding/protobuf/TestProtobufQueryDataDecoder.java
+index d4cb4dd8..053207fa 100644
+--- a/client/trino-client/src/test/java/io/trino/client/spooling/encoding/protobuf/TestProtobufQueryDataDecoder.java
++++ b/client/trino-client/src/test/java/io/trino/client/spooling/encoding/protobuf/TestProtobufQueryDataDecoder.java
+@@ -690,6 +690,42 @@ public class TestProtobufQueryDataDecoder
+         assertThat(closed[0]).isTrue();
+     }
+ 
++    @Test
++    public void testSegmentsAreReadInChunks()
++    {
++        // Rows are decoded in place from a buffer the segment is read into in chunks, so rows straddle chunk
++        // boundaries, and a row larger than the buffer makes it grow
++        Random random = new Random(7);
++        Segment.Builder segment = Segment.newBuilder();
++        List<List<Object>> expected = new ArrayList<>();
++        for (int i = 0; i < 5000; i++) {
++            int length = i % 1000 == 999 ? 100_000 + i : random.nextInt(200);
++            char[] text = new char[length];
++            Arrays.fill(text, (char) ('a' + i % 26));
++            String value = new String(text);
++            segment.addRows(io.trino.client.spooling.encoding.protobuf.generated.Row.newBuilder()
++                    .addValues(Value.newBuilder().setBigint(i))
++                    .addValues(i % 7 == 0 ? Value.newBuilder().setNull(NullValue.NULL_VALUE) : Value.newBuilder().setVarchar(value)));
++            expected.add(Arrays.asList((long) i, i % 7 == 0 ? null : value));
++        }
++        byte[] bytes = segment.build().toByteArray();
++        assertThat(bytes.length).isGreaterThan(500_000);
++        List<Column> columns = ImmutableList.of(column(BIGINT), column(varchar()));
++        assertThat(decode(columns, new ByteArrayInputStream(bytes))).isEqualTo(expected);
++        // the input delivers one byte, or a few bytes, per read
++        assertThat(decode(columns, new ChunkedInputStream(bytes, 1, 1))).isEqualTo(expected);
++        assertThat(decode(columns, new ChunkedInputStream(bytes, 1, 1000))).isEqualTo(expected);
++        assertThat(decode(columns, new ChunkedInputStream(bytes, 60_000, 70_000))).isEqualTo(expected);
++        // an unknown segment field larger than the buffer is skipped in chunks
++        byte[] unknownField = new byte[150_000];
++        Arrays.fill(unknownField, (byte) 'x');
++        Segment withUnknownField = Segment.newBuilder()
++                .setUnknownFields(UnknownFieldSet.newBuilder().addField(99, UnknownFieldSet.Field.newBuilder().addLengthDelimited(ByteString.copyFrom(unknownField)).build()).build())
++                .addRows(io.trino.client.spooling.encoding.protobuf.generated.Row.newBuilder().addValues(Value.newBuilder().setBigint(1)).addValues(Value.newBuilder().setVarchar("a")))
++                .build();
++        assertThat(decode(columns, new ChunkedInputStream(withUnknownField.toByteArray(), 1, 100))).isEqualTo(ImmutableList.of(Arrays.asList(1L, "a")));
++    }
++
+     @Test
+     public void testZoneIdIsReused()
+     {
+@@ -731,6 +767,59 @@ public class TestProtobufQueryDataDecoder
+         assertDecodes(decimal, Value.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledBytes(ByteString.copyFrom(BigInteger.TEN.toByteArray())).setUnscaledLong(5).setScale(1)), "0.5");
+     }
+ 
++    private static List<List<Object>> decode(List<Column> columns, InputStream input)
++    {
++        QueryDataDecoder decoder = QueryDataDecoders.get("protobuf").create(columns, DataAttributes.empty(), false);
++        try (CloseableIterator<List<Object>> iterator = decoder.decode(input, DataAttributes.empty())) {
++            List<List<Object>> rows = new ArrayList<>();
++            while (iterator.hasNext()) {
++                rows.add(iterator.next());
++            }
++            return rows;
++        }
++        catch (IOException e) {
++            throw new UncheckedIOException(e);
++        }
++    }
++
++    /**
++     * Delivers between {@code minChunk} and {@code maxChunk} bytes per read, however many were asked for.
++     */
++    private static class ChunkedInputStream
++            extends InputStream
++    {
++        private final byte[] bytes;
++        private final int minChunk;
++        private final int maxChunk;
++        private final Random random = new Random(0);
++        private int position;
++
++        ChunkedInputStream(byte[] bytes, int minChunk, int maxChunk)
++        {
++            this.bytes = bytes;
++            this.minChunk = minChunk;
++            this.maxChunk = maxChunk;
++        }
++
++        @Override
++        public int read()
++        {
++            return position < bytes.length ? bytes[position++] & 0xFF : -1;
++        }
++
++        @Override
++        public int read(byte[] buffer, int offset, int length)
++        {
++            if (position == bytes.length) {
++                return -1;
++            }
++            int chunk = Math.min(Math.min(length, bytes.length - position), minChunk + random.nextInt(maxChunk - minChunk + 1));
++            System.arraycopy(bytes, position, buffer, offset, chunk);
++            position += chunk;
++            return chunk;
++        }
++    }
++
+     @Test
+     public void testCompressedEncodings()
+             throws IOException
+-- 
+2.43.0
+
+
+From 748abf6531c016fab3d3dd2f9ad57623fb282fc1 Mon Sep 17 00:00:00 2001
+From: Kristian <kristian@apache.org>
+Date: Sat, 24 Oct 2026 03:10:29 +0000
+Subject: [PATCH 3/4] Check more malformed UTF-8 forms in protobuf text values
+
+Cover a code point above U+10FFFF, a five byte start byte and a lone
+continuation byte, and check that the segment itself is well-formed
+UTF-8, which the earlier byte checks did not prove for an encoded
+surrogate.
+---
+ .../protocol/TestProtobufEncodingUtils.java   | 36 ++++++++++++++++---
+ 1 file changed, 32 insertions(+), 4 deletions(-)
+
+diff --git a/core/trino-main/src/test/java/io/trino/server/protocol/TestProtobufEncodingUtils.java b/core/trino-main/src/test/java/io/trino/server/protocol/TestProtobufEncodingUtils.java
+index 049f0990..c9632c70 100644
+--- a/core/trino-main/src/test/java/io/trino/server/protocol/TestProtobufEncodingUtils.java
++++ b/core/trino-main/src/test/java/io/trino/server/protocol/TestProtobufEncodingUtils.java
+@@ -15,6 +15,7 @@ package io.trino.server.protocol;
+ 
+ import com.fasterxml.jackson.annotation.JsonProperty;
+ import com.fasterxml.jackson.databind.json.JsonMapper;
++import com.google.common.base.Utf8;
+ import com.google.common.collect.ImmutableList;
+ import com.google.common.net.InetAddresses;
+ import com.google.common.primitives.Bytes;
+@@ -1082,15 +1083,24 @@ public class TestProtobufEncodingUtils
+         Slice overlong = wrappedBuffer(new byte[] {(byte) 0xC0, (byte) 0x80});
+         Slice surrogate = wrappedBuffer(new byte[] {(byte) 0xED, (byte) 0xA0, (byte) 0x80});
+         Slice truncated = wrappedBuffer(new byte[] {'x', (byte) 0xF0, (byte) 0x9F, (byte) 0x98});
++        // a code point above U+10FFFF, a five byte start byte, a lone continuation byte, all ASCII around it
++        Slice beyondUnicode = wrappedBuffer(new byte[] {(byte) 0xF4, (byte) 0x90, (byte) 0x80, (byte) 0x80, 'z'});
++        Slice fiveByteStart = wrappedBuffer(new byte[] {(byte) 0xF8, (byte) 0x88, (byte) 0x80, (byte) 0x80, (byte) 0x80});
++        Slice continuation = wrappedBuffer(new byte[] {'a', 'b', (byte) 0x80});
+         Slice valid = utf8Slice("é\uD83D\uDE00");
+-        for (Type type : ImmutableList.of(VARCHAR, createVarcharType(10), createCharType(5))) {
++        Slice validMultiByte = utf8Slice("żółć");
++        for (Type type : ImmutableList.of(VARCHAR, createVarcharType(20), createCharType(5))) {
+             List<TypedColumn> columns = ImmutableList.of(typed("col", type));
+             Page page = page(block(type, builder -> {
+                 type.writeSlice(builder, malformed);
+                 type.writeSlice(builder, overlong);
+                 type.writeSlice(builder, surrogate);
+                 type.writeSlice(builder, truncated);
++                type.writeSlice(builder, beyondUnicode);
++                type.writeSlice(builder, fiveByteStart);
++                type.writeSlice(builder, continuation);
+                 type.writeSlice(builder, valid);
++                type.writeSlice(builder, validMultiByte);
+             }));
+             String pad = type instanceof CharType ? " " : "";
+             List<List<Object>> expected = ImmutableList.of(
+@@ -1098,7 +1108,11 @@ public class TestProtobufEncodingUtils
+                     ImmutableList.of("\uFFFD\uFFFD" + pad + pad + pad),
+                     ImmutableList.of("\uFFFD" + pad + pad + pad + pad),
+                     ImmutableList.of("x\uFFFD" + pad + pad + pad),
+-                    ImmutableList.of("é\uD83D\uDE00" + pad + pad + pad));
++                    ImmutableList.of("\uFFFD\uFFFD\uFFFD\uFFFDz"),
++                    ImmutableList.of("\uFFFD\uFFFD\uFFFD\uFFFD\uFFFD"),
++                    ImmutableList.of("ab\uFFFD" + pad + pad),
++                    ImmutableList.of("é\uD83D\uDE00" + pad + pad + pad),
++                    ImmutableList.of("żółć" + pad));
+             if (type instanceof CharType) {
+                 // The json encoding pads a char through a Java string, which replaces the same way, but it counts
+                 // the code points before the replacement: the overlong encoding counts as one code point and turns
+@@ -1109,7 +1123,11 @@ public class TestProtobufEncodingUtils
+                         ImmutableList.of("\uFFFD\uFFFD    "),
+                         expected.get(2),
+                         expected.get(3),
+-                        expected.get(4)));
++                        ImmutableList.of("\uFFFD\uFFFD\uFFFD\uFFFDz   "),
++                        ImmutableList.of("\uFFFD\uFFFD\uFFFD\uFFFD\uFFFD    "),
++                        ImmutableList.of("ab\uFFFD   "),
++                        expected.get(7),
++                        expected.get(8)));
+             }
+             else {
+                 assertThatThrownBy(() -> decode(TEST_SESSION, columns, "json", ImmutableList.of(page)))
+@@ -1120,11 +1138,21 @@ public class TestProtobufEncodingUtils
+                         .as("%s %s", type, encoding)
+                         .isEqualTo(expected);
+             }
+-            // the uncompressed segment holds the replacement, not the malformed bytes
++            // the uncompressed segment holds the replacement, not the malformed bytes: every string field of the
++            // segment is valid UTF-8, as a strict parser requires
+             byte[] segment = encode(TEST_SESSION, columns, "protobuf", ImmutableList.of(page)).data();
+             assertThat(Bytes.indexOf(segment, (byte) 0xFF)).isEqualTo(-1);
+             assertThat(Bytes.indexOf(segment, new byte[] {(byte) 0xC0, (byte) 0x80})).isEqualTo(-1);
++            assertThat(Bytes.indexOf(segment, new byte[] {(byte) 0xED, (byte) 0xA0, (byte) 0x80})).isEqualTo(-1);
++            assertThat(Bytes.indexOf(segment, new byte[] {(byte) 0xF4, (byte) 0x90})).isEqualTo(-1);
++            assertThat(Bytes.indexOf(segment, (byte) 0xF8)).isEqualTo(-1);
++            assertThat(Bytes.indexOf(segment, new byte[] {'b', (byte) 0x80})).isEqualTo(-1);
+             assertThat(Bytes.indexOf(segment, new byte[] {(byte) 0xEF, (byte) 0xBF, (byte) 0xBD})).isNotEqualTo(-1);
++            assertThat(Bytes.indexOf(segment, validMultiByte.getBytes())).isNotEqualTo(-1);
++            assertThat(Bytes.indexOf(segment, valid.getBytes())).isNotEqualTo(-1);
++            // one text column with short values: the framing of the segment is ASCII, so the whole segment is
++            // well-formed UTF-8 exactly when every text value is
++            assertThat(Utf8.isWellFormed(segment)).isTrue();
+         }
+     }
+ 
+-- 
+2.43.0
+
+
+From cee4d177899aa697fbbad702f30a237b3bc92de2 Mon Sep 17 00:00:00 2001
+From: Kristian <kristian@apache.org>
+Date: Sat, 24 Oct 2026 03:47:34 +0000
+Subject: [PATCH 4/4] Update protobuf spooling briefs for the client formatting
+ changes
+
+Describe the client formatter, the zone id cache and the chunked
+segment reads, and replace the decode times with a run made after
+them: on the type-rich table protobuf now decodes 10% slower than
+json uncompressed and no slower compressed, instead of 1.5x to 1.9x
+slower.
+---
+ .../feature-protobuf-spooling-encoding-pr.md  |  7 +--
+ .../protobuf-spooling-encoding-design.md      | 34 ++++++++++--
+ .../protobuf-spooling-encoding-results.md     | 54 ++++++++++---------
+ 3 files changed, 63 insertions(+), 32 deletions(-)
+
+diff --git a/docs/briefs/feature-protobuf-spooling-encoding-pr.md b/docs/briefs/feature-protobuf-spooling-encoding-pr.md
+index c05f4ad9..d8b6a6f0 100644
+--- a/docs/briefs/feature-protobuf-spooling-encoding-pr.md
++++ b/docs/briefs/feature-protobuf-spooling-encoding-pr.md
+@@ -78,9 +78,10 @@ Size and timing comparison on TPC-H `lineitem` sf1:
+ - Benchmark results (`BenchmarkQueryDataEncoding`, 3 forks, TPC-H `lineitem`
+   sf1 and a generated type-rich table): the server encodes 2.2× to 4.3×
+   faster uncompressed and up to 2.9× faster compressed. Client decoding is
+-  faster on `lineitem` but 1.5× to 1.9× slower on the type-rich table,
+-  because the client now formats decimals and timestamps as strings, which
+-  JSON receives preformatted. Size after Zstandard is 16% larger on
++  1.4× to 1.65× faster on `lineitem`; on the type-rich table it is 10%
++  slower uncompressed and equal or faster compressed, because the client
++  formats decimals and timestamps as strings, which JSON receives
++  preformatted. Size after Zstandard is 16% larger on
+   `lineitem` and 14% smaller on the type-rich table. Details in
+   `docs/briefs/protobuf-spooling-encoding-results.md`.
+ - Open questions for reviewers:
+diff --git a/docs/briefs/protobuf-spooling-encoding-design.md b/docs/briefs/protobuf-spooling-encoding-design.md
+index ff7226e9..2b1caeeb 100644
+--- a/docs/briefs/protobuf-spooling-encoding-design.md
++++ b/docs/briefs/protobuf-spooling-encoding-design.md
+@@ -152,9 +152,31 @@ The decoder checks every segment it reads and fails with
+ Unknown fields in `Segment`, `Row` (other than `values`), and the nested
+ messages are skipped, so the schema can grow without breaking older clients.
+ 
+-The row buffer grows with the bytes actually read, so a corrupt row length
+-cannot make the client allocate up to 2 GB before it notices the segment is
+-truncated.
++The segment is read into a buffer in large chunks and each row is decoded in
++place. A row larger than the buffer grows it only as its bytes arrive, so a
++corrupt row length cannot make the client allocate up to 2 GB before it
++notices the segment is truncated.
++
++### Client formatting
++
++The client API exposes dates, times, timestamps and decimals as the text the
++`json` encoding carries, which the server formats through `SqlDate`,
++`SqlTimestamp`, `SqlDecimal` and their relatives in trino-spi. The client
++cannot depend on trino-spi, and `java.time` and `BigInteger` were the main
++cost of decoding a type-rich result. `ProtobufValueFormatter` writes each
++value into a byte array of its exact length and makes a Latin-1 string of it:
++the civil date is computed from the epoch day, and a decimal of up to 128
++bits is converted by dividing its 32-bit words by 10^9, so only a wider value
++(which no Trino decimal is) goes through `BigInteger`. `TestProtobufValueFormatter`
++pins the output to `LocalDate.toString()`, `DateTimeFormatter`
++(`uuuu-MM-dd HH:mm:ss`, a plus sign beyond year 9999 and a minus sign before
++year 0) and `BigDecimal.toPlainString()` over the ends of each range and random
++values.
++
++A column of `TIMESTAMP WITH TIME ZONE` usually holds one zone, so its decoder
++keeps the zone id of the previous value and reuses the string when the bytes
++match. The decoder is created per column; the cached entry is immutable, so a
++decoder shared between threads only ever misses the cache.
+ 
+ ### Server encoder
+ 
+@@ -206,6 +228,7 @@ millisecond formatter, exactly like the json encoding.
+ | trino-client | `io/trino/client/spooling/encoding/protobuf/ProtobufWireFormat` | field numbers and tag helpers shared by the server and the client |
+ | trino-client | `.../protobuf/ProtobufWireWriter`, `ProtobufWireReader` | wire format codec |
+ | trino-client | `.../protobuf/ProtobufValueDecoders`, `ProtobufRowIterator` | typed value decoders and streaming row iterator |
++| trino-client | `.../protobuf/ProtobufValueFormatter` | text of dates, times, timestamps and decimals, pinned to the server formats |
+ | trino-client | `io/trino/client/spooling/encoding/ProtobufQueryDataDecoder` | the `protobuf`, `protobuf+zstd` and `protobuf+lz4` decoders |
+ | trino-main | `io/trino/server/protocol/ProtobufEncodingUtils` | per-type encoders from `Block` positions |
+ | trino-main | `io/trino/server/protocol/spooling/encoding/ProtobufQueryDataEncoder` | the encoders and their factories |
+@@ -220,7 +243,10 @@ millisecond formatter, exactly like the json encoding.
+ - `TestProtobufQueryDataDecoder` (trino-client): segments built with the
+   protoc-generated classes for every type, including precision 0 to 12, zone
+   ids, padding of `CHAR`, structural map keys, unknown fields, mismatched
+-  column types, truncated segments, and the compressed variants.
++  column types, truncated segments, segments delivered in chunks of a few
++  bytes with rows larger than the buffer, and the compressed variants.
++- `TestProtobufValueFormatter` (trino-client): the hand-written text of dates,
++  times, timestamps and decimals against `java.time` and `BigDecimal`.
+ - `TestProtobufEncodingUtils` (trino-main): every Trino type encoded from
+   `Page`s with all three protobuf encodings and decoded by the client, compared
+   with the `json` encoding of the same pages, with and without each client
+diff --git a/docs/briefs/protobuf-spooling-encoding-results.md b/docs/briefs/protobuf-spooling-encoding-results.md
+index c602b17a..1c453781 100644
+--- a/docs/briefs/protobuf-spooling-encoding-results.md
++++ b/docs/briefs/protobuf-spooling-encoding-results.md
+@@ -28,12 +28,13 @@ Branch: `feature/protobuf-spooling-encoding`. Design notes:
+   compressed variants, with the default 8 kB threshold, so every segment is
+   compressed.
+ - Machine: 4 vCPU Intel Xeon 2.80 GHz container (shared), JDK 25.0.5,
+-  `-Xmx8g`, single thread, average time, **3 forks**, 3 warmup and 5
+-  measurement iterations of 3 s each. Error is the 99.9% confidence interval
+-  over the 15 measurements.
+-- The decode times and the encode times come from two runs in two
+-  containers (the first run was cut short). Compare encode times only with
+-  encode times, and decode times only with decode times.
++  `-Xmx8g`, single thread, average time. Encode: **3 forks**, 3 warmup and 5
++  measurement iterations of 3 s each; error is the 99.9% confidence interval
++  over the 15 measurements. Decode: 1 fork, 2 warmup and 5 measurement
++  iterations of 3 s each, in a second container after the client formatting
++  changes (`ProtobufValueFormatter`, chunked segment reads), so the two
++  columns are not from the same run. Compare encode times only with encode
++  times, and decode times only with decode times.
+ 
+ Run with:
+ 
+@@ -58,12 +59,15 @@ Run with:
+ 
+ | Encoding | `lineitem` encode | `lineitem` decode | `types` encode | `types` decode |
+ |---|---:|---:|---:|---:|
+-| `json` | 6,383 ± 353 | 4,313 ± 171 | 4,757 ± 175 | 1,426 ± 45 |
+-| `json+zstd` | 12,595 ± 364 | 6,012 ± 175 | 8,980 ± 327 | 2,280 ± 73 |
+-| `json+lz4` | 10,640 ± 617 | 5,453 ± 215 | 6,414 ± 497 | 1,897 ± 38 |
+-| `protobuf` | 2,844 ± 607 | 3,391 ± 107 | 1,118 ± 133 | 2,654 ± 89 |
+-| `protobuf+zstd` | 11,374 ± 3,022 | 5,546 ± 175 | 3,846 ± 563 | 3,414 ± 233 |
+-| `protobuf+lz4` | 7,557 ± 2,332 | 4,750 ± 146 | 2,229 ± 515 | 2,938 ± 201 |
++| `json` | 6,383 ± 353 | 5,901 ± 1,144 | 4,757 ± 175 | 1,883 ± 257 |
++| `json+zstd` | 12,595 ± 364 | 7,871 ± 2,677 | 8,980 ± 327 | 3,046 ± 575 |
++| `json+lz4` | 10,640 ± 617 | 6,234 ± 724 | 6,414 ± 497 | 2,616 ± 270 |
++| `protobuf` | 2,844 ± 607 | 3,578 ± 554 | 1,118 ± 133 | 2,078 ± 215 |
++| `protobuf+zstd` | 11,374 ± 3,022 | 5,430 ± 1,029 | 3,846 ± 563 | 3,025 ± 236 |
++| `protobuf+lz4` | 7,557 ± 2,332 | 4,349 ± 336 | 2,229 ± 515 | 2,307 ± 288 |
++
++Before the client formatting changes, in the same container and setup, the
++`types` decode was 1,864 ms for `json` and 3,198 ms for `protobuf`.
+ 
+ ## Reading the numbers
+ 
+@@ -74,17 +78,16 @@ Run with:
+   noise (11,374 ± 3,022 against 12,595 ± 364). The JSON encoder formats every
+   decimal, timestamp and double as text, which is what protobuf saves.
+ - **Client decode.** Here the type mix decides. On `lineitem` protobuf decodes
+-  1.27× faster uncompressed and 8% to 15% faster compressed. On `types` it is
+-  **1.5× to 1.9× slower**: the client values of decimals and timestamps are
+-  strings, which the JSON decoder receives already formatted by the server,
+-  while the protobuf decoder must format them itself. Protobuf moves that
+-  work from the coordinator to the client; on `types` with Zstandard the
+-  total, across the two runs, is lower (about 7.3 s against 11.3 s), but
+-  the client's share grows.
+-  The client formats dates and decimals by hand (about 15% faster than
+-  through `DateTimeFormatter` and `BigInteger`); what remains is the cost of
+-  building the strings. Typed client values instead of strings would remove
+-  it, but that is a client API change outside this encoding.
++  1.65× faster uncompressed and 1.4× faster compressed. On `types` it is
++  10% slower uncompressed, equal with Zstandard and 12% faster with LZ4. The
++  client values of decimals and timestamps are strings, which the JSON decoder
++  receives already formatted by the server, while the protobuf decoder must
++  format them itself. Before the client formatted them by hand (byte arrays
++  turned into Latin-1 strings, 128-bit decimals converted without
++  `BigInteger`, the zone id of a column decoded once) and read the segment in
++  chunks, the `types` decode was 1.7× slower than json; what remains is the
++  cost of producing the strings at all, which typed client values would
++  remove, but that is a client API change outside this encoding.
+ - **Size.** It depends on the data. On `lineitem`, protobuf is 4.5% larger
+   before and 16% larger after Zstandard: each value costs 3 bytes of framing
+   (48 of the 152 bytes of a row), and the two-digit doubles are shorter as
+@@ -100,8 +103,9 @@ Run with:
+ 
+ - Protobuf reliably saves coordinator CPU, by 2× to 4× before compression.
+   That is the case for it: a coordinator that encodes many large results.
+-- It is not a uniform win for the client: type-rich results decode slower
+-  than with JSON, because the client now formats what the server used to.
++- For the client it is a win on string and integer heavy results and a
++  wash on type-rich ones, where it formats what the server used to: 10%
++  slower uncompressed, equal or faster with compression.
+ - Size is a wash that depends on the column types: worse on string and
+   "nice" double heavy tables, better on decimal, timestamp and nullable
+   tables.
+-- 
+2.43.0
+

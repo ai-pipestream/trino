@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
+  <mirrors>
+    <mirror>
+      <id>confluent</id>
+      <mirrorOf>confluent</mirrorOf>
+      <url>file:///tmp/claude-0/-home-user/884eeaf1-2a86-5052-bee7-0bc50ae48900/cfrepo</url>
+    </mirror>
+  </mirrors>
+</settings>

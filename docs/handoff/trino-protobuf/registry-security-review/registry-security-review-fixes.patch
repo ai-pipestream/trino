@@ -1,0 +1,723 @@
+From fc3bdb5af979e37cd63bf8e98cc7151e434193d0 Mon Sep 17 00:00:00 2001
+From: Kristian <kristian@apache.org>
+Date: Fri, 23 Oct 2026 12:36:06 +0000
+Subject: [PATCH 1/6] Use a valid reserved range in descriptor builder test
+
+The test reserved 1000 to max and then declared field 536870911, which
+protoc rejects because the number is reserved. The builder does not check
+reserved ranges, so the test passed while asserting that an invalid file
+links. Reserve a range that leaves the highest field number free.
+---
+ .../trino/decoder/protobuf/TestProtoFileDescriptorBuilder.java  | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/trino-record-decoder/src/test/java/io/trino/decoder/protobuf/TestProtoFileDescriptorBuilder.java b/lib/trino-record-decoder/src/test/java/io/trino/decoder/protobuf/TestProtoFileDescriptorBuilder.java
+index bbdef71e..3055467d 100644
+--- a/lib/trino-record-decoder/src/test/java/io/trino/decoder/protobuf/TestProtoFileDescriptorBuilder.java
++++ b/lib/trino-record-decoder/src/test/java/io/trino/decoder/protobuf/TestProtoFileDescriptorBuilder.java
+@@ -932,7 +932,7 @@ public class TestProtoFileDescriptorBuilder
+                 syntax = "proto3";
+                 message Empty {}
+                 message Reserved {
+-                  reserved 2, 15 to 20, 1000 to max;
++                  reserved 2, 15 to 20, 1000 to 18999;
+                   reserved "old_name", "older_name";
+                   string name = 1;
+                   int32 last = 536870911;
+-- 
+2.43.0
+
+
+From 8a9168e26089c668a3547315c13ee6b74efca4bb Mon Sep 17 00:00:00 2001
+From: Kristian <kristian@apache.org>
+Date: Fri, 23 Oct 2026 12:36:06 +0000
+Subject: [PATCH 2/6] Fix escaped bytes defaults in protobuf schemas
+
+The schema parser unescapes string literals, but a bytes default in a
+FieldDescriptorProto must be C-escaped. Passing the unescaped text on made
+protobuf-java unescape it a second time: a default with a backslash lost
+it, and octal or hex escapes of bytes above 0x7F became two UTF-8 bytes.
+Absent proto2 bytes fields with such defaults then decoded to the wrong
+value.
+
+Turn the parsed default back into bytes, taking characters up to 0xFF as
+the bytes their escapes stand for and other text as UTF-8, and escape
+them for the descriptor. Cover escapes, special float values, hex and
+octal integers, integer bounds and enum defaults.
+---
+ .../protobuf/ProtoFileDescriptorBuilder.java  | 30 +++++++++++-
+ .../TestProtoFileDescriptorBuilder.java       | 49 +++++++++++++++++++
+ 2 files changed, 78 insertions(+), 1 deletion(-)
+
+diff --git a/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtoFileDescriptorBuilder.java b/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtoFileDescriptorBuilder.java
+index 319cd01e..f5a7aaf0 100644
+--- a/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtoFileDescriptorBuilder.java
++++ b/lib/trino-record-decoder/src/main/java/io/trino/decoder/protobuf/ProtoFileDescriptorBuilder.java
+@@ -67,6 +67,7 @@ import com.squareup.wire.schema.internal.parser.ProtoParser;
+ import com.squareup.wire.schema.internal.parser.TypeElement;
+ import io.trino.spi.TrinoException;
+ 
++import java.io.ByteArrayOutputStream;
+ import java.util.ArrayDeque;
+ import java.util.ArrayList;
+ import java.util.Deque;
+@@ -78,8 +79,10 @@ import java.util.OptionalInt;
+ import java.util.stream.Stream;
+ 
+ import static com.google.common.collect.ImmutableMap.toImmutableMap;
++import static com.google.protobuf.TextFormat.escapeBytes;
+ import static io.trino.decoder.protobuf.ProtobufErrorCode.INVALID_PROTO_FILE;
+ import static java.lang.String.format;
++import static java.nio.charset.StandardCharsets.UTF_8;
+ import static java.util.Objects.requireNonNull;
+ import static java.util.function.Function.identity;
+ 
+@@ -385,7 +388,13 @@ public final class ProtoFileDescriptorBuilder
+         }
+         oneofIndex.ifPresent(builder::setOneofIndex);
+         if (field.getDefaultValue() != null) {
+-            builder.setDefaultValue(field.getDefaultValue());
++            if (builder.getType() == Type.TYPE_BYTES) {
++                // the parser unescapes the literal, while the descriptor expects a bytes default C-escaped
++                builder.setDefaultValue(escapeBytes(toBytesDefault(field.getDefaultValue())));
++            }
++            else {
++                builder.setDefaultValue(field.getDefaultValue());
++            }
+         }
+         if (field.getJsonName() != null) {
+             builder.setJsonName(field.getJsonName());
+@@ -439,6 +448,25 @@ public final class ProtoFileDescriptorBuilder
+         return builder.build();
+     }
+ 
++    /**
++     * The bytes of an unescaped bytes default. An octal or hex escape stands for one byte and is
++     * unescaped to the character of that value, so such characters are taken as bytes; other text
++     * is encoded as UTF-8, as {@code protoc} does.
++     */
++    private static byte[] toBytesDefault(String value)
++    {
++        ByteArrayOutputStream bytes = new ByteArrayOutputStream(value.length());
++        value.codePoints().forEach(codePoint -> {
++            if (codePoint <= 0xFF) {
++                bytes.write(codePoint);
++            }
++            else {
++                bytes.writeBytes(Character.toString(codePoint).getBytes(UTF_8));
++            }
++        });
++        return bytes.toByteArray();
++    }
++
+     private static boolean toBoolean(OptionElement option)
+     {
+         return Boolean.parseBoolean(String.valueOf(option.getValue()));
+diff --git a/lib/trino-record-decoder/src/test/java/io/trino/decoder/protobuf/TestProtoFileDescriptorBuilder.java b/lib/trino-record-decoder/src/test/java/io/trino/decoder/protobuf/TestProtoFileDescriptorBuilder.java
+index 3055467d..a005d039 100644
+--- a/lib/trino-record-decoder/src/test/java/io/trino/decoder/protobuf/TestProtoFileDescriptorBuilder.java
++++ b/lib/trino-record-decoder/src/test/java/io/trino/decoder/protobuf/TestProtoFileDescriptorBuilder.java
+@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableList;
+ import com.google.common.collect.ImmutableMap;
+ import com.google.protobuf.ByteString;
+ import com.google.protobuf.Descriptors.Descriptor;
++import com.google.protobuf.Descriptors.EnumValueDescriptor;
+ import com.google.protobuf.Descriptors.FieldDescriptor;
+ import com.google.protobuf.Descriptors.FieldDescriptor.JavaType;
+ import com.google.protobuf.Descriptors.FileDescriptor;
+@@ -923,6 +924,54 @@ public class TestProtoFileDescriptorBuilder
+         assertThat(defaults.findFieldByName("zero").hasDefaultValue()).isFalse();
+     }
+ 
++    @Test
++    public void testProto2DefaultValueEscapesAndSpecialValues()
++    {
++        // what protoc records for these defaults: bytes as their escaped bytes, strings as their text
++        FileDescriptor file = build("escapes.proto",
++                """
++                syntax = "proto2";
++                enum Color {
++                  RED = 0;
++                  BLUE = 1;
++                }
++                message Escapes {
++                  optional bytes high = 1 [default = "\\377\\x80\\000"];
++                  optional bytes backslash = 2 [default = "a\\\\b"];
++                  optional bytes quote = 3 [default = "\\"'"];
++                  optional string text_backslash = 4 [default = "a\\\\b"];
++                  optional string unicode = 5 [default = "\u00e9t\u00e9"];
++                  optional bytes unicode_bytes = 6 [default = "\u20ac"];
++                  optional double positive_infinity = 7 [default = inf];
++                  optional float negative_infinity = 8 [default = -inf];
++                  optional double not_a_number = 9 [default = nan];
++                  optional int32 hex = 10 [default = 0x1F];
++                  optional int64 octal = 11 [default = 017];
++                  optional int32 min = 12 [default = -2147483648];
++                  optional sfixed64 min64 = 13 [default = -9223372036854775808];
++                  optional uint32 max32 = 14 [default = 4294967295];
++                  optional Color color = 15 [default = BLUE];
++                }
++                """);
++        Descriptor escapes = file.findMessageTypeByName("Escapes");
++        assertThat(escapes.findFieldByName("high").getDefaultValue()).isEqualTo(ByteString.copyFrom(new byte[] {(byte) 0xFF, (byte) 0x80, 0}));
++        assertThat(escapes.findFieldByName("backslash").getDefaultValue()).isEqualTo(ByteString.copyFromUtf8("a\\b"));
++        assertThat(escapes.findFieldByName("quote").getDefaultValue()).isEqualTo(ByteString.copyFromUtf8("\"'"));
++        assertThat(escapes.findFieldByName("text_backslash").getDefaultValue()).isEqualTo("a\\b");
++        assertThat(escapes.findFieldByName("unicode").getDefaultValue()).isEqualTo("\u00e9t\u00e9");
++        // protoc encodes other text in a bytes default as UTF-8
++        assertThat(escapes.findFieldByName("unicode_bytes").getDefaultValue()).isEqualTo(ByteString.copyFromUtf8("\u20ac"));
++        assertThat(escapes.findFieldByName("positive_infinity").getDefaultValue()).isEqualTo(Double.POSITIVE_INFINITY);
++        assertThat(escapes.findFieldByName("negative_infinity").getDefaultValue()).isEqualTo(Float.NEGATIVE_INFINITY);
++        assertThat((double) escapes.findFieldByName("not_a_number").getDefaultValue()).isNaN();
++        assertThat(escapes.findFieldByName("hex").getDefaultValue()).isEqualTo(31);
++        assertThat(escapes.findFieldByName("octal").getDefaultValue()).isEqualTo(15L);
++        assertThat(escapes.findFieldByName("min").getDefaultValue()).isEqualTo(Integer.MIN_VALUE);
++        assertThat(escapes.findFieldByName("min64").getDefaultValue()).isEqualTo(Long.MIN_VALUE);
++        assertThat(escapes.findFieldByName("max32").getDefaultValue()).isEqualTo(-1);
++        assertThat(((EnumValueDescriptor) escapes.findFieldByName("color").getDefaultValue()).getName()).isEqualTo("BLUE");
++    }
++
+     @Test
+     public void testReservedDeclarationsAndEmptyMessages()
+             throws Exception
+-- 
+2.43.0
+
+
+From 2bd6d982edcf9f9bbaa5b413d8c679daeac5fc24 Mon Sep 17 00:00:00 2001
+From: Kristian <kristian@apache.org>
+Date: Fri, 23 Oct 2026 12:36:34 +0000
+Subject: [PATCH 3/6] Reject schema registry store passwords without a store
+
+The schema registry client fails to start when it is given a key store or
+trust store password without the store's location, with an error that
+names the client's own property, and ignores a key password without a key
+store. Reject these combinations when the configuration is validated, and
+test that the connector starts with the registry properties, rejects a
+missing trust store file and a key store password without a key store.
+Also cover missing store files and passwords that contain a colon.
+---
+ ...ConfluentSchemaRegistrySecurityConfig.java | 13 ++++
+ .../trino/plugin/kafka/TestKafkaPlugin.java   | 71 +++++++++++++++++++
+ ...ConfluentSchemaRegistrySecurityConfig.java | 54 ++++++++++++++
+ 3 files changed, 138 insertions(+)
+
+diff --git a/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/schema/confluent/ConfluentSchemaRegistrySecurityConfig.java b/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/schema/confluent/ConfluentSchemaRegistrySecurityConfig.java
+index 6c372781..e1da4c53 100644
+--- a/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/schema/confluent/ConfluentSchemaRegistrySecurityConfig.java
++++ b/plugin/trino-kafka/src/main/java/io/trino/plugin/kafka/schema/confluent/ConfluentSchemaRegistrySecurityConfig.java
+@@ -240,4 +240,17 @@ public class ConfluentSchemaRegistrySecurityConfig
+     {
+         return getTruststoreLocation().isEmpty() || getTruststorePassword().isPresent();
+     }
++
++    // the client fails to start on a store password without the store, and ignores a key password without a key store
++    @AssertTrue(message = "kafka.confluent-schema-registry.ssl.keystore.location must be set when kafka.confluent-schema-registry.ssl.keystore.password or kafka.confluent-schema-registry.ssl.key.password is given")
++    public boolean isKeystoreLocationValid()
++    {
++        return getKeystoreLocation().isPresent() || (getKeystorePassword().isEmpty() && getKeyPassword().isEmpty());
++    }
++
++    @AssertTrue(message = "kafka.confluent-schema-registry.ssl.truststore.location must be set when kafka.confluent-schema-registry.ssl.truststore.password is given")
++    public boolean isTruststoreLocationValid()
++    {
++        return getTruststoreLocation().isPresent() || getTruststorePassword().isEmpty();
++    }
+ }
+diff --git a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/TestKafkaPlugin.java b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/TestKafkaPlugin.java
+index 91a91698..763c5037 100644
+--- a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/TestKafkaPlugin.java
++++ b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/TestKafkaPlugin.java
+@@ -14,6 +14,7 @@
+ package io.trino.plugin.kafka;
+ 
+ import com.google.common.collect.ImmutableMap;
++import com.google.common.io.Resources;
+ import io.trino.spi.connector.Connector;
+ import io.trino.spi.connector.ConnectorFactory;
+ import io.trino.testing.TestingConnectorContext;
+@@ -201,6 +202,76 @@ public class TestKafkaPlugin
+         connector.shutdown();
+     }
+ 
++    @Test
++    public void testConfluentSchemaRegistrySecuritySpinup()
++            throws Exception
++    {
++        KafkaPlugin plugin = new KafkaPlugin();
++
++        ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
++        // the schema registry client loads the trust store when the connector is created
++        Path truststorePath = Path.of(Resources.getResource("confluent/registry-truststore.p12").toURI());
++
++        Connector connector = factory.create(
++                "test-connector",
++                ImmutableMap.<String, String>builder()
++                        .put("kafka.nodes", "localhost:9092")
++                        .put("kafka.table-description-supplier", "CONFLUENT")
++                        .put("kafka.confluent-schema-registry-url", "https://localhost:8081")
++                        .put("kafka.confluent-schema-registry.basic-auth.user", "trino")
++                        .put("kafka.confluent-schema-registry.basic-auth.password", "secret")
++                        .put("kafka.confluent-schema-registry.ssl.truststore.location", truststorePath.toString())
++                        .put("kafka.confluent-schema-registry.ssl.truststore.password", "secret")
++                        .put("kafka.confluent-schema-registry.ssl.truststore.type", "PKCS12")
++                        .put("kafka.confluent-schema-registry.ssl.endpoint-identification-algorithm", "disabled")
++                        .put("bootstrap.quiet", "true")
++                        .buildOrThrow(),
++                new TestingConnectorContext());
++        assertThat(connector).isNotNull();
++        connector.shutdown();
++    }
++
++    @Test
++    public void testConfluentSchemaRegistryTruststoreMissingFileSpindown()
++    {
++        KafkaPlugin plugin = new KafkaPlugin();
++
++        ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
++
++        assertThatThrownBy(() -> factory.create(
++                "test-connector",
++                ImmutableMap.<String, String>builder()
++                        .put("kafka.nodes", "localhost:9092")
++                        .put("kafka.table-description-supplier", "CONFLUENT")
++                        .put("kafka.confluent-schema-registry-url", "https://localhost:8081")
++                        .put("kafka.confluent-schema-registry.ssl.truststore.location", "/not/a/real/path")
++                        .put("kafka.confluent-schema-registry.ssl.truststore.password", "secret")
++                        .put("bootstrap.quiet", "true")
++                        .buildOrThrow(),
++                new TestingConnectorContext()))
++                .hasMessageContaining("Error: Invalid configuration property kafka.confluent-schema-registry.ssl.truststore.location: file does not exist: /not/a/real/path");
++    }
++
++    @Test
++    public void testConfluentSchemaRegistryKeystorePasswordWithoutKeystoreSpindown()
++    {
++        KafkaPlugin plugin = new KafkaPlugin();
++
++        ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
++
++        assertThatThrownBy(() -> factory.create(
++                "test-connector",
++                ImmutableMap.<String, String>builder()
++                        .put("kafka.nodes", "localhost:9092")
++                        .put("kafka.table-description-supplier", "CONFLUENT")
++                        .put("kafka.confluent-schema-registry-url", "https://localhost:8081")
++                        .put("kafka.confluent-schema-registry.ssl.keystore.password", "secret")
++                        .put("bootstrap.quiet", "true")
++                        .buildOrThrow(),
++                new TestingConnectorContext()))
++                .hasMessageContaining("kafka.confluent-schema-registry.ssl.keystore.location must be set when kafka.confluent-schema-registry.ssl.keystore.password or kafka.confluent-schema-registry.ssl.key.password is given");
++    }
++
+     private void writeToFile(Path filepath, String content)
+             throws IOException
+     {
+diff --git a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestConfluentSchemaRegistrySecurityConfig.java b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestConfluentSchemaRegistrySecurityConfig.java
+index 8dc33d90..101539ed 100644
+--- a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestConfluentSchemaRegistrySecurityConfig.java
++++ b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestConfluentSchemaRegistrySecurityConfig.java
+@@ -14,6 +14,7 @@
+ package io.trino.plugin.kafka.schema.confluent;
+ 
+ import com.google.common.collect.ImmutableMap;
++import io.airlift.configuration.validation.FileExists;
+ import jakarta.validation.constraints.AssertTrue;
+ import org.junit.jupiter.api.Test;
+ 
+@@ -165,6 +166,59 @@ public class TestConfluentSchemaRegistrySecurityConfig
+                 AssertTrue.class);
+     }
+ 
++    @Test
++    public void testKeystoreLocationRequiredWithKeystorePasswords()
++            throws IOException
++    {
++        String message = "kafka.confluent-schema-registry.ssl.keystore.location must be set when kafka.confluent-schema-registry.ssl.keystore.password or kafka.confluent-schema-registry.ssl.key.password is given";
++        assertFailsValidation(new ConfluentSchemaRegistrySecurityConfig().setKeystorePassword("keystore-password"), "keystoreLocationValid", message, AssertTrue.class);
++        assertFailsValidation(new ConfluentSchemaRegistrySecurityConfig().setKeyPassword("key-password"), "keystoreLocationValid", message, AssertTrue.class);
++        assertValidates(new ConfluentSchemaRegistrySecurityConfig()
++                .setKeystoreLocation(Files.createTempFile("keystore", ".p12").toString())
++                .setKeystorePassword("keystore-password")
++                .setKeyPassword("key-password"));
++    }
++
++    @Test
++    public void testTruststoreLocationRequiredWithTruststorePassword()
++            throws IOException
++    {
++        assertFailsValidation(
++                new ConfluentSchemaRegistrySecurityConfig().setTruststorePassword("truststore-password"),
++                "truststoreLocationValid",
++                "kafka.confluent-schema-registry.ssl.truststore.location must be set when kafka.confluent-schema-registry.ssl.truststore.password is given",
++                AssertTrue.class);
++        assertValidates(new ConfluentSchemaRegistrySecurityConfig()
++                .setTruststoreLocation(Files.createTempFile("truststore", ".p12").toString())
++                .setTruststorePassword("truststore-password"));
++    }
++
++    @Test
++    public void testMissingStoreFile()
++    {
++        assertFailsValidation(
++                new ConfluentSchemaRegistrySecurityConfig().setTruststoreLocation("/not/a/real/path").setTruststorePassword("truststore-password"),
++                "truststoreLocation",
++                "file does not exist: /not/a/real/path",
++                FileExists.class);
++        assertFailsValidation(
++                new ConfluentSchemaRegistrySecurityConfig().setKeystoreLocation("/not/a/real/path").setKeystorePassword("keystore-password"),
++                "keystoreLocation",
++                "file does not exist: /not/a/real/path",
++                FileExists.class);
++    }
++
++    @Test
++    public void testBasicAuthPasswordMayContainColon()
++    {
++        // the client splits the user info at the first colon
++        ConfluentSchemaRegistrySecurityConfig config = new ConfluentSchemaRegistrySecurityConfig()
++                .setBasicAuthUser("trino")
++                .setBasicAuthPassword("se:cr:et");
++        assertValidates(config);
++        assertThat(config.getSchemaRegistryClientProperties()).containsEntry("basic.auth.user.info", "trino:se:cr:et");
++    }
++
+     @Test
+     public void testTruststorePasswordRequiredWithTruststoreLocation()
+             throws IOException
+-- 
+2.43.0
+
+
+From 44869dba051894789fda9a8d2bd98097192d68d2 Mon Sep 17 00:00:00 2001
+From: Kristian <kristian@apache.org>
+Date: Fri, 23 Oct 2026 12:36:34 +0000
+Subject: [PATCH 4/6] Test schema registry client certificates
+
+Run the client against an HTTPS registry that requires a client
+certificate, with and without a key store, and build one client the way
+the connector does, from the registry and security configuration through
+all properties providers, to cover how their properties combine.
+---
+ ...stConfluentProtobufSchemaRegistryRest.java | 113 ++++++++++++++++--
+ 1 file changed, 102 insertions(+), 11 deletions(-)
+
+diff --git a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestConfluentProtobufSchemaRegistryRest.java b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestConfluentProtobufSchemaRegistryRest.java
+index 8d27ac76..4b5cab74 100644
+--- a/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestConfluentProtobufSchemaRegistryRest.java
++++ b/plugin/trino-kafka/src/test/java/io/trino/plugin/kafka/schema/confluent/TestConfluentProtobufSchemaRegistryRest.java
+@@ -16,12 +16,14 @@ package io.trino.plugin.kafka.schema.confluent;
+ import com.fasterxml.jackson.databind.ObjectMapper;
+ import com.google.common.collect.ImmutableList;
+ import com.google.common.collect.ImmutableMap;
++import com.google.common.collect.ImmutableSet;
+ import com.google.common.io.Resources;
+ import com.google.protobuf.Descriptors.Descriptor;
+ import com.google.protobuf.DynamicMessage;
+ import com.sun.net.httpserver.HttpExchange;
+ import com.sun.net.httpserver.HttpServer;
+ import com.sun.net.httpserver.HttpsConfigurator;
++import com.sun.net.httpserver.HttpsParameters;
+ import com.sun.net.httpserver.HttpsServer;
+ import io.confluent.kafka.schemaregistry.client.CachedSchemaRegistryClient;
+ import io.confluent.kafka.schemaregistry.client.SchemaRegistryClient;
+@@ -40,13 +42,18 @@ import org.junit.jupiter.api.TestInstance;
+ 
+ import javax.net.ssl.KeyManagerFactory;
+ import javax.net.ssl.SSLContext;
++import javax.net.ssl.SSLParameters;
++import javax.net.ssl.TrustManager;
++import javax.net.ssl.TrustManagerFactory;
+ 
+-import java.io.File;
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.io.OutputStream;
++import java.net.InetAddress;
+ import java.net.InetSocketAddress;
+ import java.net.ServerSocket;
++import java.net.URISyntaxException;
++import java.nio.file.Path;
+ import java.security.GeneralSecurityException;
+ import java.security.KeyStore;
+ import java.util.Base64;
+@@ -111,12 +118,15 @@ public class TestConfluentProtobufSchemaRegistryRest
+     // serves a certificate for another host name
+     private HttpsServer otherHostTlsServer;
+     private String otherHostTlsBaseUrl;
++    // requires a client certificate signed by the trust store
++    private HttpsServer clientAuthTlsServer;
++    private String clientAuthTlsBaseUrl;
+ 
+     @BeforeAll
+     public void setUp()
+             throws IOException
+     {
+-        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
++        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+         server.createContext("/", this::handle);
+         server.start();
+         baseUrl = "127.0.0.1:" + server.getAddress().getPort();
+@@ -124,6 +134,8 @@ public class TestConfluentProtobufSchemaRegistryRest
+         tlsBaseUrl = "127.0.0.1:" + tlsServer.getAddress().getPort();
+         otherHostTlsServer = startTlsServer("confluent/registry-other-host-keystore.p12");
+         otherHostTlsBaseUrl = "127.0.0.1:" + otherHostTlsServer.getAddress().getPort();
++        clientAuthTlsServer = startTlsServer("confluent/registry-keystore.p12", Optional.of("confluent/registry-truststore.p12"));
++        clientAuthTlsBaseUrl = "127.0.0.1:" + clientAuthTlsServer.getAddress().getPort();
+     }
+ 
+     @AfterAll
+@@ -132,22 +144,40 @@ public class TestConfluentProtobufSchemaRegistryRest
+         server.stop(0);
+         tlsServer.stop(0);
+         otherHostTlsServer.stop(0);
++        clientAuthTlsServer.stop(0);
+     }
+ 
+     private HttpsServer startTlsServer(String keystoreResource)
+             throws IOException
++    {
++        return startTlsServer(keystoreResource, Optional.empty());
++    }
++
++    private HttpsServer startTlsServer(String keystoreResource, Optional<String> clientTruststoreResource)
++            throws IOException
+     {
+         try {
+-            KeyStore keystore = KeyStore.getInstance("PKCS12");
+-            try (InputStream in = Resources.getResource(keystoreResource).openStream()) {
+-                keystore.load(in, STORE_PASSWORD.toCharArray());
+-            }
+             KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+-            keyManagerFactory.init(keystore, STORE_PASSWORD.toCharArray());
++            keyManagerFactory.init(loadKeyStore(keystoreResource), STORE_PASSWORD.toCharArray());
++            TrustManager[] trustManagers = null;
++            if (clientTruststoreResource.isPresent()) {
++                TrustManagerFactory trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
++                trustManagerFactory.init(loadKeyStore(clientTruststoreResource.get()));
++                trustManagers = trustManagerFactory.getTrustManagers();
++            }
+             SSLContext sslContext = SSLContext.getInstance("TLS");
+-            sslContext.init(keyManagerFactory.getKeyManagers(), null, null);
+-            HttpsServer httpsServer = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+-            httpsServer.setHttpsConfigurator(new HttpsConfigurator(sslContext));
++            sslContext.init(keyManagerFactory.getKeyManagers(), trustManagers, null);
++            HttpsServer httpsServer = HttpsServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
++            httpsServer.setHttpsConfigurator(new HttpsConfigurator(sslContext)
++            {
++                @Override
++                public void configure(HttpsParameters parameters)
++                {
++                    SSLParameters sslParameters = sslContext.getDefaultSSLParameters();
++                    sslParameters.setNeedClientAuth(clientTruststoreResource.isPresent());
++                    parameters.setSSLParameters(sslParameters);
++                }
++            });
+             httpsServer.createContext("/", this::handle);
+             httpsServer.start();
+             return httpsServer;
+@@ -157,6 +187,16 @@ public class TestConfluentProtobufSchemaRegistryRest
+         }
+     }
+ 
++    private static KeyStore loadKeyStore(String resource)
++            throws IOException, GeneralSecurityException
++    {
++        KeyStore keyStore = KeyStore.getInstance("PKCS12");
++        try (InputStream in = Resources.getResource(resource).openStream()) {
++            keyStore.load(in, STORE_PASSWORD.toCharArray());
++        }
++        return keyStore;
++    }
++
+     private void handle(HttpExchange exchange)
+             throws IOException
+     {
+@@ -272,6 +312,47 @@ public class TestConfluentProtobufSchemaRegistryRest
+         assertThat(decoded.getField(decoded.getDescriptorForType().findFieldByName("col_1"))).isEqualTo("Trino");
+     }
+ 
++    @Test
++    public void testTlsClientCertificate()
++    {
++        ConfluentSchemaRegistryDynamicMessageProvider provider = new ConfluentSchemaRegistryDynamicMessageProvider(createClient("https://" + clientAuthTlsBaseUrl, tlsConfig()
++                .setKeystoreLocation(resourcePath("confluent/registry-keystore.p12"))
++                .setKeystorePassword(STORE_PASSWORD)
++                .setKeystoreType(PKCS12)
++                .getSchemaRegistryClientProperties()));
++        DynamicMessage decoded = provider.parseDynamicMessage(frame(ORDER_ID, ImmutableList.of(0), orderBytes()));
++        assertThat(decoded.getField(decoded.getDescriptorForType().findFieldByName("col_1"))).isEqualTo("Trino");
++    }
++
++    @Test
++    public void testTlsWithoutRequiredClientCertificate()
++    {
++        ConfluentSchemaRegistryDynamicMessageProvider provider = new ConfluentSchemaRegistryDynamicMessageProvider(createClient("https://" + clientAuthTlsBaseUrl, tlsConfig().getSchemaRegistryClientProperties()));
++        // the rest of the message depends on whether the client reads the certificate_required alert before writing its request
++        assertThatThrownBy(() -> provider.parseDynamicMessage(frame(ORDER_ID, ImmutableList.of(0), orderBytes())))
++                .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(KAFKA_SCHEMA_REGISTRY_ERROR.toErrorCode()))
++                .hasMessageStartingWith("Failed to look up schema id 2 in the schema registry: ");
++    }
++
++    @Test
++    public void testClientFromConnectorConfiguration()
++    {
++        // the client the connector creates combines the properties of all providers
++        ConfluentSchemaRegistryConfig registryConfig = new ConfluentSchemaRegistryConfig()
++                .setConfluentSchemaRegistryUrls(ImmutableSet.of("https://" + clientAuthTlsBaseUrl));
++        ConfluentSchemaRegistrySecurityConfig securityConfig = tlsConfig()
++                .setKeystoreLocation(resourcePath("confluent/registry-keystore.p12"))
++                .setKeystorePassword(STORE_PASSWORD)
++                .setKeystoreType(PKCS12);
++        SchemaRegistryClient client = ConfluentModule.createSchemaRegistryClient(
++                registryConfig,
++                ImmutableSet.of(new ConfluentProtobufSchemaProvider()),
++                ImmutableSet.of(new SchemaRegistryClientTtlProvider(registryConfig), new SchemaRegistryClientSecurityProvider(securityConfig)),
++                getClass().getClassLoader());
++        DynamicMessage decoded = new ConfluentSchemaRegistryDynamicMessageProvider(client).parseDynamicMessage(frame(ORDER_ID, ImmutableList.of(0), orderBytes()));
++        assertThat(decoded.getField(decoded.getDescriptorForType().findFieldByName("col_1"))).isEqualTo("Trino");
++    }
++
+     @Test
+     public void testMissingCredentials()
+     {
+@@ -312,11 +393,21 @@ public class TestConfluentProtobufSchemaRegistryRest
+         return new ConfluentSchemaRegistrySecurityConfig()
+                 .setBasicAuthUser(USER)
+                 .setBasicAuthPassword(PASSWORD)
+-                .setTruststoreLocation(new File(Resources.getResource("confluent/registry-truststore.p12").getFile()).getPath())
++                .setTruststoreLocation(resourcePath("confluent/registry-truststore.p12"))
+                 .setTruststorePassword(STORE_PASSWORD)
+                 .setTruststoreType(PKCS12);
+     }
+ 
++    private static String resourcePath(String resource)
++    {
++        try {
++            return Path.of(Resources.getResource(resource).toURI()).toString();
++        }
++        catch (URISyntaxException e) {
++            throw new IllegalArgumentException(e);
++        }
++    }
++
+     private static SchemaRegistryClient createClient(String url, Map<String, Object> properties)
+     {
+         return new CachedSchemaRegistryClient(
+-- 
+2.43.0
+
+
+From fa0bb89119ad1025a013c1d3015eaf93f6a734dc Mon Sep 17 00:00:00 2001
+From: Kristian <kristian@apache.org>
+Date: Fri, 23 Oct 2026 12:36:35 +0000
+Subject: [PATCH 5/6] Document schema registry TLS scope
+
+State that the ssl properties apply to https registry URLs, that basic
+authentication credentials need https to stay private, and that the key
+password defaults to the key store password.
+---
+ docs/src/main/sphinx/connector/kafka.md | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/docs/src/main/sphinx/connector/kafka.md b/docs/src/main/sphinx/connector/kafka.md
+index c6d9155d..d50a0e5f 100644
+--- a/docs/src/main/sphinx/connector/kafka.md
++++ b/docs/src/main/sphinx/connector/kafka.md
+@@ -437,7 +437,8 @@ a table without a key subject are written with a `null` key.
+     set together with the password.
+   -
+ * - `kafka.confluent-schema-registry.basic-auth.password`
+-  - Password for HTTP basic authentication to the schema registry.
++  - Password for HTTP basic authentication to the schema registry. Use an
++    `https` registry URL, so that the credentials are not sent in clear text.
+   -
+ * - `kafka.confluent-schema-registry.ssl.keystore.location`
+   - Location of the key store file used to authenticate to the schema registry
+@@ -462,7 +463,8 @@ a table without a key subject are written with a `null` key.
+   - File format of the trust store file, `JKS` or `PKCS12`.
+   - `JKS`
+ * - `kafka.confluent-schema-registry.ssl.key.password`
+-  - Password of the private key in the key store file.
++  - Password of the private key in the key store file. Defaults to the key
++    store password.
+   -
+ * - `kafka.confluent-schema-registry.ssl.endpoint-identification-algorithm`
+   - Endpoint identification algorithm used to validate the schema registry
+@@ -472,6 +474,9 @@ a table without a key subject are written with a `null` key.
+ 
+ :::
+ 
++The `kafka.confluent-schema-registry.ssl.*` properties apply to schema registry
++URLs with the `https` scheme, such as `https://schema-registry.example.org:8081`.
++
+ #### Confluent subject to table name mapping
+ 
+ The [subject naming strategy](https://docs.confluent.io/platform/current/schema-registry/serdes-develop/index.html#sr-schemas-subject-name-strategy)
+-- 
+2.43.0
+
+
+From 8b18231132c7e2106fc550329f7274ba3a9c5e4f Mon Sep 17 00:00:00 2001
+From: Kristian <kristian@apache.org>
+Date: Fri, 23 Oct 2026 12:39:07 +0000
+Subject: [PATCH 6/6] Update PR draft for registry security review
+
+List the new tests, and call out host name verification of HTTPS
+registries as a breaking change in the release notes.
+---
+ .../feature-kafka-confluent-protobuf-pr.md    | 21 ++++++++++++-------
+ 1 file changed, 14 insertions(+), 7 deletions(-)
+
+diff --git a/docs/briefs/feature-kafka-confluent-protobuf-pr.md b/docs/briefs/feature-kafka-confluent-protobuf-pr.md
+index 57038193..24729a6b 100644
+--- a/docs/briefs/feature-kafka-confluent-protobuf-pr.md
++++ b/docs/briefs/feature-kafka-confluent-protobuf-pr.md
+@@ -94,11 +94,12 @@ into the commits above before the PR is opened.
+ 
+ Tests:
+ 
+-* `lib/trino-record-decoder`: `TestProtoFileDescriptorBuilder` (18 cases:
++* `lib/trino-record-decoder`: `TestProtoFileDescriptorBuilder` (28 cases:
+   scalars, labels, enums, oneofs, maps, proto3 optional, well-known types,
+   imports, public imports, transitive visibility, cycles, name resolution,
+-  map entry naming, groups, duplicates) and `TestProtobufDecoder`; `verify
+-  -P ci` and the error-prone compile pass.
++  map entry naming, groups, duplicates, package-less files, proto2 defaults
++  including escaped bytes and special float values, reserved declarations)
++  and `TestProtobufDecoder`; `verify -P ci` and the error-prone compile pass.
+ * `plugin/trino-kafka`: `TestConfluentProtobufWireFormat` (including a
+   byte-for-byte comparison with Confluent's `MessageIndexes`),
+   `TestConfluentProtobufSchema`, `TestConfluentSchemaRegistryDynamicMessageProvider`,
+@@ -106,9 +107,12 @@ Tests:
+   (in-process HTTP and HTTPS registries: decode with references, encode
+   with the latest schema, basic auth from the security config, 401, 404,
+   dangling reference, registry down, TLS with and without a trust store,
+-  host name verification and disabling it),
++  host name verification and disabling it, a registry that requires a
++  client certificate, and a client built from the connector configuration
++  through all properties providers),
+   `TestConfluentSchemaRegistrySecurityConfig` (defaults, mappings, client
+-  property names, validation),
++  property names, validation), connector startup with the registry
++  properties in `TestKafkaPlugin`,
+   `TestProtobufSchemaParser`, `TestNoConfluentProtobufDependency`, protobuf
+   cases in `TestConfluentSchemaRegistryTableDescriptionSupplier`, and new
+   Docker cases in `TestKafkaProtobufWithSchemaRegistryMinimalFunctionality`
+@@ -128,8 +132,11 @@ Tests:
+   including schema references, schema evolution and `INSERT`. ({issue}`23736`)
+ * Add `kafka.confluent-schema-registry.basic-auth.*` and
+   `kafka.confluent-schema-registry.ssl.*` configuration properties for
+-  authentication and TLS to the Confluent schema registry, and verify the
+-  registry host name by default.
++  authentication and TLS to the Confluent schema registry.
++* {{breaking}} Verify the host name of an HTTPS Confluent schema registry
++  against its certificate. Set
++  `kafka.confluent-schema-registry.ssl.endpoint-identification-algorithm` to
++  `disabled` to restore the previous behavior.
+ * Fix query failure when a protobuf record was written with a schema that
+   lacks a field of a `ROW` column. ({issue}`20204`)
+ * {{breaking}} Map protobuf fields declared `optional` in proto3 schemas of the
+-- 
+2.43.0
+
