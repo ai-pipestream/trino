@@ -1204,6 +1204,41 @@ public class TestProtobufEncodingUtils
         }
     }
 
+    @Test
+    public void testMapKeysEqualOnlyAsRendered()
+            throws IOException
+    {
+        // Both values of the fall-back hour of America/New_York, one hour apart, render to the same text
+        TimestampWithTimeZoneType timestampWithTimeZone = createTimestampWithTimeZoneType(3);
+        MapType fallBackMap = mapType(timestampWithTimeZone, BIGINT);
+        Page fallBack = page(block(fallBackMap, builder -> ((MapBlockBuilder) builder).buildEntry((keys, values) -> {
+            timestampWithTimeZone.writeLong(keys, packDateTimeWithZone(1_730_611_800_000L, getTimeZoneKey("America/New_York")));
+            BIGINT.writeLong(values, 1);
+            timestampWithTimeZone.writeLong(keys, packDateTimeWithZone(1_730_615_400_000L, getTimeZoneKey("America/New_York")));
+            BIGINT.writeLong(values, 2);
+        })));
+        List<TypedColumn> fallBackColumns = ImmutableList.of(typed("col", fallBackMap));
+        assertThat(decode(TEST_SESSION, fallBackColumns, "json", ImmutableList.of(fallBack)))
+                .isEqualTo(ImmutableList.of(ImmutableList.of(Map.of("2024-11-03 01:30:00.000 America/New_York", 2L))));
+        assertRoundTrip(TEST_SESSION, fallBackColumns, fallBack);
+
+        // Without PARAMETRIC_DATETIME, timestamp values are rounded to milliseconds, but the json encoding renders
+        // keys at full precision, so two keys within the same millisecond stay distinct
+        TimestampType timestamp = createTimestampType(6);
+        MapType legacyMap = mapType(timestamp, BIGINT);
+        Page legacy = page(block(legacyMap, builder -> ((MapBlockBuilder) builder).buildEntry((keys, values) -> {
+            timestamp.writeLong(keys, 1_600_000_000_123_400L);
+            BIGINT.writeLong(values, 1);
+            timestamp.writeLong(keys, 1_600_000_000_123_200L);
+            BIGINT.writeLong(values, 2);
+        })));
+        Session session = sessionWithoutCapability(ClientCapabilities.PARAMETRIC_DATETIME);
+        List<TypedColumn> legacyColumns = ImmutableList.of(typed("col", legacyMap));
+        assertThat(decode(session, legacyColumns, "json", ImmutableList.of(legacy)))
+                .isEqualTo(ImmutableList.of(ImmutableList.of(Map.of("2020-09-13 12:26:40.123400", 1L, "2020-09-13 12:26:40.123200", 2L))));
+        assertRoundTrip(session, legacyColumns, legacy);
+    }
+
     private void assertRoundTrip(Type type, Consumer<BlockBuilder> values)
             throws IOException
     {
