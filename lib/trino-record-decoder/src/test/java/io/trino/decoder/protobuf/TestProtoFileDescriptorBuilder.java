@@ -1018,6 +1018,9 @@ public class TestProtoFileDescriptorBuilder
                 .put("enum Status { reserved 5; STATUS_UNSPECIFIED = 0; FIVE = 5; }", "Value 'FIVE' in enum 'Status' in protobuf schema 'reserved.proto' uses reserved number 5")
                 .put("enum Status { reserved \"LEGACY\"; STATUS_UNSPECIFIED = 0; LEGACY = 1; }", "Value 'LEGACY' in enum 'Status' in protobuf schema 'reserved.proto' uses a reserved name")
                 .put("message Outer { enum Status { reserved 1 to 3; STATUS_UNSPECIFIED = 0; TWO = 2; } }", "Value 'TWO' in enum 'Status' in protobuf schema 'reserved.proto' uses reserved number 2")
+                .put("message Reserved { reserved 7; map<string, string> attributes = 7; }", "Field 'attributes' in message 'Reserved' in protobuf schema 'reserved.proto' uses reserved number 7")
+                .put("message Reserved { reserved \"a\", \"b\"; reserved 9; string b = 1; }", "Field 'b' in message 'Reserved' in protobuf schema 'reserved.proto' uses a reserved name")
+                .put("enum Status { reserved -5 to -1; STATUS_UNSPECIFIED = 0; NEGATIVE = -3; }", "Value 'NEGATIVE' in enum 'Status' in protobuf schema 'reserved.proto' uses reserved number -3")
                 .buildOrThrow();
         declarations.forEach((declaration, message) ->
                 assertThatThrownBy(() -> build("reserved.proto", "syntax = \"proto3\";\n" + declaration))
