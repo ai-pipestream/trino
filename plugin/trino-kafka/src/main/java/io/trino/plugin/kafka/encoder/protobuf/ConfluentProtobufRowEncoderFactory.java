@@ -24,12 +24,14 @@ import io.trino.plugin.kafka.encoder.RowEncoderFactory;
 import io.trino.plugin.kafka.encoder.RowEncoderSpec;
 import io.trino.plugin.kafka.schema.confluent.ConfluentProtobufSchema;
 import io.trino.plugin.kafka.schema.confluent.ConfluentProtobufWireFormat;
+import io.trino.plugin.kafka.schema.confluent.ConfluentSchemaRegistryDynamicMessageProvider.ReaderSchema;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.connector.ConnectorSession;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Optional;
 
 import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SCHEMA_ERROR;
 import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SCHEMA_REGISTRY_ERROR;
@@ -40,7 +42,8 @@ import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Encodes rows with the latest schema registered for the table's subject and frames each
+ * Encodes rows with the schema the table columns were derived from, or the latest schema
+ * registered for the table's subject when the table does not name one, and frames each
  * message in the Confluent wire format, so records written by Trino are readable by any
  * Confluent protobuf consumer.
  */
@@ -60,8 +63,14 @@ public class ConfluentProtobufRowEncoderFactory
     {
         String subject = rowEncoderSpec.subject()
                 .orElseThrow(() -> new TrinoException(NOT_SUPPORTED, format("Inserting into the %s of table '%s' requires a schema registry subject", rowEncoderSpec.kafkaFieldType().name().toLowerCase(ENGLISH), rowEncoderSpec.topic())));
-        int schemaId = getLatestSchemaId(subject);
-        Descriptor descriptor = getSchema(subject, schemaId).getMessageDescriptor(subject);
+        // rows are written with the schema the table columns were derived from, which may not be the latest one by now
+        Optional<ReaderSchema> tableSchema = rowEncoderSpec.dataSchema().map(ReaderSchema::parse);
+        int schemaId = tableSchema.map(ReaderSchema::schemaId).orElseGet(() -> getLatestSchemaId(subject));
+        ConfluentProtobufSchema schema = getSchema(subject, schemaId);
+        Descriptor descriptor = tableSchema
+                .map(reader -> schema.findMessage(reader.messageName())
+                        .orElseThrow(() -> new TrinoException(KAFKA_SCHEMA_ERROR, format("Schema id %s of subject '%s' does not declare message %s", schemaId, subject, reader.messageName()))))
+                .orElseGet(() -> schema.getMessageDescriptor(subject));
         return new FramingRowEncoder(schemaId, ConfluentProtobufWireFormat.messageIndexes(descriptor), new ProtobufRowEncoder(descriptor, session, rowEncoderSpec.columnHandles()));
     }
 
@@ -92,7 +101,7 @@ public class ConfluentProtobufRowEncoderFactory
             throw new TrinoException(KAFKA_SCHEMA_REGISTRY_ERROR, format("Failed to fetch schema id %s of subject '%s' from the schema registry: %s", schemaId, subject, e.getMessage()), e);
         }
         if (!(schema instanceof ConfluentProtobufSchema protobufSchema)) {
-            throw new TrinoException(KAFKA_SCHEMA_ERROR, format("The latest schema of subject '%s' is a %s schema, not a PROTOBUF schema", subject, schema.schemaType()));
+            throw new TrinoException(KAFKA_SCHEMA_ERROR, format("Schema id %s of subject '%s' is a %s schema, not a PROTOBUF schema", schemaId, subject, schema.schemaType()));
         }
         return protobufSchema;
     }

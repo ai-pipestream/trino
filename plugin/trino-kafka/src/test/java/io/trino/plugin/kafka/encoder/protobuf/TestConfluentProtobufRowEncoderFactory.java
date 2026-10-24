@@ -52,6 +52,7 @@ import static io.trino.plugin.kafka.KafkaErrorCode.KAFKA_SCHEMA_REGISTRY_ERROR;
 import static io.trino.plugin.kafka.encoder.KafkaFieldType.KEY;
 import static io.trino.plugin.kafka.encoder.KafkaFieldType.MESSAGE;
 import static io.trino.plugin.kafka.schema.confluent.ConfluentProtobufWireFormat.readFrame;
+import static io.trino.plugin.kafka.schema.confluent.ConfluentSchemaRegistryDynamicMessageProvider.readerSchemaReference;
 import static io.trino.spi.StandardErrorCode.CONSTRAINT_VIOLATION;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.block.MapValueBuilder.buildMapValue;
@@ -148,6 +149,51 @@ public class TestConfluentProtobufRowEncoderFactory
             DynamicMessage decoded = new ConfluentSchemaRegistryDynamicMessageProvider(client).parseDynamicMessage(record);
             assertThat(decoded.getField(decoded.getDescriptorForType().findFieldByName("col_3"))).isEqualTo(3L);
         }
+    }
+
+    @Test
+    public void testSchemaOfTheTableIsUsed()
+            throws Exception
+    {
+        MockSchemaRegistryClient client = createClient();
+        String subject = TOPIC + "-value";
+        int tableSchemaId = client.register(subject, schema(client, SCHEMA));
+        Descriptor tableMessage = ((ConfluentProtobufSchema) client.getSchemaById(tableSchemaId)).getMessageDescriptor();
+        String dataSchema = readerSchemaReference(tableSchemaId, tableMessage);
+        // a version registered after the table was described renames col_1, which the table still has
+        int latestId = client.register(subject, schema(client,
+                """
+                syntax = "proto3";
+                message schema {
+                    string renamed = 1;
+                    int64 col_2 = 2;
+                }
+                """));
+        assertThat(latestId).isNotEqualTo(tableSchemaId);
+
+        try (RowEncoder encoder = createEncoder(client, Optional.of(dataSchema), Optional.of(subject), ImmutableList.of(COL_1, COL_2))) {
+            encoder.appendColumnValue(writeNativeValue(VARCHAR, utf8Slice("Trino")), 0);
+            encoder.appendColumnValue(writeNativeValue(BIGINT, 1L), 0);
+            byte[] record = encoder.toByteArray();
+            assertThat(readFrame(record).schemaId()).isEqualTo(tableSchemaId);
+            DynamicMessage decoded = new ConfluentSchemaRegistryDynamicMessageProvider(client).parseDynamicMessage(record);
+            assertThat(decoded.getField(decoded.getDescriptorForType().findFieldByName("col_1"))).isEqualTo("Trino");
+        }
+
+        // the table's message is used even when the subject does not name it
+        Descriptor other = ((ConfluentProtobufSchema) client.getSchemaById(tableSchemaId)).findMessage("Other").orElseThrow();
+        KafkaColumnHandle name = new KafkaColumnHandle("name", VARCHAR, "name", null, null, false, false, false);
+        try (RowEncoder encoder = createEncoder(client, Optional.of(readerSchemaReference(tableSchemaId, other)), Optional.of(subject), ImmutableList.of(name))) {
+            encoder.appendColumnValue(writeNativeValue(VARCHAR, utf8Slice("other")), 0);
+            Frame frame = readFrame(encoder.toByteArray());
+            assertThat(frame.schemaId()).isEqualTo(tableSchemaId);
+            assertThat(frame.messageIndexes()).containsExactly(1);
+        }
+
+        assertTrinoException(
+                () -> createEncoder(client, Optional.of("schema-registry-id:" + tableSchemaId + ";message=Missing"), Optional.of(subject), ImmutableList.of(COL_1)),
+                KAFKA_SCHEMA_ERROR,
+                "Schema id " + tableSchemaId + " of subject 'orders-value' does not declare message Missing");
     }
 
     @Test
@@ -299,8 +345,8 @@ public class TestConfluentProtobufRowEncoderFactory
             throws Exception
     {
         MockSchemaRegistryClient client = createClient();
-        client.register(TOPIC + "-value", new AvroSchema(SchemaBuilder.record("schema").fields().name("col_1").type().stringType().noDefault().endRecord()));
-        assertTrinoException(() -> createEncoder(client, Optional.of(TOPIC + "-value"), ImmutableList.of(COL_1)), KAFKA_SCHEMA_ERROR, "The latest schema of subject 'orders-value' is a AVRO schema, not a PROTOBUF schema");
+        int schemaId = client.register(TOPIC + "-value", new AvroSchema(SchemaBuilder.record("schema").fields().name("col_1").type().stringType().noDefault().endRecord()));
+        assertTrinoException(() -> createEncoder(client, Optional.of(TOPIC + "-value"), ImmutableList.of(COL_1)), KAFKA_SCHEMA_ERROR, "Schema id " + schemaId + " of subject 'orders-value' is a AVRO schema, not a PROTOBUF schema");
     }
 
     @Test
@@ -329,7 +375,12 @@ public class TestConfluentProtobufRowEncoderFactory
 
     private static RowEncoder createEncoder(MockSchemaRegistryClient client, Optional<String> subject, List<EncoderColumnHandle> columns)
     {
-        RowEncoderSpec spec = new RowEncoderSpec(ProtobufRowEncoder.NAME, Optional.empty(), subject, columns, TOPIC, MESSAGE);
+        return createEncoder(client, Optional.empty(), subject, columns);
+    }
+
+    private static RowEncoder createEncoder(MockSchemaRegistryClient client, Optional<String> dataSchema, Optional<String> subject, List<EncoderColumnHandle> columns)
+    {
+        RowEncoderSpec spec = new RowEncoderSpec(ProtobufRowEncoder.NAME, dataSchema, subject, columns, TOPIC, MESSAGE);
         return new ConfluentProtobufRowEncoderFactory(client).create(TestingConnectorSession.SESSION, spec);
     }
 

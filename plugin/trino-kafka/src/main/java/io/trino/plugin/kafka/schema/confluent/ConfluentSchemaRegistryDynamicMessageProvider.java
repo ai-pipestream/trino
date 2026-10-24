@@ -154,9 +154,20 @@ public class ConfluentSchemaRegistryDynamicMessageProvider
         }
     }
 
-    private record ReaderSchema(int schemaId, String messageName)
+    /**
+     * The registry schema id and the full name of the message a table's columns were derived from.
+     */
+    public record ReaderSchema(int schemaId, String messageName)
     {
-        private static ReaderSchema parse(String reference)
+        public ReaderSchema
+        {
+            requireNonNull(messageName, "messageName is null");
+        }
+
+        /**
+         * Parses a reference created by {@link #readerSchemaReference(int, Descriptor)}.
+         */
+        public static ReaderSchema parse(String reference)
         {
             Matcher matcher = READER_SCHEMA_REFERENCE.matcher(reference);
             checkArgument(matcher.matches(), "Data schema is not a schema registry reference: %s", reference);
