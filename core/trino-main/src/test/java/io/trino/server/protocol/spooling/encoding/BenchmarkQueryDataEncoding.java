@@ -26,6 +26,11 @@ import io.trino.server.protocol.spooling.QueryDataEncoder;
 import io.trino.server.protocol.spooling.QueryDataEncodingConfig;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
+import io.trino.spi.block.ArrayBlockBuilder;
+import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.Int128;
+import io.trino.spi.type.TimeZoneKey;
 import io.trino.spi.type.Type;
 import io.trino.tpch.LineItem;
 import io.trino.tpch.LineItemGenerator;
@@ -44,9 +49,11 @@ import org.openjdk.jmh.annotations.Warmup;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Random;
 import java.util.concurrent.TimeUnit;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -55,28 +62,47 @@ import static io.trino.SessionTestUtils.TEST_SESSION;
 import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.server.protocol.ProtocolUtil.createColumn;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.spi.type.DateTimeEncoding.packDateTimeWithZone;
 import static io.trino.spi.type.DateType.DATE;
+import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
+import static io.trino.spi.type.TimeZoneKey.getTimeZoneKey;
+import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
+import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
+import static io.trino.spi.type.UuidType.UUID;
+import static io.trino.spi.type.UuidType.javaUuidToTrinoUuid;
+import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VarcharType.createVarcharType;
 import static java.io.OutputStream.nullOutputStream;
 import static java.lang.String.format;
 
 /**
- * Encodes and decodes TPC-H {@code lineitem} with each spooled query data encoding,
- * using the column types the TPC-H connector exposes.
+ * Encodes and decodes a table with each spooled query data encoding. {@code lineitem} is TPC-H
+ * {@code lineitem} with the column types the TPC-H connector exposes; {@code types} is generated, with
+ * decimals, timestamps, timestamps with time zone, full precision doubles, a uuid, an array and nulls.
  * One operation is the whole table, split into segments of {@link #ROWS_PER_SEGMENT} rows.
  */
 @State(Scope.Benchmark)
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
 @BenchmarkMode(Mode.AverageTime)
-@Fork(1)
-@Warmup(iterations = 3, time = 5, timeUnit = TimeUnit.SECONDS)
-@Measurement(iterations = 5, time = 5, timeUnit = TimeUnit.SECONDS)
+@Fork(3)
+@Warmup(iterations = 3, time = 3, timeUnit = TimeUnit.SECONDS)
+@Measurement(iterations = 5, time = 3, timeUnit = TimeUnit.SECONDS)
 public class BenchmarkQueryDataEncoding
 {
     private static final int ROWS_PER_PAGE = 8192;
-    private static final int ROWS_PER_SEGMENT = 1 << 17;
+    // about 10 MB of json for both tables, below the default protocol.spooling.max-segment-size of 16 MB
+    private static final int ROWS_PER_SEGMENT = 1 << 16;
+    private static final int TYPES_ROWS = 2_000_000;
+    private static final List<TimeZoneKey> TIME_ZONES = ImmutableList.of(
+            UTC_KEY,
+            getTimeZoneKey("America/New_York"),
+            getTimeZoneKey("Europe/Warsaw"),
+            getTimeZoneKey("Asia/Kolkata"),
+            getTimeZoneKey("+05:45"));
 
     private static final List<OutputColumn> LINEITEM_COLUMNS = ImmutableList.of(
             new OutputColumn(0, "orderkey", BIGINT),
@@ -96,11 +122,29 @@ public class BenchmarkQueryDataEncoding
             new OutputColumn(14, "shipmode", createVarcharType(10)),
             new OutputColumn(15, "comment", createVarcharType(44)));
 
+    private static final DecimalType PRICE = createDecimalType(12, 2);
+    private static final DecimalType AMOUNT = createDecimalType(38, 10);
+    private static final List<OutputColumn> TYPES_COLUMNS = ImmutableList.of(
+            new OutputColumn(0, "id", BIGINT),
+            new OutputColumn(1, "price", PRICE),
+            new OutputColumn(2, "amount", AMOUNT),
+            new OutputColumn(3, "created", TIMESTAMP_MICROS),
+            new OutputColumn(4, "updated", TIMESTAMP_TZ_MILLIS),
+            new OutputColumn(5, "ratio", DOUBLE),
+            new OutputColumn(6, "active", BOOLEAN),
+            new OutputColumn(7, "name", VARCHAR),
+            new OutputColumn(8, "score", INTEGER),
+            new OutputColumn(9, "key", UUID),
+            new OutputColumn(10, "tags", new ArrayType(VARCHAR)));
+
     @State(Scope.Benchmark)
     public static class BenchmarkData
     {
         @Param({"json", "json+zstd", "json+lz4", "protobuf", "protobuf+zstd", "protobuf+lz4"})
         private String encoding = "protobuf+zstd";
+
+        @Param({"lineitem", "types"})
+        private String table = "lineitem";
 
         @Param("1")
         private double scaleFactor = 1;
@@ -118,30 +162,25 @@ public class BenchmarkQueryDataEncoding
         public void setup()
                 throws IOException
         {
-            List<Type> types = LINEITEM_COLUMNS.stream().map(OutputColumn::type).collect(toImmutableList());
+            List<OutputColumn> columns = switch (table) {
+                case "lineitem" -> LINEITEM_COLUMNS;
+                case "types" -> TYPES_COLUMNS;
+                default -> throw new IllegalArgumentException("Unknown table: " + table);
+            };
+            List<Type> types = columns.stream().map(OutputColumn::type).collect(toImmutableList());
             PageBuilder pageBuilder = new PageBuilder(types);
             List<Page> segment = new ArrayList<>();
             int segmentRows = 0;
             Iterator<LineItem> lineItems = new LineItemGenerator(scaleFactor, 1, 1).iterator();
-            while (lineItems.hasNext()) {
-                LineItem lineItem = lineItems.next();
+            Random random = new Random(42);
+            while (table.equals("lineitem") ? lineItems.hasNext() : rows < TYPES_ROWS) {
                 pageBuilder.declarePosition();
-                BIGINT.writeLong(pageBuilder.getBlockBuilder(0), lineItem.orderKey());
-                BIGINT.writeLong(pageBuilder.getBlockBuilder(1), lineItem.partKey());
-                BIGINT.writeLong(pageBuilder.getBlockBuilder(2), lineItem.supplierKey());
-                INTEGER.writeLong(pageBuilder.getBlockBuilder(3), lineItem.lineNumber());
-                DOUBLE.writeDouble(pageBuilder.getBlockBuilder(4), lineItem.quantity());
-                DOUBLE.writeDouble(pageBuilder.getBlockBuilder(5), lineItem.extendedPrice());
-                DOUBLE.writeDouble(pageBuilder.getBlockBuilder(6), lineItem.discount());
-                DOUBLE.writeDouble(pageBuilder.getBlockBuilder(7), lineItem.tax());
-                types.get(8).writeSlice(pageBuilder.getBlockBuilder(8), utf8Slice(lineItem.returnFlag()));
-                types.get(9).writeSlice(pageBuilder.getBlockBuilder(9), utf8Slice(lineItem.status()));
-                DATE.writeLong(pageBuilder.getBlockBuilder(10), lineItem.shipDate());
-                DATE.writeLong(pageBuilder.getBlockBuilder(11), lineItem.commitDate());
-                DATE.writeLong(pageBuilder.getBlockBuilder(12), lineItem.receiptDate());
-                types.get(13).writeSlice(pageBuilder.getBlockBuilder(13), utf8Slice(lineItem.shipInstructions()));
-                types.get(14).writeSlice(pageBuilder.getBlockBuilder(14), utf8Slice(lineItem.shipMode()));
-                types.get(15).writeSlice(pageBuilder.getBlockBuilder(15), utf8Slice(lineItem.comment()));
+                if (table.equals("lineitem")) {
+                    writeLineItem(pageBuilder, types, lineItems.next());
+                }
+                else {
+                    writeTypesRow(pageBuilder, rows, random);
+                }
                 rows++;
                 segmentRows++;
                 if (pageBuilder.getPositionCount() == ROWS_PER_PAGE) {
@@ -165,9 +204,9 @@ public class BenchmarkQueryDataEncoding
                 segments.add(ImmutableList.copyOf(segment));
             }
 
-            encoder = createEncoderFactory(encoding).create(TEST_SESSION, LINEITEM_COLUMNS);
+            encoder = createEncoderFactory(encoding).create(TEST_SESSION, columns);
             decoderFactory = QueryDataDecoders.get(encoding);
-            clientColumns = LINEITEM_COLUMNS.stream()
+            clientColumns = columns.stream()
                     .map(column -> createColumn(column.columnName(), column.type(), true, true, true, true, true))
                     .collect(toImmutableList());
 
@@ -178,6 +217,67 @@ public class BenchmarkQueryDataEncoding
                 segmentAttributes.add(attributes);
                 encodedBytes += output.size();
             }
+        }
+
+        private static void writeLineItem(PageBuilder pageBuilder, List<Type> types, LineItem lineItem)
+        {
+            BIGINT.writeLong(pageBuilder.getBlockBuilder(0), lineItem.orderKey());
+            BIGINT.writeLong(pageBuilder.getBlockBuilder(1), lineItem.partKey());
+            BIGINT.writeLong(pageBuilder.getBlockBuilder(2), lineItem.supplierKey());
+            INTEGER.writeLong(pageBuilder.getBlockBuilder(3), lineItem.lineNumber());
+            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(4), lineItem.quantity());
+            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(5), lineItem.extendedPrice());
+            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(6), lineItem.discount());
+            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(7), lineItem.tax());
+            types.get(8).writeSlice(pageBuilder.getBlockBuilder(8), utf8Slice(lineItem.returnFlag()));
+            types.get(9).writeSlice(pageBuilder.getBlockBuilder(9), utf8Slice(lineItem.status()));
+            DATE.writeLong(pageBuilder.getBlockBuilder(10), lineItem.shipDate());
+            DATE.writeLong(pageBuilder.getBlockBuilder(11), lineItem.commitDate());
+            DATE.writeLong(pageBuilder.getBlockBuilder(12), lineItem.receiptDate());
+            types.get(13).writeSlice(pageBuilder.getBlockBuilder(13), utf8Slice(lineItem.shipInstructions()));
+            types.get(14).writeSlice(pageBuilder.getBlockBuilder(14), utf8Slice(lineItem.shipMode()));
+            types.get(15).writeSlice(pageBuilder.getBlockBuilder(15), utf8Slice(lineItem.comment()));
+        }
+
+        private static void writeTypesRow(PageBuilder pageBuilder, long id, Random random)
+        {
+            // 2000-01-01 to 2030-01-01
+            long epochMillis = 946_684_800_000L + (long) (random.nextDouble() * 946_684_800_000L);
+            BIGINT.writeLong(pageBuilder.getBlockBuilder(0), id);
+            PRICE.writeLong(pageBuilder.getBlockBuilder(1), random.nextLong(100_000_000L));
+            AMOUNT.writeObject(pageBuilder.getBlockBuilder(2), Int128.valueOf(new BigInteger(100, random).subtract(BigInteger.ONE.shiftLeft(99))));
+            TIMESTAMP_MICROS.writeLong(pageBuilder.getBlockBuilder(3), epochMillis * 1000 + random.nextInt(1000));
+            TIMESTAMP_TZ_MILLIS.writeLong(pageBuilder.getBlockBuilder(4), packDateTimeWithZone(epochMillis + random.nextInt(86_400_000), TIME_ZONES.get(random.nextInt(TIME_ZONES.size()))));
+            DOUBLE.writeDouble(pageBuilder.getBlockBuilder(5), random.nextGaussian());
+            BOOLEAN.writeBoolean(pageBuilder.getBlockBuilder(6), random.nextBoolean());
+            if (random.nextInt(5) == 0) {
+                pageBuilder.getBlockBuilder(7).appendNull();
+            }
+            else {
+                VARCHAR.writeSlice(pageBuilder.getBlockBuilder(7), utf8Slice(randomText(random, 5 + random.nextInt(26))));
+            }
+            if (random.nextInt(10) < 3) {
+                pageBuilder.getBlockBuilder(8).appendNull();
+            }
+            else {
+                INTEGER.writeLong(pageBuilder.getBlockBuilder(8), random.nextInt(1_000_000));
+            }
+            UUID.writeSlice(pageBuilder.getBlockBuilder(9), javaUuidToTrinoUuid(new java.util.UUID(random.nextLong(), random.nextLong())));
+            int tags = random.nextInt(5);
+            ((ArrayBlockBuilder) pageBuilder.getBlockBuilder(10)).buildEntry(elements -> {
+                for (int i = 0; i < tags; i++) {
+                    VARCHAR.writeSlice(elements, utf8Slice("tag" + random.nextInt(100)));
+                }
+            });
+        }
+
+        private static String randomText(Random random, int length)
+        {
+            char[] text = new char[length];
+            for (int i = 0; i < length; i++) {
+                text[i] = (char) ('a' + random.nextInt(26));
+            }
+            return new String(text);
         }
 
         public long getRows()
@@ -245,11 +345,14 @@ public class BenchmarkQueryDataEncoding
             throws Exception
     {
         // print the encoded size of each encoding before measuring the times
-        for (String encoding : List.of("json", "json+zstd", "json+lz4", "protobuf", "protobuf+zstd", "protobuf+lz4")) {
-            BenchmarkData data = new BenchmarkData();
-            data.encoding = encoding;
-            data.setup();
-            System.out.println(format("%-14s rows=%d segments=%d bytes=%d", encoding, data.getRows(), data.getSegments(), data.getEncodedBytes()));
+        for (String table : List.of("lineitem", "types")) {
+            for (String encoding : List.of("json", "json+zstd", "json+lz4", "protobuf", "protobuf+zstd", "protobuf+lz4")) {
+                BenchmarkData data = new BenchmarkData();
+                data.table = table;
+                data.encoding = encoding;
+                data.setup();
+                System.out.println(format("%-9s %-14s rows=%d segments=%d bytes=%d", table, encoding, data.getRows(), data.getSegments(), data.getEncodedBytes()));
+            }
         }
 
         benchmark(BenchmarkQueryDataEncoding.class)
