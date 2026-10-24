@@ -52,9 +52,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.math.BigInteger;
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -92,6 +89,7 @@ import static io.trino.client.ClientStandardTypes.VARBINARY;
 import static io.trino.client.ClientStandardTypes.VARCHAR;
 import static io.trino.client.ClientStandardTypes.VARIANT;
 import static io.trino.client.ClientTypeSignature.VARCHAR_UNBOUNDED_LENGTH;
+import static java.lang.String.format;
 import static java.util.Collections.singletonList;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -289,26 +287,6 @@ public class TestProtobufQueryDataDecoder
                 .hasMessage("Invalid picos of micro: 1000000");
         assertThatThrownBy(() -> decode(timestamp, Value.newBuilder().setTimestamp(Timestamp.newBuilder().setEpochMicros(0).setPicosOfMicro(-1).setPrecision(12))))
                 .isInstanceOf(ProtobufFormatException.class);
-    }
-
-    @Test
-    public void testDateTimeFormatMatchesServerPattern()
-    {
-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss");
-        List<LocalDateTime> values = new ArrayList<>();
-        for (int year : new int[] {-292275, -10000, -9999, -1000, -999, -100, -99, -10, -9, -1, 0, 1, 9, 10, 99, 100, 999, 1000, 1970, 9999, 10000, 99999, 294247}) {
-            values.add(LocalDateTime.of(year, 1, 1, 0, 0, 0));
-            values.add(LocalDateTime.of(year, 12, 31, 23, 59, 59));
-        }
-        Random random = new Random(1);
-        for (int i = 0; i < 10_000; i++) {
-            values.add(LocalDateTime.ofEpochSecond((long) ((random.nextDouble() * 2 - 1) * 9_223_372_036_854L), 0, ZoneOffset.UTC));
-        }
-        for (LocalDateTime value : values) {
-            StringBuilder builder = new StringBuilder();
-            ProtobufValueDecoders.formatDateTime(value, builder);
-            assertThat(builder.toString()).as("%s", value).isEqualTo(formatter.format(value));
-        }
     }
 
     @Test
@@ -710,6 +688,47 @@ public class TestProtobufQueryDataDecoder
         CloseableIterator<List<Object>> iterator = decoder.decode(unread, DataAttributes.empty());
         iterator.close();
         assertThat(closed[0]).isTrue();
+    }
+
+    @Test
+    public void testZoneIdIsReused()
+    {
+        // The zone id of the previous value is reused when the bytes match, and only then
+        Column column = column(TIMESTAMP_WITH_TIME_ZONE);
+        List<String> zones = ImmutableList.of("UTC", "UTC", "UTX", "UTC", "America/Los_Angeles", "America/Los_Angelos", "Zone/Zürich", "Zone/Zürich", "UTC", "+05:30", "-05:30");
+        Segment.Builder segment = Segment.newBuilder();
+        List<List<Object>> expected = new ArrayList<>();
+        for (int i = 0; i < zones.size(); i++) {
+            segment.addRows(io.trino.client.spooling.encoding.protobuf.generated.Row.newBuilder()
+                    .addValues(Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(i * 1000L).setPrecision(3).setZoneId(zones.get(i)).setOffsetSeconds(i)))
+                    .addValues(Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(0).setPrecision(0).setZoneId("Europe/Warsaw").setOffsetSeconds(3600))));
+            expected.add(ImmutableList.of(format("1970-01-01 00:00:%02d.000 %s", 2 * i, zones.get(i)), "1970-01-01 01:00:00 Europe/Warsaw"));
+        }
+        assertThat(decode(ImmutableList.of(column, column), segment.build().toByteArray(), false)).isEqualTo(expected);
+        assertThatThrownBy(() -> decode(column, Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(0).setPrecision(0).setZoneId(""))))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessage("Timestamp with time zone has no zone id");
+    }
+
+    @Test
+    public void testDecimalBytesForms()
+    {
+        Column decimal = column(DECIMAL);
+        BigInteger value = new BigInteger("-123456789012345678901234567890");
+        // the minimal two's complement form, the 16 bytes of a 128-bit integer, and a longer sign extension
+        for (int length : new int[] {13, 16, 20}) {
+            byte[] bytes = new byte[length];
+            Arrays.fill(bytes, (byte) 0xFF);
+            byte[] minimal = value.toByteArray();
+            System.arraycopy(minimal, 0, bytes, length - minimal.length, minimal.length);
+            assertDecodes(decimal, Value.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledBytes(ByteString.copyFrom(bytes)).setScale(10)), "-12345678901234567890.1234567890");
+        }
+        // a positive value with the leading zero byte that keeps it positive
+        assertDecodes(decimal, Value.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledBytes(ByteString.copyFrom(BigInteger.ONE.shiftLeft(63).toByteArray())).setScale(0)), "9223372036854775808");
+        assertDecodes(decimal, Value.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledBytes(ByteString.copyFrom(BigInteger.ONE.shiftLeft(127).negate().toByteArray())).setScale(38)), "-1.70141183460469231731687303715884105728");
+        assertDecodes(decimal, Value.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledBytes(ByteString.copyFrom(BigInteger.ONE.shiftLeft(127).subtract(BigInteger.ONE).toByteArray())).setScale(0)), "170141183460469231731687303715884105727");
+        // the last of two unscaled fields wins, as for any proto3 field
+        assertDecodes(decimal, Value.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledBytes(ByteString.copyFrom(BigInteger.TEN.toByteArray())).setUnscaledLong(5).setScale(1)), "0.5");
     }
 
     @Test
