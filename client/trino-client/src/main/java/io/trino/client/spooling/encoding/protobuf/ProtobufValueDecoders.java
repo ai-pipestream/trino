@@ -74,6 +74,7 @@ import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.DECI
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.DECIMAL_UNSCALED_BYTES;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.DECIMAL_UNSCALED_LONG;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.INTERVAL_DAY_TO_SECOND_FRACTIONAL_PRECISION;
+import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.INTERVAL_DAY_TO_SECOND_LEGACY_MILLIS;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.INTERVAL_DAY_TO_SECOND_MICROS;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.INTERVAL_DAY_TO_SECOND_PICOS_OF_MICRO;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.MAP_KEYS;
@@ -880,24 +881,41 @@ public final class ProtobufValueDecoders
             long micros = 0;
             int picosOfMicro = 0;
             int fractionalPrecision = 0;
+            boolean hasMicros = false;
+            long legacyMillis = 0;
+            boolean hasLegacyMillis = false;
             while (reader.hasRemaining()) {
                 int tag = reader.readTag();
                 switch (fieldNumber(tag)) {
                     case INTERVAL_DAY_TO_SECOND_MICROS:
                         expectWireType(tag, WIRETYPE_VARINT);
                         micros = reader.readSint64();
+                        hasMicros = true;
                         break;
                     case INTERVAL_DAY_TO_SECOND_PICOS_OF_MICRO:
                         expectWireType(tag, WIRETYPE_VARINT);
                         picosOfMicro = reader.readVarint32();
+                        hasMicros = true;
                         break;
                     case INTERVAL_DAY_TO_SECOND_FRACTIONAL_PRECISION:
                         expectWireType(tag, WIRETYPE_VARINT);
                         fractionalPrecision = reader.readVarint32();
+                        hasMicros = true;
+                        break;
+                    case INTERVAL_DAY_TO_SECOND_LEGACY_MILLIS:
+                        expectWireType(tag, WIRETYPE_VARINT);
+                        legacyMillis = reader.readSint64();
+                        hasLegacyMillis = true;
                         break;
                     default:
                         reader.skipField(tag);
                 }
+            }
+            if (hasLegacyMillis) {
+                if (hasMicros) {
+                    throw new ProtobufFormatException("Interval has both legacy milliseconds and microseconds");
+                }
+                return IntervalDayTime.formatMillis(legacyMillis);
             }
             checkRange("picos of micro", picosOfMicro, 0, PICOSECONDS_PER_MICROSECOND - 1);
             return IntervalDayTime.formatInterval(micros, picosOfMicro, checkPrecision(fractionalPrecision));

@@ -88,11 +88,17 @@ public class SqlIntervalDayTime
     /// microseconds, where it could overflow. Normalization makes ties round toward positive infinity.
     public String formatLegacy()
     {
+        return formatMillis(toLegacyMillis());
+    }
+
+    /// The value rounded half up to milliseconds, the precision of the legacy wire form.
+    public long toLegacyMillis()
+    {
         long millis = floorDiv(microseconds, MICROS_PER_MILLI);
         if (floorMod(microseconds, MICROS_PER_MILLI) >= MICROS_PER_MILLI / 2) {
             millis++;
         }
-        return formatMillis(millis);
+        return millis;
     }
 
     /// Rounds this value to `precision` fractional-seconds digits. The precision is

@@ -95,6 +95,7 @@ import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.DECI
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.DECIMAL_UNSCALED_BYTES;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.DECIMAL_UNSCALED_LONG;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.INTERVAL_DAY_TO_SECOND_FRACTIONAL_PRECISION;
+import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.INTERVAL_DAY_TO_SECOND_LEGACY_MILLIS;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.INTERVAL_DAY_TO_SECOND_MICROS;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.INTERVAL_DAY_TO_SECOND_PICOS_OF_MICRO;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.MAP_KEYS;
@@ -951,7 +952,13 @@ public final class ProtobufEncodingUtils
                     SqlTimeWithTimeZone rounded = time.roundTo(LEGACY_PRECISION);
                     writeTimeWithTimeZone(writer, rounded.getPicos(), LEGACY_PRECISION, rounded.getOffsetMinutes());
                 }
-                case SqlIntervalDayTime interval -> writeIntervalDayTime(writer, interval.roundTo(LEGACY_PRECISION).getMicros(), 0, LEGACY_PRECISION);
+                case SqlIntervalDayTime interval -> {
+                    // Rounded to milliseconds, a value within half a millisecond of the ends of the range
+                    // no longer fits in microseconds
+                    ProtobufWireWriter legacy = writer.child();
+                    legacy.writeSint64(INTERVAL_DAY_TO_SECOND_LEGACY_MILLIS, interval.toLegacyMillis());
+                    writer.writeMessage(VALUE_INTERVAL_DAY_TO_SECOND, legacy);
+                }
                 case SqlIntervalYearMonth interval -> writer.writeSint32(VALUE_INTERVAL_YEAR_TO_MONTH, interval.getMonths());
                 case SqlDate date -> writer.writeSint32(VALUE_DATE, date.getDays());
                 case SqlDecimal decimal -> writeDecimal(writer, VALUE_DECIMAL, decimal.getUnscaledValue(), decimal.getScale());

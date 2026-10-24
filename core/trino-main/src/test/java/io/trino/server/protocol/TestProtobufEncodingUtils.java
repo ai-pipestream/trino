@@ -1000,26 +1000,43 @@ public class TestProtobufEncodingUtils
     }
 
     @Test
-    public void testLegacyIntervalOutOfRange()
+    public void testLegacyIntervalAtRangeEnds()
             throws IOException
     {
-        // The json encoding formats the rounded legacy value as text, so it can exceed the microsecond range;
-        // the protobuf encoding sends microseconds and fails for the two values within half a millisecond of the
-        // ends of the range. Only clients without PARAMETRIC_INTERVAL are affected.
+        // Rounded to milliseconds for a client without PARAMETRIC_INTERVAL, a value within half a millisecond of
+        // the ends of the range no longer fits in microseconds. The json encoding formats the rounded value as
+        // text; the protobuf encoding sends it as milliseconds, so both still work.
         IntervalDayTimeType type = createIntervalDayTimeType(DAY, SECOND, 9, 6);
         Session session = sessionWithoutCapability(ClientCapabilities.PARAMETRIC_INTERVAL);
         List<TypedColumn> columns = ImmutableList.of(typed("col", type));
-        Page page = page(block(type, builder -> type.writeLong(builder, Long.MAX_VALUE)));
-        assertThat(decode(session, columns, "json", ImmutableList.of(page)))
-                .isEqualTo(ImmutableList.of(ImmutableList.of("106751991 04:00:54.776")));
-        for (String encoding : PROTOBUF_ENCODINGS) {
-            assertThatThrownBy(() -> encode(session, columns, encoding, ImmutableList.of(page)))
-                    .hasMessage("Value out of range for an interval after rounding");
-        }
-        assertRoundTrip(session, columns, page(block(type, builder -> {
+        Page page = page(block(type, builder -> {
+            type.writeLong(builder, Long.MAX_VALUE);
             type.writeLong(builder, Long.MAX_VALUE - 500);
+            type.writeLong(builder, Long.MAX_VALUE - 1000);
+            type.writeLong(builder, Long.MIN_VALUE);
             type.writeLong(builder, Long.MIN_VALUE + 500);
-        })));
+            type.writeLong(builder, 0);
+            type.writeLong(builder, -500);
+            type.writeLong(builder, -501);
+            type.writeLong(builder, 1_499);
+            type.writeLong(builder, 1_500);
+        }));
+        assertThat(decode(session, columns, "json", ImmutableList.of(page)))
+                .isEqualTo(ImmutableList.of(
+                        ImmutableList.of("106751991 04:00:54.776"),
+                        ImmutableList.of("106751991 04:00:54.775"),
+                        ImmutableList.of("106751991 04:00:54.775"),
+                        ImmutableList.of("-106751991 04:00:54.776"),
+                        ImmutableList.of("-106751991 04:00:54.775"),
+                        ImmutableList.of("0 00:00:00.000"),
+                        ImmutableList.of("0 00:00:00.000"),
+                        ImmutableList.of("-0 00:00:00.001"),
+                        ImmutableList.of("0 00:00:00.001"),
+                        ImmutableList.of("0 00:00:00.002")));
+        assertRoundTrip(session, columns, page);
+
+        // with the capability, the value is sent in microseconds at the declared precision
+        assertRoundTrip(TEST_SESSION, columns, page);
     }
 
     @Test

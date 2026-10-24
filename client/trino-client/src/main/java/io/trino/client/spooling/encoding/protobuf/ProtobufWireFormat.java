@@ -97,6 +97,7 @@ public final class ProtobufWireFormat
     public static final int INTERVAL_DAY_TO_SECOND_MICROS = 1;
     public static final int INTERVAL_DAY_TO_SECOND_PICOS_OF_MICRO = 2;
     public static final int INTERVAL_DAY_TO_SECOND_FRACTIONAL_PRECISION = 3;
+    public static final int INTERVAL_DAY_TO_SECOND_LEGACY_MILLIS = 4;
 
     // Number
     public static final int NUMBER_DECIMAL = 1;

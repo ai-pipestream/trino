@@ -304,6 +304,17 @@ public class TestProtobufQueryDataDecoder
         assertDecodes(dayToSecond, Value.newBuilder().setIntervalDayToSecond(IntervalDayToSecond.newBuilder().setMicros(-1_234_568L).setPicosOfMicro(109_877).setFractionalPrecision(12)), "-0 00:00:01.234567890123");
         assertDecodes(dayToSecond, Value.newBuilder().setIntervalDayToSecond(IntervalDayToSecond.newBuilder().setMicros(0).setFractionalPrecision(6)), "0 00:00:00.000000");
         assertDecodes(dayToSecond, Value.newBuilder().setIntervalDayToSecond(IntervalDayToSecond.newBuilder().setMicros(Long.MIN_VALUE).setFractionalPrecision(6)), "-106751991 04:00:54.775808");
+
+        // the legacy millisecond form, which reaches past the microsecond range once rounded
+        assertDecodes(dayToSecond, Value.newBuilder().setIntervalDayToSecond(IntervalDayToSecond.newBuilder().setLegacyMillis(93_784_005L)), "1 02:03:04.005");
+        assertDecodes(dayToSecond, Value.newBuilder().setIntervalDayToSecond(IntervalDayToSecond.newBuilder().setLegacyMillis(-1)), "-0 00:00:00.001");
+        assertDecodes(dayToSecond, Value.newBuilder().setIntervalDayToSecond(IntervalDayToSecond.newBuilder().setLegacyMillis(0)), "0 00:00:00.000");
+        assertDecodes(dayToSecond, Value.newBuilder().setIntervalDayToSecond(IntervalDayToSecond.newBuilder().setLegacyMillis(9_223_372_036_854_776L)), "106751991 04:00:54.776");
+        assertDecodes(dayToSecond, Value.newBuilder().setIntervalDayToSecond(IntervalDayToSecond.newBuilder().setLegacyMillis(-9_223_372_036_854_776L)), "-106751991 04:00:54.776");
+        assertDecodes(dayToSecond, Value.newBuilder().setIntervalDayToSecond(IntervalDayToSecond.newBuilder().setLegacyMillis(Long.MIN_VALUE)), "-106751991167 07:12:55.808");
+        assertThatThrownBy(() -> decode(dayToSecond, Value.newBuilder().setIntervalDayToSecond(IntervalDayToSecond.newBuilder().setLegacyMillis(1).setMicros(1_000).setFractionalPrecision(3))))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessage("Interval has both legacy milliseconds and microseconds");
     }
 
     @Test

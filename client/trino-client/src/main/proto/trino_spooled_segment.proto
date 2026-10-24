@@ -170,6 +170,12 @@ message IntervalDayToSecond {
   int32 picos_of_micro = 2;
   // declared fractional seconds precision, 0 to 12
   int32 fractional_precision = 3;
+  // Set instead of the fields above for a client without PARAMETRIC_INTERVAL:
+  // the value rounded half up to milliseconds, rendered with three
+  // fractional digits. Milliseconds, so that a value at the ends of the
+  // microsecond range still fits after rounding. Explicit presence: zero is
+  // a legacy value too.
+  optional sint64 legacy_millis = 4;
 }
 
 message NumberValue {
