@@ -14,7 +14,6 @@
 package io.trino.client.spooling.encoding.protobuf;
 
 import com.fasterxml.jackson.databind.json.JsonMapper;
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.net.InetAddresses;
 import io.trino.client.ClientTypeSignature;
@@ -31,9 +30,6 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -137,11 +133,9 @@ import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.WIRE
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.WIRETYPE_VARINT;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.fieldNumber;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.wireType;
-import static java.lang.Math.abs;
-import static java.lang.Math.floorDiv;
-import static java.lang.Math.floorMod;
 import static java.lang.Math.toIntExact;
 import static java.lang.String.format;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Collections.unmodifiableList;
 import static java.util.Collections.unmodifiableMap;
 
@@ -151,33 +145,14 @@ import static java.util.Collections.unmodifiableMap;
  */
 public final class ProtobufValueDecoders
 {
-    private static final long MICROSECONDS_PER_SECOND = 1_000_000;
-    private static final long MILLISECONDS_PER_SECOND = 1_000;
     private static final long PICOSECONDS_PER_MICROSECOND = 1_000_000;
     private static final long PICOSECONDS_PER_MILLISECOND = 1_000_000_000;
     private static final long PICOSECONDS_PER_SECOND = 1_000_000_000_000L;
-    private static final long PICOSECONDS_PER_MINUTE = 60 * PICOSECONDS_PER_SECOND;
-    private static final long PICOSECONDS_PER_HOUR = 60 * PICOSECONDS_PER_MINUTE;
-    private static final long PICOSECONDS_PER_DAY = 24 * PICOSECONDS_PER_HOUR;
+    private static final long PICOSECONDS_PER_DAY = 24 * 60 * 60 * PICOSECONDS_PER_SECOND;
     private static final int MAX_PRECISION = 12;
     // java.time and Trino limits of zone offsets
     private static final int MAX_OFFSET_SECONDS = 18 * 60 * 60;
     private static final int MAX_TIME_ZONE_OFFSET_MINUTES = 14 * 60;
-    private static final long[] POWERS_OF_TEN = {
-            1L,
-            10L,
-            100L,
-            1000L,
-            10_000L,
-            100_000L,
-            1_000_000L,
-            10_000_000L,
-            100_000_000L,
-            1_000_000_000L,
-            10_000_000_000L,
-            100_000_000_000L,
-            1_000_000_000_000L,
-    };
 
     private static final ValueDecoder BOOLEAN_DECODER = new BooleanDecoder();
     private static final ValueDecoder TINYINT_DECODER = new TinyintDecoder();
@@ -194,7 +169,6 @@ public final class ProtobufValueDecoders
     private static final ValueDecoder TIME_DECODER = new TimeDecoder();
     private static final ValueDecoder TIME_WITH_TIME_ZONE_DECODER = new TimeWithTimeZoneDecoder();
     private static final ValueDecoder TIMESTAMP_DECODER = new TimestampDecoder();
-    private static final ValueDecoder TIMESTAMP_WITH_TIME_ZONE_DECODER = new TimestampWithTimeZoneDecoder();
     private static final ValueDecoder INTERVAL_YEAR_TO_MONTH_DECODER = new IntervalYearToMonthDecoder();
     private static final ValueDecoder INTERVAL_DAY_TO_SECOND_DECODER = new IntervalDayToSecondDecoder();
     private static final ValueDecoder UUID_DECODER = new UuidDecoder();
@@ -260,7 +234,8 @@ public final class ProtobufValueDecoders
             case TIMESTAMP:
                 return TIMESTAMP_DECODER;
             case TIMESTAMP_WITH_TIME_ZONE:
-                return TIMESTAMP_WITH_TIME_ZONE_DECODER;
+                // one per column: it caches the zone id of the last value
+                return new TimestampWithTimeZoneDecoder();
             case INTERVAL_YEAR_TO_MONTH:
                 return INTERVAL_YEAR_TO_MONTH_DECODER;
             case INTERVAL_DAY_TO_SECOND:
@@ -536,7 +511,7 @@ public final class ProtobufValueDecoders
         @Override
         Object decodeValue(ProtobufWireReader reader)
         {
-            return LocalDate.ofEpochDay(reader.readSint32()).toString();
+            return ProtobufValueFormatter.formatDate(reader.readSint32());
         }
     }
 
@@ -640,62 +615,71 @@ public final class ProtobufValueDecoders
         @Override
         Object decodeMessage(ProtobufWireReader reader)
         {
-            DecimalValue decimal = readDecimal(reader);
-            if (decimal.scale < 0) {
-                throw new ProtobufFormatException("Invalid decimal scale: " + decimal.scale);
+            boolean hasUnscaled = false;
+            long unscaledLong = 0;
+            byte[] unscaledBytes = null;
+            int scale = 0;
+            while (reader.hasRemaining()) {
+                int tag = reader.readTag();
+                switch (fieldNumber(tag)) {
+                    case DECIMAL_UNSCALED_LONG:
+                        expectWireType(tag, WIRETYPE_VARINT);
+                        unscaledLong = reader.readSint64();
+                        unscaledBytes = null;
+                        hasUnscaled = true;
+                        break;
+                    case DECIMAL_UNSCALED_BYTES:
+                        expectWireType(tag, WIRETYPE_LENGTH_DELIMITED);
+                        unscaledBytes = readUnscaledBytes(reader);
+                        hasUnscaled = true;
+                        break;
+                    case DECIMAL_SCALE:
+                        expectWireType(tag, WIRETYPE_VARINT);
+                        scale = reader.readSint32();
+                        break;
+                    default:
+                        reader.skipField(tag);
+                }
             }
-            return formatDecimal(decimal);
+            if (!hasUnscaled) {
+                throw new ProtobufFormatException("Decimal has no unscaled value");
+            }
+            if (scale < 0) {
+                throw new ProtobufFormatException("Invalid decimal scale: " + scale);
+            }
+            if (unscaledBytes == null) {
+                return ProtobufValueFormatter.formatDecimal(unscaledLong, scale);
+            }
+            return ProtobufValueFormatter.formatDecimal(unscaledBytes, scale);
         }
     }
 
-    private static final class DecimalValue
+    private static byte[] readUnscaledBytes(ProtobufWireReader reader)
     {
-        private final long unscaledLong;
-        // null when the unscaled value is unscaledLong
-        private final BigInteger unscaledBig;
-        private final int scale;
-
-        private DecimalValue(long unscaledLong, BigInteger unscaledBig, int scale)
-        {
-            this.unscaledLong = unscaledLong;
-            this.unscaledBig = unscaledBig;
-            this.scale = scale;
+        byte[] bytes = reader.readBytes(reader.readLength());
+        if (bytes.length == 0) {
+            throw new ProtobufFormatException("Decimal has empty unscaled bytes");
         }
-
-        BigInteger unscaled()
-        {
-            return unscaledBig == null ? BigInteger.valueOf(unscaledLong) : unscaledBig;
-        }
-
-        String unscaledText()
-        {
-            return unscaledBig == null ? Long.toString(unscaledLong) : unscaledBig.toString();
-        }
+        return bytes;
     }
 
-    private static DecimalValue readDecimal(ProtobufWireReader reader)
+    /**
+     * Reads a {@code Decimal} message as a {@code BigDecimal}, for the types that render through one.
+     */
+    private static BigDecimal readBigDecimal(ProtobufWireReader reader)
     {
-        boolean hasUnscaled = false;
-        long unscaledLong = 0;
-        BigInteger unscaledBig = null;
+        BigInteger unscaled = null;
         int scale = 0;
         while (reader.hasRemaining()) {
             int tag = reader.readTag();
             switch (fieldNumber(tag)) {
                 case DECIMAL_UNSCALED_LONG:
                     expectWireType(tag, WIRETYPE_VARINT);
-                    unscaledLong = reader.readSint64();
-                    unscaledBig = null;
-                    hasUnscaled = true;
+                    unscaled = BigInteger.valueOf(reader.readSint64());
                     break;
                 case DECIMAL_UNSCALED_BYTES:
                     expectWireType(tag, WIRETYPE_LENGTH_DELIMITED);
-                    byte[] bytes = reader.readBytes(reader.readLength());
-                    if (bytes.length == 0) {
-                        throw new ProtobufFormatException("Decimal has empty unscaled bytes");
-                    }
-                    unscaledBig = new BigInteger(bytes);
-                    hasUnscaled = true;
+                    unscaled = new BigInteger(readUnscaledBytes(reader));
                     break;
                 case DECIMAL_SCALE:
                     expectWireType(tag, WIRETYPE_VARINT);
@@ -705,10 +689,10 @@ public final class ProtobufValueDecoders
                     reader.skipField(tag);
             }
         }
-        if (!hasUnscaled) {
+        if (unscaled == null) {
             throw new ProtobufFormatException("Decimal has no unscaled value");
         }
-        return new DecimalValue(unscaledLong, unscaledBig, scale);
+        return new BigDecimal(unscaled, scale);
     }
 
     private static class TimeDecoder
@@ -740,9 +724,7 @@ public final class ProtobufValueDecoders
                 }
             }
             checkRange("picos", picos, 0, PICOSECONDS_PER_DAY - 1);
-            StringBuilder builder = new StringBuilder(8 + (precision == 0 ? 0 : 1 + precision));
-            formatTime(picos, checkPrecision(precision), builder);
-            return builder.toString();
+            return ProtobufValueFormatter.formatTime(checkPrecision(precision), picos);
         }
     }
 
@@ -781,13 +763,7 @@ public final class ProtobufValueDecoders
             }
             checkRange("picos", picos, 0, PICOSECONDS_PER_DAY - 1);
             checkRange("offset minutes", offsetMinutes, -MAX_TIME_ZONE_OFFSET_MINUTES, MAX_TIME_ZONE_OFFSET_MINUTES);
-            StringBuilder builder = new StringBuilder(14 + (precision == 0 ? 0 : 1 + precision));
-            formatTime(picos, checkPrecision(precision), builder);
-            builder.append(offsetMinutes >= 0 ? '+' : '-');
-            appendTwoDigits(abs(offsetMinutes / 60), builder);
-            builder.append(':');
-            appendTwoDigits(abs(offsetMinutes % 60), builder);
-            return builder.toString();
+            return ProtobufValueFormatter.formatTimeWithTimeZone(checkPrecision(precision), picos, offsetMinutes);
         }
     }
 
@@ -825,13 +801,18 @@ public final class ProtobufValueDecoders
                 }
             }
             checkRange("picos of micro", picosOfMicro, 0, PICOSECONDS_PER_MICROSECOND - 1);
-            return formatTimestamp(checkPrecision(precision), epochMicros, picosOfMicro);
+            return ProtobufValueFormatter.formatTimestamp(checkPrecision(precision), epochMicros, picosOfMicro);
         }
     }
 
     private static class TimestampWithTimeZoneDecoder
             extends MessageDecoder
     {
+        // The zone id of the last value: a column usually holds one zone, so the text is decoded
+        // once. The entry is immutable and the field is only a hint, so a racing thread sees either
+        // a complete entry or none
+        private ZoneId lastZoneId;
+
         TimestampWithTimeZoneDecoder()
         {
             super(VALUE_TIMESTAMP_WITH_TIME_ZONE);
@@ -843,7 +824,7 @@ public final class ProtobufValueDecoders
             long epochMillis = 0;
             int picosOfMilli = 0;
             int precision = 0;
-            String zoneId = null;
+            ZoneId zoneId = null;
             int offsetSeconds = 0;
             while (reader.hasRemaining()) {
                 int tag = reader.readTag();
@@ -862,7 +843,7 @@ public final class ProtobufValueDecoders
                         break;
                     case TIMESTAMP_WITH_TIME_ZONE_ZONE_ID:
                         expectWireType(tag, WIRETYPE_LENGTH_DELIMITED);
-                        zoneId = reader.readString(reader.readLength());
+                        zoneId = readZoneId(reader);
                         break;
                     case TIMESTAMP_WITH_TIME_ZONE_OFFSET_SECONDS:
                         expectWireType(tag, WIRETYPE_VARINT);
@@ -879,7 +860,44 @@ public final class ProtobufValueDecoders
             checkRange("offset seconds", offsetSeconds, -MAX_OFFSET_SECONDS, MAX_OFFSET_SECONDS);
             // The server resolves the offset with its own time zone rules, so the client renders the
             // local date-time the json encoding would have, even for a zone the client does not know
-            return formatTimestampWithTimeZone(checkPrecision(precision), epochMillis, picosOfMilli, ZoneOffset.ofTotalSeconds(offsetSeconds), zoneId);
+            return ProtobufValueFormatter.formatTimestampWithTimeZone(checkPrecision(precision), epochMillis, picosOfMilli, offsetSeconds, zoneId.id, zoneId.ascii);
+        }
+
+        private ZoneId readZoneId(ProtobufWireReader reader)
+        {
+            int length = reader.readLength();
+            ZoneId cached = lastZoneId;
+            if (cached != null && reader.skipIfEqual(length, cached.utf8)) {
+                return cached;
+            }
+            ZoneId zoneId = new ZoneId(reader.readBytes(length));
+            lastZoneId = zoneId;
+            return zoneId;
+        }
+    }
+
+    private static final class ZoneId
+    {
+        private final byte[] utf8;
+        private final String id;
+        // the bytes again when they are all ASCII, which every zone id Trino knows is, otherwise null
+        private final byte[] ascii;
+
+        private ZoneId(byte[] utf8)
+        {
+            this.utf8 = utf8;
+            this.id = new String(utf8, UTF_8);
+            this.ascii = isAscii(utf8) ? utf8 : null;
+        }
+
+        private static boolean isAscii(byte[] bytes)
+        {
+            for (byte b : bytes) {
+                if (b < 0) {
+                    return false;
+                }
+            }
+            return true;
         }
     }
 
@@ -956,10 +974,9 @@ public final class ProtobufValueDecoders
                     case NUMBER_DECIMAL:
                         expectWireType(tag, WIRETYPE_LENGTH_DELIMITED);
                         int previousLimit = reader.pushLimit(reader.readLength());
-                        DecimalValue decimal = readDecimal(reader);
-                        reader.popLimit(previousLimit);
                         // NUMBER renders through BigDecimal, which switches to scientific notation for small values
-                        value = new BigDecimal(decimal.unscaled(), decimal.scale).toString();
+                        value = readBigDecimal(reader).toString();
+                        reader.popLimit(previousLimit);
                         break;
                     case NUMBER_SPECIAL:
                         expectWireType(tag, WIRETYPE_VARINT);
@@ -1223,119 +1240,5 @@ public final class ProtobufValueDecoders
             throw new ProtobufFormatException("Invalid precision: " + precision);
         }
         return precision;
-    }
-
-    // The formatting below mirrors SqlDecimal, SqlTime, SqlTimeWithTimeZone, SqlTimestamp and
-    // SqlTimestampWithTimeZone in trino-spi, which the client cannot depend on.
-
-    private static String formatDecimal(DecimalValue decimal)
-    {
-        String unscaled = decimal.unscaledText();
-        int scale = decimal.scale;
-        StringBuilder result = new StringBuilder(unscaled.length() + 2);
-        if (unscaled.startsWith("-")) {
-            result.append('-');
-            unscaled = unscaled.substring(1);
-        }
-        if (unscaled.length() <= scale) {
-            result.append('0');
-        }
-        else {
-            result.append(unscaled, 0, unscaled.length() - scale);
-        }
-        if (scale > 0) {
-            result.append('.');
-            for (int i = unscaled.length(); i < scale; i++) {
-                result.append('0');
-            }
-            result.append(unscaled, Math.max(0, unscaled.length() - scale), unscaled.length());
-        }
-        return result.toString();
-    }
-
-    private static void formatTime(long picos, int precision, StringBuilder builder)
-    {
-        appendTwoDigits((int) (picos / PICOSECONDS_PER_HOUR), builder);
-        builder.append(':');
-        appendTwoDigits((int) ((picos / PICOSECONDS_PER_MINUTE) % 60), builder);
-        builder.append(':');
-        appendTwoDigits((int) ((picos / PICOSECONDS_PER_SECOND) % 60), builder);
-        if (precision > 0) {
-            appendFraction((picos % PICOSECONDS_PER_SECOND) / POWERS_OF_TEN[MAX_PRECISION - precision], precision, builder);
-        }
-    }
-
-    static String formatTimestamp(int precision, long epochMicros, int picosOfMicro)
-    {
-        LocalDateTime dateTime = LocalDateTime.ofEpochSecond(floorDiv(epochMicros, MICROSECONDS_PER_SECOND), 0, ZoneOffset.UTC);
-        long picoFraction = floorMod(epochMicros, MICROSECONDS_PER_SECOND) * PICOSECONDS_PER_MICROSECOND + picosOfMicro;
-        StringBuilder builder = new StringBuilder(19 + (precision == 0 ? 0 : precision + 1));
-        formatTimestamp(precision, dateTime, picoFraction, builder);
-        return builder.toString();
-    }
-
-    static String formatTimestampWithTimeZone(int precision, long epochMillis, int picosOfMilli, ZoneOffset offset, String zoneId)
-    {
-        LocalDateTime dateTime = LocalDateTime.ofEpochSecond(floorDiv(epochMillis, MILLISECONDS_PER_SECOND), 0, offset);
-        long picoFraction = floorMod(epochMillis, MILLISECONDS_PER_SECOND) * PICOSECONDS_PER_MILLISECOND + picosOfMilli;
-        StringBuilder builder = new StringBuilder(20 + (precision == 0 ? 0 : precision + 1) + zoneId.length());
-        formatTimestamp(precision, dateTime, picoFraction, builder);
-        return builder.append(' ').append(zoneId).toString();
-    }
-
-    private static void formatTimestamp(int precision, LocalDateTime dateTime, long picoFraction, StringBuilder builder)
-    {
-        formatDateTime(dateTime, builder);
-        if (precision > 0) {
-            appendFraction(picoFraction / POWERS_OF_TEN[MAX_PRECISION - precision], precision, builder);
-        }
-    }
-
-    /**
-     * Formats like {@code DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss")}, the server's pattern, without
-     * the formatter's overhead: a year beyond 9999 gets a plus sign, a negative year a minus sign.
-     */
-    @VisibleForTesting
-    static void formatDateTime(LocalDateTime dateTime, StringBuilder builder)
-    {
-        int year = dateTime.getYear();
-        if (year > 9999) {
-            builder.append('+');
-        }
-        else if (year < 0) {
-            builder.append('-');
-        }
-        int absoluteYear = Math.abs(year);
-        if (absoluteYear < 1000) {
-            builder.append(absoluteYear < 10 ? "000" : absoluteYear < 100 ? "00" : "0");
-        }
-        builder.append(absoluteYear).append('-');
-        appendTwoDigits(dateTime.getMonthValue(), builder);
-        builder.append('-');
-        appendTwoDigits(dateTime.getDayOfMonth(), builder);
-        builder.append(' ');
-        appendTwoDigits(dateTime.getHour(), builder);
-        builder.append(':');
-        appendTwoDigits(dateTime.getMinute(), builder);
-        builder.append(':');
-        appendTwoDigits(dateTime.getSecond(), builder);
-    }
-
-    private static void appendFraction(long scaledFraction, int precision, StringBuilder builder)
-    {
-        builder.append('.');
-        String digits = Long.toString(scaledFraction);
-        for (int i = digits.length(); i < precision; i++) {
-            builder.append('0');
-        }
-        builder.append(digits);
-    }
-
-    private static void appendTwoDigits(int value, StringBuilder builder)
-    {
-        if (value < 10) {
-            builder.append('0');
-        }
-        builder.append(value);
     }
 }

@@ -32,6 +32,8 @@ import static java.nio.charset.StandardCharsets.UTF_8;
  */
 public final class ProtobufWireReader
 {
+    private static final int MAX_VARINT_SIZE = 10;
+
     private byte[] buffer = new byte[0];
     private int position;
     private int limit;
@@ -108,11 +110,31 @@ public final class ProtobufWireReader
 
     public long readVarint64()
     {
+        byte[] buffer = this.buffer;
+        int position = this.position;
+        if (limit - position < MAX_VARINT_SIZE) {
+            return readVarint64Checked();
+        }
+        // enough bytes for the longest varint: no bounds check per byte
+        long result = 0;
+        for (int shift = 0; shift < 64; shift += 7) {
+            byte b = buffer[position++];
+            result |= (long) (b & 0x7F) << shift;
+            if (b >= 0) {
+                this.position = position;
+                return result;
+            }
+        }
+        throw new ProtobufFormatException("Malformed varint at position " + this.position);
+    }
+
+    private long readVarint64Checked()
+    {
         long result = 0;
         for (int shift = 0; shift < 64; shift += 7) {
             byte b = readByte();
             result |= (long) (b & 0x7F) << shift;
-            if ((b & 0x80) == 0) {
+            if (b >= 0) {
                 return result;
             }
         }
@@ -194,6 +216,23 @@ public final class ProtobufWireReader
         String result = new String(buffer, position, length, UTF_8);
         position += length;
         return result;
+    }
+
+    /**
+     * Consumes the next {@code length} bytes when they are exactly {@code expected}, and returns whether
+     * they were; otherwise nothing is consumed.
+     */
+    public boolean skipIfEqual(int length, byte[] expected)
+    {
+        if (length != expected.length) {
+            return false;
+        }
+        ensureRemaining(length);
+        if (!Arrays.equals(buffer, position, position + length, expected, 0, length)) {
+            return false;
+        }
+        position += length;
+        return true;
     }
 
     public void skip(int length)
