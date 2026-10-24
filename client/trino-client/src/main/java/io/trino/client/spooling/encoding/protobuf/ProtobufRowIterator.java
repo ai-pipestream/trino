@@ -45,11 +45,16 @@ public class ProtobufRowIterator
         implements CloseableIterator<List<Object>>
 {
     private static final int MAX_ROW_SIZE = Integer.MAX_VALUE - 8;
+    private static final int INITIAL_BUFFER_SIZE = 64 * 1024;
 
     private final InputStream input;
     private final ValueDecoder[] decoders;
     private final ProtobufWireReader reader = new ProtobufWireReader();
-    private byte[] rowBuffer = new byte[1024];
+    // The segment is read in chunks, and each row is decoded in place from [position, limit)
+    private byte[] buffer = new byte[INITIAL_BUFFER_SIZE];
+    private int position;
+    private int limit;
+    private boolean endOfInput;
     private List<Object> nextRow;
     private boolean finished;
 
@@ -101,10 +106,11 @@ public class ProtobufRowIterator
             throws IOException
     {
         while (true) {
-            long value = readVarint();
-            if (value == -1) {
+            if (!ensureAvailable(1)) {
+                // a clean end of input
                 return null;
             }
+            long value = readVarint();
             if (value > 0xFFFFFFFFL || fieldNumber((int) value) == 0) {
                 throw new ProtobufFormatException("Invalid segment field tag: " + value);
             }
@@ -118,35 +124,48 @@ public class ProtobufRowIterator
                 throw new ProtobufFormatException(format("Unexpected wire type %s for segment rows", wireType(tag)));
             }
             long length = readVarint();
-            if (length < 0 || length > MAX_ROW_SIZE) {
+            if (length > MAX_ROW_SIZE) {
                 throw new ProtobufFormatException("Invalid row length: " + length);
             }
             int rowLength = (int) length;
-            readRowBytes(rowLength);
-            reader.reset(rowBuffer, 0, rowLength);
+            if (!ensureAvailable(rowLength)) {
+                throw new EOFException(format("Truncated row: expected %s bytes but got %s", rowLength, limit - position));
+            }
+            reader.reset(buffer, position, rowLength);
+            position += rowLength;
             return decodeRow();
         }
     }
 
     /**
-     * Reads the row into the row buffer. The buffer grows with the bytes actually read, so a corrupt
-     * length cannot make the client allocate more memory than the segment holds.
+     * Reads from the input until at least {@code length} unread bytes are buffered, or the input ends.
+     * The buffer grows with the bytes actually read, so a corrupt length cannot make the client allocate
+     * more memory than the segment holds.
      */
-    private void readRowBytes(int rowLength)
+    private boolean ensureAvailable(int length)
             throws IOException
     {
-        int position = 0;
-        while (position < rowLength) {
-            if (position == rowBuffer.length) {
-                rowBuffer = Arrays.copyOf(rowBuffer, (int) Math.min(rowLength, 2L * rowBuffer.length));
+        while (limit - position < length) {
+            if (endOfInput) {
+                return false;
             }
-            int chunk = Math.min(rowLength, rowBuffer.length) - position;
-            int read = input.readNBytes(rowBuffer, position, chunk);
-            position += read;
-            if (read != chunk) {
-                throw new EOFException(format("Truncated row: expected %s bytes but got %s", rowLength, position));
+            if (position > 0 && (position == limit || buffer.length - position < length)) {
+                System.arraycopy(buffer, position, buffer, 0, limit - position);
+                limit -= position;
+                position = 0;
+            }
+            if (limit == buffer.length) {
+                buffer = Arrays.copyOf(buffer, (int) Math.min(length, 2L * buffer.length));
+            }
+            int read = input.read(buffer, limit, buffer.length - limit);
+            if (read == -1) {
+                endOfInput = true;
+            }
+            else {
+                limit += read;
             }
         }
+        return true;
     }
 
     private List<Object> decodeRow()
@@ -173,22 +192,19 @@ public class ProtobufRowIterator
     }
 
     /**
-     * Reads a varint from the stream, or returns -1 at a clean end of input.
+     * Reads a varint of the segment itself. The caller has checked that at least one byte is available.
      */
     private long readVarint()
             throws IOException
     {
         long result = 0;
         for (int shift = 0; shift < 64; shift += 7) {
-            int b = input.read();
-            if (b == -1) {
-                if (shift == 0) {
-                    return -1;
-                }
+            if (!ensureAvailable(1)) {
                 throw new EOFException("Truncated varint");
             }
+            byte b = buffer[position++];
             result |= (long) (b & 0x7F) << shift;
-            if ((b & 0x80) == 0) {
+            if (b >= 0) {
                 if (result < 0) {
                     throw new ProtobufFormatException("Varint out of range: " + result);
                 }
@@ -203,16 +219,14 @@ public class ProtobufRowIterator
     {
         switch (wireType(tag)) {
             case WIRETYPE_VARINT:
-                if (readVarint() == -1) {
-                    throw new EOFException("Truncated varint");
-                }
+                readVarint();
                 break;
             case WIRETYPE_FIXED64:
                 skip(8);
                 break;
             case WIRETYPE_LENGTH_DELIMITED:
                 long length = readVarint();
-                if (length < 0 || length > MAX_ROW_SIZE) {
+                if (length > MAX_ROW_SIZE) {
                     throw new ProtobufFormatException("Invalid field length: " + length);
                 }
                 skip((int) length);
@@ -228,14 +242,14 @@ public class ProtobufRowIterator
     private void skip(int length)
             throws IOException
     {
-        long skipped = input.skip(length);
-        if (skipped != length) {
-            // skip is allowed to stop early, so read the rest
-            for (long i = skipped; i < length; i++) {
-                if (input.read() == -1) {
-                    throw new EOFException("Truncated segment");
-                }
+        int remaining = length;
+        while (remaining > 0) {
+            if (position == limit && !ensureAvailable(1)) {
+                throw new EOFException("Truncated segment");
             }
+            int chunk = Math.min(remaining, limit - position);
+            position += chunk;
+            remaining -= chunk;
         }
     }
 

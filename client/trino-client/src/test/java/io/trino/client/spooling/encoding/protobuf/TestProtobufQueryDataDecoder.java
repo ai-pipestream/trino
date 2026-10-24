@@ -691,6 +691,42 @@ public class TestProtobufQueryDataDecoder
     }
 
     @Test
+    public void testSegmentsAreReadInChunks()
+    {
+        // Rows are decoded in place from a buffer the segment is read into in chunks, so rows straddle chunk
+        // boundaries, and a row larger than the buffer makes it grow
+        Random random = new Random(7);
+        Segment.Builder segment = Segment.newBuilder();
+        List<List<Object>> expected = new ArrayList<>();
+        for (int i = 0; i < 5000; i++) {
+            int length = i % 1000 == 999 ? 100_000 + i : random.nextInt(200);
+            char[] text = new char[length];
+            Arrays.fill(text, (char) ('a' + i % 26));
+            String value = new String(text);
+            segment.addRows(io.trino.client.spooling.encoding.protobuf.generated.Row.newBuilder()
+                    .addValues(Value.newBuilder().setBigint(i))
+                    .addValues(i % 7 == 0 ? Value.newBuilder().setNull(NullValue.NULL_VALUE) : Value.newBuilder().setVarchar(value)));
+            expected.add(Arrays.asList((long) i, i % 7 == 0 ? null : value));
+        }
+        byte[] bytes = segment.build().toByteArray();
+        assertThat(bytes.length).isGreaterThan(500_000);
+        List<Column> columns = ImmutableList.of(column(BIGINT), column(varchar()));
+        assertThat(decode(columns, new ByteArrayInputStream(bytes))).isEqualTo(expected);
+        // the input delivers one byte, or a few bytes, per read
+        assertThat(decode(columns, new ChunkedInputStream(bytes, 1, 1))).isEqualTo(expected);
+        assertThat(decode(columns, new ChunkedInputStream(bytes, 1, 1000))).isEqualTo(expected);
+        assertThat(decode(columns, new ChunkedInputStream(bytes, 60_000, 70_000))).isEqualTo(expected);
+        // an unknown segment field larger than the buffer is skipped in chunks
+        byte[] unknownField = new byte[150_000];
+        Arrays.fill(unknownField, (byte) 'x');
+        Segment withUnknownField = Segment.newBuilder()
+                .setUnknownFields(UnknownFieldSet.newBuilder().addField(99, UnknownFieldSet.Field.newBuilder().addLengthDelimited(ByteString.copyFrom(unknownField)).build()).build())
+                .addRows(io.trino.client.spooling.encoding.protobuf.generated.Row.newBuilder().addValues(Value.newBuilder().setBigint(1)).addValues(Value.newBuilder().setVarchar("a")))
+                .build();
+        assertThat(decode(columns, new ChunkedInputStream(withUnknownField.toByteArray(), 1, 100))).isEqualTo(ImmutableList.of(Arrays.asList(1L, "a")));
+    }
+
+    @Test
     public void testZoneIdIsReused()
     {
         // The zone id of the previous value is reused when the bytes match, and only then
@@ -729,6 +765,59 @@ public class TestProtobufQueryDataDecoder
         assertDecodes(decimal, Value.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledBytes(ByteString.copyFrom(BigInteger.ONE.shiftLeft(127).subtract(BigInteger.ONE).toByteArray())).setScale(0)), "170141183460469231731687303715884105727");
         // the last of two unscaled fields wins, as for any proto3 field
         assertDecodes(decimal, Value.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledBytes(ByteString.copyFrom(BigInteger.TEN.toByteArray())).setUnscaledLong(5).setScale(1)), "0.5");
+    }
+
+    private static List<List<Object>> decode(List<Column> columns, InputStream input)
+    {
+        QueryDataDecoder decoder = QueryDataDecoders.get("protobuf").create(columns, DataAttributes.empty(), false);
+        try (CloseableIterator<List<Object>> iterator = decoder.decode(input, DataAttributes.empty())) {
+            List<List<Object>> rows = new ArrayList<>();
+            while (iterator.hasNext()) {
+                rows.add(iterator.next());
+            }
+            return rows;
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
+     * Delivers between {@code minChunk} and {@code maxChunk} bytes per read, however many were asked for.
+     */
+    private static class ChunkedInputStream
+            extends InputStream
+    {
+        private final byte[] bytes;
+        private final int minChunk;
+        private final int maxChunk;
+        private final Random random = new Random(0);
+        private int position;
+
+        ChunkedInputStream(byte[] bytes, int minChunk, int maxChunk)
+        {
+            this.bytes = bytes;
+            this.minChunk = minChunk;
+            this.maxChunk = maxChunk;
+        }
+
+        @Override
+        public int read()
+        {
+            return position < bytes.length ? bytes[position++] & 0xFF : -1;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length)
+        {
+            if (position == bytes.length) {
+                return -1;
+            }
+            int chunk = Math.min(Math.min(length, bytes.length - position), minChunk + random.nextInt(maxChunk - minChunk + 1));
+            System.arraycopy(bytes, position, buffer, offset, chunk);
+            position += chunk;
+            return chunk;
+        }
     }
 
     @Test
