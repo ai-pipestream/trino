@@ -55,7 +55,7 @@ public class TestNullRowEncoderFactory
     @Test
     public void testColumnsAreRejected()
     {
-        KafkaColumnHandle column = new KafkaColumnHandle("key", BIGINT, "key", null, null, true, false, false);
+        KafkaColumnHandle column = new KafkaColumnHandle("key", BIGINT, "key", null, null, true, false, false, Optional.empty());
         RowEncoderSpec spec = new RowEncoderSpec(DummyRowDecoder.NAME, Optional.empty(), Optional.empty(), ImmutableList.of(column), "orders", KEY);
         assertThatThrownBy(() -> FACTORY.create(SESSION, spec))
                 .isInstanceOf(IllegalArgumentException.class)

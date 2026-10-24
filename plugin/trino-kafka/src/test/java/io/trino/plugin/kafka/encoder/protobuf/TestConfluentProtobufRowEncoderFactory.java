@@ -86,9 +86,9 @@ public class TestConfluentProtobufRowEncoderFactory
             }
             """;
 
-    private static final KafkaColumnHandle COL_1 = new KafkaColumnHandle("col_1", VARCHAR, "col_1", null, null, false, false, false);
-    private static final KafkaColumnHandle COL_2 = new KafkaColumnHandle("col_2", BIGINT, "col_2", null, null, false, false, false);
-    private static final KafkaColumnHandle COL_3 = new KafkaColumnHandle("col_3", BIGINT, "col_3", null, null, false, false, false);
+    private static final KafkaColumnHandle COL_1 = new KafkaColumnHandle("col_1", VARCHAR, "col_1", null, null, false, false, false, Optional.empty());
+    private static final KafkaColumnHandle COL_2 = new KafkaColumnHandle("col_2", BIGINT, "col_2", null, null, false, false, false, Optional.empty());
+    private static final KafkaColumnHandle COL_3 = new KafkaColumnHandle("col_3", BIGINT, "col_3", null, null, false, false, false, Optional.empty());
 
     @Test
     public void testEncodeInConfluentWireFormat()
@@ -182,7 +182,7 @@ public class TestConfluentProtobufRowEncoderFactory
 
         // the table's message is used even when the subject does not name it
         Descriptor other = ((ConfluentProtobufSchema) client.getSchemaById(tableSchemaId)).findMessage("Other").orElseThrow();
-        KafkaColumnHandle name = new KafkaColumnHandle("name", VARCHAR, "name", null, null, false, false, false);
+        KafkaColumnHandle name = new KafkaColumnHandle("name", VARCHAR, "name", null, null, false, false, false, Optional.empty());
         try (RowEncoder encoder = createEncoder(client, Optional.of(readerSchemaReference(tableSchemaId, other)), Optional.of(subject), ImmutableList.of(name))) {
             encoder.appendColumnValue(writeNativeValue(VARCHAR, utf8Slice("other")), 0);
             Frame frame = readFrame(encoder.toByteArray());
@@ -209,7 +209,7 @@ public class TestConfluentProtobufRowEncoderFactory
                     int64 key = 1;
                 }
                 """));
-        KafkaColumnHandle key = new KafkaColumnHandle("key", BIGINT, "key", null, null, true, false, false);
+        KafkaColumnHandle key = new KafkaColumnHandle("key", BIGINT, "key", null, null, true, false, false, Optional.empty());
         RowEncoderSpec spec = new RowEncoderSpec(ProtobufRowEncoder.NAME, Optional.empty(), Optional.of(TOPIC + "-key"), ImmutableList.of(key), TOPIC, KEY);
         try (RowEncoder encoder = new ConfluentProtobufRowEncoderFactory(client).create(TestingConnectorSession.SESSION, spec)) {
             encoder.appendColumnValue(writeNativeValue(BIGINT, 7L), 0);
@@ -229,7 +229,7 @@ public class TestConfluentProtobufRowEncoderFactory
         String subject = TOPIC + "-Other";
         int schemaId = client.register(subject, schema(client, SCHEMA));
         Descriptor other = ((ConfluentProtobufSchema) client.getSchemaById(schemaId)).getFileDescriptor().findMessageTypeByName("Other");
-        KafkaColumnHandle name = new KafkaColumnHandle("name", VARCHAR, "name", null, null, false, false, false);
+        KafkaColumnHandle name = new KafkaColumnHandle("name", VARCHAR, "name", null, null, false, false, false, Optional.empty());
 
         try (RowEncoder encoder = createEncoder(client, Optional.of(subject), ImmutableList.of(name))) {
             encoder.appendColumnValue(writeNativeValue(VARCHAR, utf8Slice("second")), 0);
@@ -287,9 +287,9 @@ public class TestConfluentProtobufRowEncoderFactory
         MapType mapType = new MapType(VARCHAR, VARCHAR, new TypeOperators());
         ArrayType arrayType = new ArrayType(VARCHAR);
         List<EncoderColumnHandle> columns = ImmutableList.of(
-                new KafkaColumnHandle("attributes", mapType, "attributes", null, null, false, false, false),
-                new KafkaColumnHandle("color", VARCHAR, "color", null, null, false, false, false),
-                new KafkaColumnHandle("palette", arrayType, "palette", null, null, false, false, false));
+                new KafkaColumnHandle("attributes", mapType, "attributes", null, null, false, false, false, Optional.empty()),
+                new KafkaColumnHandle("color", VARCHAR, "color", null, null, false, false, false, Optional.empty()),
+                new KafkaColumnHandle("palette", arrayType, "palette", null, null, false, false, false, Optional.empty()));
 
         try (RowEncoder encoder = createEncoder(client, Optional.of(TOPIC + "-value"), columns)) {
             encoder.appendColumnValue(writeNativeValue(mapType, buildMapValue(mapType, 1, (keyBuilder, valueBuilder) -> {
