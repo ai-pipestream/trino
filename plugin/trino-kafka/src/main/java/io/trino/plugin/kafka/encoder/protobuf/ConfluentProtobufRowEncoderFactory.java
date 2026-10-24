@@ -97,7 +97,13 @@ public class ConfluentProtobufRowEncoderFactory
         try {
             schema = schemaRegistryClient.getSchemaBySubjectAndId(subject, schemaId);
         }
-        catch (RestClientException | IOException e) {
+        catch (RestClientException e) {
+            if (e.getStatus() == HTTP_NOT_FOUND) {
+                throw new TrinoException(KAFKA_SCHEMA_ERROR, format("Schema id %s of subject '%s' does not exist in the schema registry", schemaId, subject), e);
+            }
+            throw new TrinoException(KAFKA_SCHEMA_REGISTRY_ERROR, format("Failed to fetch schema id %s of subject '%s' from the schema registry: %s", schemaId, subject, e.getMessage()), e);
+        }
+        catch (IOException e) {
             throw new TrinoException(KAFKA_SCHEMA_REGISTRY_ERROR, format("Failed to fetch schema id %s of subject '%s' from the schema registry: %s", schemaId, subject, e.getMessage()), e);
         }
         if (!(schema instanceof ConfluentProtobufSchema protobufSchema)) {

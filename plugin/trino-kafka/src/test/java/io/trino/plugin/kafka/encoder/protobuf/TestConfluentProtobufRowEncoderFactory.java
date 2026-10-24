@@ -194,6 +194,12 @@ public class TestConfluentProtobufRowEncoderFactory
                 () -> createEncoder(client, Optional.of("schema-registry-id:" + tableSchemaId + ";message=Missing"), Optional.of(subject), ImmutableList.of(COL_1)),
                 KAFKA_SCHEMA_ERROR,
                 "Schema id " + tableSchemaId + " of subject 'orders-value' does not declare message Missing");
+
+        // the schema of the table was deleted from the registry after the table was described
+        assertTrinoException(
+                () -> createEncoder(client, Optional.of("schema-registry-id:999;message=schema"), Optional.of(subject), ImmutableList.of(COL_1)),
+                KAFKA_SCHEMA_ERROR,
+                "Schema id 999 of subject 'orders-value' does not exist in the schema registry");
     }
 
     @Test
