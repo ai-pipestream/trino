@@ -78,9 +78,10 @@ Size and timing comparison on TPC-H `lineitem` sf1:
 - Benchmark results (`BenchmarkQueryDataEncoding`, 3 forks, TPC-H `lineitem`
   sf1 and a generated type-rich table): the server encodes 2.2× to 4.3×
   faster uncompressed and up to 2.9× faster compressed. Client decoding is
-  faster on `lineitem` but 1.5× to 1.9× slower on the type-rich table,
-  because the client now formats decimals and timestamps as strings, which
-  JSON receives preformatted. Size after Zstandard is 16% larger on
+  1.4× to 1.65× faster on `lineitem`; on the type-rich table it is 10%
+  slower uncompressed and equal or faster compressed, because the client
+  formats decimals and timestamps as strings, which JSON receives
+  preformatted. Size after Zstandard is 16% larger on
   `lineitem` and 14% smaller on the type-rich table. Details in
   `docs/briefs/protobuf-spooling-encoding-results.md`.
 - Open questions for reviewers:

@@ -152,9 +152,31 @@ The decoder checks every segment it reads and fails with
 Unknown fields in `Segment`, `Row` (other than `values`), and the nested
 messages are skipped, so the schema can grow without breaking older clients.
 
-The row buffer grows with the bytes actually read, so a corrupt row length
-cannot make the client allocate up to 2 GB before it notices the segment is
-truncated.
+The segment is read into a buffer in large chunks and each row is decoded in
+place. A row larger than the buffer grows it only as its bytes arrive, so a
+corrupt row length cannot make the client allocate up to 2 GB before it
+notices the segment is truncated.
+
+### Client formatting
+
+The client API exposes dates, times, timestamps and decimals as the text the
+`json` encoding carries, which the server formats through `SqlDate`,
+`SqlTimestamp`, `SqlDecimal` and their relatives in trino-spi. The client
+cannot depend on trino-spi, and `java.time` and `BigInteger` were the main
+cost of decoding a type-rich result. `ProtobufValueFormatter` writes each
+value into a byte array of its exact length and makes a Latin-1 string of it:
+the civil date is computed from the epoch day, and a decimal of up to 128
+bits is converted by dividing its 32-bit words by 10^9, so only a wider value
+(which no Trino decimal is) goes through `BigInteger`. `TestProtobufValueFormatter`
+pins the output to `LocalDate.toString()`, `DateTimeFormatter`
+(`uuuu-MM-dd HH:mm:ss`, a plus sign beyond year 9999 and a minus sign before
+year 0) and `BigDecimal.toPlainString()` over the ends of each range and random
+values.
+
+A column of `TIMESTAMP WITH TIME ZONE` usually holds one zone, so its decoder
+keeps the zone id of the previous value and reuses the string when the bytes
+match. The decoder is created per column; the cached entry is immutable, so a
+decoder shared between threads only ever misses the cache.
 
 ### Server encoder
 
@@ -206,6 +228,7 @@ millisecond formatter, exactly like the json encoding.
 | trino-client | `io/trino/client/spooling/encoding/protobuf/ProtobufWireFormat` | field numbers and tag helpers shared by the server and the client |
 | trino-client | `.../protobuf/ProtobufWireWriter`, `ProtobufWireReader` | wire format codec |
 | trino-client | `.../protobuf/ProtobufValueDecoders`, `ProtobufRowIterator` | typed value decoders and streaming row iterator |
+| trino-client | `.../protobuf/ProtobufValueFormatter` | text of dates, times, timestamps and decimals, pinned to the server formats |
 | trino-client | `io/trino/client/spooling/encoding/ProtobufQueryDataDecoder` | the `protobuf`, `protobuf+zstd` and `protobuf+lz4` decoders |
 | trino-main | `io/trino/server/protocol/ProtobufEncodingUtils` | per-type encoders from `Block` positions |
 | trino-main | `io/trino/server/protocol/spooling/encoding/ProtobufQueryDataEncoder` | the encoders and their factories |
@@ -220,7 +243,10 @@ millisecond formatter, exactly like the json encoding.
 - `TestProtobufQueryDataDecoder` (trino-client): segments built with the
   protoc-generated classes for every type, including precision 0 to 12, zone
   ids, padding of `CHAR`, structural map keys, unknown fields, mismatched
-  column types, truncated segments, and the compressed variants.
+  column types, truncated segments, segments delivered in chunks of a few
+  bytes with rows larger than the buffer, and the compressed variants.
+- `TestProtobufValueFormatter` (trino-client): the hand-written text of dates,
+  times, timestamps and decimals against `java.time` and `BigDecimal`.
 - `TestProtobufEncodingUtils` (trino-main): every Trino type encoded from
   `Page`s with all three protobuf encodings and decoded by the client, compared
   with the `json` encoding of the same pages, with and without each client
