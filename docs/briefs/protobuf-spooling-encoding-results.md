@@ -28,12 +28,13 @@ Branch: `feature/protobuf-spooling-encoding`. Design notes:
   compressed variants, with the default 8 kB threshold, so every segment is
   compressed.
 - Machine: 4 vCPU Intel Xeon 2.80 GHz container (shared), JDK 25.0.5,
-  `-Xmx8g`, single thread, average time, **3 forks**, 3 warmup and 5
-  measurement iterations of 3 s each. Error is the 99.9% confidence interval
-  over the 15 measurements.
-- The decode times and the encode times come from two runs in two
-  containers (the first run was cut short). Compare encode times only with
-  encode times, and decode times only with decode times.
+  `-Xmx8g`, single thread, average time. Encode: **3 forks**, 3 warmup and 5
+  measurement iterations of 3 s each; error is the 99.9% confidence interval
+  over the 15 measurements. Decode: 1 fork, 2 warmup and 5 measurement
+  iterations of 3 s each, in a second container after the client formatting
+  changes (`ProtobufValueFormatter`, chunked segment reads), so the two
+  columns are not from the same run. Compare encode times only with encode
+  times, and decode times only with decode times.
 
 Run with:
 
@@ -58,12 +59,15 @@ Run with:
 
 | Encoding | `lineitem` encode | `lineitem` decode | `types` encode | `types` decode |
 |---|---:|---:|---:|---:|
-| `json` | 6,383 ± 353 | 4,313 ± 171 | 4,757 ± 175 | 1,426 ± 45 |
-| `json+zstd` | 12,595 ± 364 | 6,012 ± 175 | 8,980 ± 327 | 2,280 ± 73 |
-| `json+lz4` | 10,640 ± 617 | 5,453 ± 215 | 6,414 ± 497 | 1,897 ± 38 |
-| `protobuf` | 2,844 ± 607 | 3,391 ± 107 | 1,118 ± 133 | 2,654 ± 89 |
-| `protobuf+zstd` | 11,374 ± 3,022 | 5,546 ± 175 | 3,846 ± 563 | 3,414 ± 233 |
-| `protobuf+lz4` | 7,557 ± 2,332 | 4,750 ± 146 | 2,229 ± 515 | 2,938 ± 201 |
+| `json` | 6,383 ± 353 | 5,901 ± 1,144 | 4,757 ± 175 | 1,883 ± 257 |
+| `json+zstd` | 12,595 ± 364 | 7,871 ± 2,677 | 8,980 ± 327 | 3,046 ± 575 |
+| `json+lz4` | 10,640 ± 617 | 6,234 ± 724 | 6,414 ± 497 | 2,616 ± 270 |
+| `protobuf` | 2,844 ± 607 | 3,578 ± 554 | 1,118 ± 133 | 2,078 ± 215 |
+| `protobuf+zstd` | 11,374 ± 3,022 | 5,430 ± 1,029 | 3,846 ± 563 | 3,025 ± 236 |
+| `protobuf+lz4` | 7,557 ± 2,332 | 4,349 ± 336 | 2,229 ± 515 | 2,307 ± 288 |
+
+Before the client formatting changes, in the same container and setup, the
+`types` decode was 1,864 ms for `json` and 3,198 ms for `protobuf`.
 
 ## Reading the numbers
 
@@ -74,17 +78,16 @@ Run with:
   noise (11,374 ± 3,022 against 12,595 ± 364). The JSON encoder formats every
   decimal, timestamp and double as text, which is what protobuf saves.
 - **Client decode.** Here the type mix decides. On `lineitem` protobuf decodes
-  1.27× faster uncompressed and 8% to 15% faster compressed. On `types` it is
-  **1.5× to 1.9× slower**: the client values of decimals and timestamps are
-  strings, which the JSON decoder receives already formatted by the server,
-  while the protobuf decoder must format them itself. Protobuf moves that
-  work from the coordinator to the client; on `types` with Zstandard the
-  total, across the two runs, is lower (about 7.3 s against 11.3 s), but
-  the client's share grows.
-  The client formats dates and decimals by hand (about 15% faster than
-  through `DateTimeFormatter` and `BigInteger`); what remains is the cost of
-  building the strings. Typed client values instead of strings would remove
-  it, but that is a client API change outside this encoding.
+  1.65× faster uncompressed and 1.4× faster compressed. On `types` it is
+  10% slower uncompressed, equal with Zstandard and 12% faster with LZ4. The
+  client values of decimals and timestamps are strings, which the JSON decoder
+  receives already formatted by the server, while the protobuf decoder must
+  format them itself. Before the client formatted them by hand (byte arrays
+  turned into Latin-1 strings, 128-bit decimals converted without
+  `BigInteger`, the zone id of a column decoded once) and read the segment in
+  chunks, the `types` decode was 1.7× slower than json; what remains is the
+  cost of producing the strings at all, which typed client values would
+  remove, but that is a client API change outside this encoding.
 - **Size.** It depends on the data. On `lineitem`, protobuf is 4.5% larger
   before and 16% larger after Zstandard: each value costs 3 bytes of framing
   (48 of the 152 bytes of a row), and the two-digit doubles are shorter as
@@ -100,8 +103,9 @@ Run with:
 
 - Protobuf reliably saves coordinator CPU, by 2× to 4× before compression.
   That is the case for it: a coordinator that encodes many large results.
-- It is not a uniform win for the client: type-rich results decode slower
-  than with JSON, because the client now formats what the server used to.
+- For the client it is a win on string and integer heavy results and a
+  wash on type-rich ones, where it formats what the server used to: 10%
+  slower uncompressed, equal or faster with compression.
 - Size is a wash that depends on the column types: worse on string and
   "nice" double heavy tables, better on decimal, timestamp and nullable
   tables.
