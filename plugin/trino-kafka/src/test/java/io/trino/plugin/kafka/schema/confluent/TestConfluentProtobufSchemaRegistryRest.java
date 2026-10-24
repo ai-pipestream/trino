@@ -254,7 +254,7 @@ public class TestConfluentProtobufSchemaRegistryRest
             throws Exception
     {
         SchemaRegistryClient client = createClient("http://" + USER_INFO + "@" + baseUrl, ImmutableMap.of("basic.auth.credentials.source", "URL"));
-        KafkaColumnHandle column = new KafkaColumnHandle("col_1", VARCHAR, "col_1", null, null, false, false, false);
+        KafkaColumnHandle column = new KafkaColumnHandle("col_1", VARCHAR, "col_1", null, null, false, false, false, Optional.empty());
         RowEncoderSpec spec = new RowEncoderSpec(ProtobufRowEncoder.NAME, Optional.empty(), Optional.of("orders-value"), ImmutableList.of(column), "orders", MESSAGE);
         try (RowEncoder encoder = new ConfluentProtobufRowEncoderFactory(client).create(TestingConnectorSession.SESSION, spec)) {
             encoder.appendColumnValue(writeNativeValue(VARCHAR, utf8Slice("Trino")), 0);

@@ -609,8 +609,8 @@ public class TestProtobufEncoder
                 }
                 """).findMessageTypeByName(DEFAULT_MESSAGE);
         EncoderColumnHandle nameColumn = createEncoderColumnHandle("name", VARCHAR, "name");
-        KafkaColumnHandle countColumn = new KafkaColumnHandle("count", BIGINT, "count", null, null, false, false, false);
-        KafkaColumnHandle numberColumn = new KafkaColumnHandle("number", BIGINT, "number", null, null, false, false, false);
+        KafkaColumnHandle countColumn = new KafkaColumnHandle("count", BIGINT, "count", null, null, false, false, false, Optional.empty());
+        KafkaColumnHandle numberColumn = new KafkaColumnHandle("number", BIGINT, "number", null, null, false, false, false, Optional.empty());
 
         // optional fields and oneof members are left unset, and read back as NULL
         RowEncoder encoder = new ProtobufRowEncoder(descriptor, TestingConnectorSession.SESSION, ImmutableList.of(nameColumn, countColumn, numberColumn));
@@ -674,6 +674,6 @@ public class TestProtobufEncoder
 
     private static EncoderColumnHandle createEncoderColumnHandle(String name, Type type, String mapping)
     {
-        return new KafkaColumnHandle(name, type, mapping, null, null, false, false, false);
+        return new KafkaColumnHandle(name, type, mapping, null, null, false, false, false, Optional.empty());
     }
 }

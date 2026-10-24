@@ -19,17 +19,22 @@ import io.trino.plugin.kafka.schema.TableDescriptionSupplier;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ColumnSchema;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.RelationColumnsMetadata;
 import io.trino.spi.connector.SchemaTableName;
 import org.junit.jupiter.api.Test;
 
+import java.util.Iterator;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.UnaryOperator;
 
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 
 public class TestKafkaMetadata
 {
@@ -49,7 +54,7 @@ public class TestKafkaMetadata
         assertThat(handle.messageDataSchemaLocation()).contains("schema-registry-id:1;message=schema");
         assertThat(handle.columns()).extracting(KafkaColumnHandle::getName).contains("column_1");
 
-        // the columns a query is analyzed and read with match the data schema of the handle
+        // the columns a query is analyzed, planned, read and written with match the data schema of the handle
         assertThat(metadata.getTableSchema(SESSION, handle).getColumns())
                 .extracting(ColumnSchema::getName)
                 .contains("column_1", "_partition_id")
@@ -58,16 +63,33 @@ public class TestKafkaMetadata
                 .filteredOn(column -> column.getName().equals("_partition_id"))
                 .extracting(ColumnSchema::isHidden)
                 .containsExactly(true);
+        List<ColumnMetadata> columns = metadata.getTableMetadata(SESSION, handle).getColumns();
+        assertThat(columns)
+                .extracting(ColumnMetadata::getName)
+                .contains("column_1", "_partition_id")
+                .doesNotContain("column_2");
+        assertThat(columns)
+                .filteredOn(column -> column.getName().equals("column_1"))
+                .extracting(ColumnMetadata::getComment)
+                .containsExactly(Optional.of("version 1"));
+        assertThat(columns)
+                .filteredOn(column -> column.getName().equals("_partition_id"))
+                .extracting(ColumnMetadata::getComment, ColumnMetadata::isHidden)
+                .containsExactly(tuple(Optional.of("Partition Id"), true));
         assertThat(metadata.getColumnHandles(SESSION, handle))
                 .containsOnlyKeys(handle.columns().stream().map(KafkaColumnHandle::getName).toList())
                 .containsKey("column_1");
+        assertThat(metadata.getColumnHandles(SESSION, handle).values())
+                .map(column -> metadata.getColumnMetadata(SESSION, handle, column))
+                .containsExactlyElementsOf(columns);
         assertThat(supplier.lookups()).isEqualTo(1);
 
-        // the table metadata is looked up again, and shows the latest version
-        assertThat(metadata.getTableMetadata(SESSION, handle).getColumns())
-                .extracting(ColumnMetadata::getName)
-                .contains("column_2")
-                .doesNotContain("column_1");
+        // listing the columns of the tables of the catalog describes the table again, and shows the latest version
+        Iterator<RelationColumnsMetadata> relations = metadata.streamRelationColumns(SESSION, Optional.of(TABLE.getSchemaName()), UnaryOperator.identity());
+        assertThat(ImmutableList.copyOf(relations))
+                .extracting(RelationColumnsMetadata::name)
+                .containsExactly(TABLE);
+        assertThat(supplier.lookups()).isEqualTo(2);
     }
 
     private static class VersionedTableDescriptionSupplier
@@ -95,7 +117,7 @@ public class TestKafkaMetadata
                             "protobuf",
                             Optional.of("schema-registry-id:" + current + ";message=schema"),
                             Optional.of("orders-value"),
-                            ImmutableList.of(new KafkaTopicFieldDescription(column, BIGINT, column, null, null, null, false))))));
+                            ImmutableList.of(new KafkaTopicFieldDescription(column, BIGINT, column, "version " + current, null, null, false))))));
         }
 
         public int lookups()

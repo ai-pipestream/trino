@@ -314,9 +314,9 @@ public class TestConfluentSchemaRegistryDynamicMessageProvider
 
         // the table columns come from the latest schema
         RowType detailType = RowType.rowType(RowType.field("note", createUnboundedVarcharType()), RowType.field("weight", BIGINT));
-        KafkaColumnHandle col1 = new KafkaColumnHandle("col_1", VARCHAR, "col_1", null, null, false, false, false);
-        KafkaColumnHandle col2 = new KafkaColumnHandle("col_2", BIGINT, "col_2", null, null, false, false, false);
-        KafkaColumnHandle detail = new KafkaColumnHandle("detail", detailType, "detail", null, null, false, false, false);
+        KafkaColumnHandle col1 = new KafkaColumnHandle("col_1", VARCHAR, "col_1", null, null, false, false, false, Optional.empty());
+        KafkaColumnHandle col2 = new KafkaColumnHandle("col_2", BIGINT, "col_2", null, null, false, false, false, Optional.empty());
+        KafkaColumnHandle detail = new KafkaColumnHandle("detail", detailType, "detail", null, null, false, false, false, Optional.empty());
         RowDecoder decoder = new ProtobufRowDecoderFactory(new ConfluentSchemaRegistryDynamicMessageProvider.Factory(client), TESTING_TYPE_MANAGER, new DummyDescriptorProvider())
                 .create(TestingConnectorSession.SESSION, new RowDecoderSpec(ProtobufRowDecoder.NAME, ImmutableMap.of(), ImmutableSet.of(col1, col2, detail)));
 
@@ -378,9 +378,9 @@ public class TestConfluentSchemaRegistryDynamicMessageProvider
 
         // the table columns and the data schema come from the latest schema, which renamed every field
         RowType infoType = RowType.rowType(RowType.field("text", createUnboundedVarcharType()));
-        KafkaColumnHandle name = new KafkaColumnHandle("name", VARCHAR, "name", null, null, false, false, false);
-        KafkaColumnHandle info = new KafkaColumnHandle("info", infoType, "info", null, null, false, false, false);
-        KafkaColumnHandle text = new KafkaColumnHandle("text", VARCHAR, "info/text", null, null, false, false, false);
+        KafkaColumnHandle name = new KafkaColumnHandle("name", VARCHAR, "name", null, null, false, false, false, Optional.empty());
+        KafkaColumnHandle info = new KafkaColumnHandle("info", infoType, "info", null, null, false, false, false, Optional.empty());
+        KafkaColumnHandle text = new KafkaColumnHandle("text", VARCHAR, "info/text", null, null, false, false, false, Optional.empty());
         RowDecoder decoder = new ProtobufRowDecoderFactory(new ConfluentSchemaRegistryDynamicMessageProvider.Factory(client), TESTING_TYPE_MANAGER, new DummyDescriptorProvider())
                 .create(TestingConnectorSession.SESSION, new RowDecoderSpec(ProtobufRowDecoder.NAME, ImmutableMap.of("dataSchema", readerSchemaReference(newId, ((ConfluentProtobufSchema) client.getSchemaById(newId)).getMessageDescriptor())), ImmutableSet.of(name, info, text)));
 
