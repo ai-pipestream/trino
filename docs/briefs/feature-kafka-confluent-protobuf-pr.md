@@ -29,8 +29,10 @@ using only Apache-licensed dependencies:
   field number, the identity of a field on the wire: the table's data
   schema names the registry id of the schema the columns were derived from
   and the message within it, resolved together with the columns when the
-  table is described, so a schema registered later does not change what a
-  running query reads or writes, and
+  table is described, and the table metadata a query is analyzed and planned
+  with comes from the table handle (whose columns now carry their comments),
+  so a schema registered later does not change what a running query reads or
+  writes, and
   the decoder maps each column's field to the writer field with the same
   number and encoding, at the top level and within `ROW`, `ARRAY` and `MAP`
   columns, and converts its value the way protobuf reads it with the reader
@@ -172,7 +174,10 @@ Tests:
   property names, validation), connector startup with the registry
   properties in `TestKafkaPlugin`, `TestConfluentModule` (client properties
   of all providers combined, a property set twice rejected), `TestKafkaMetadata`
-  (the table handle, its columns and its data schema come from one description),
+  (the table handle, its columns and its data schema come from one description,
+  which the table metadata, schema and column handles of the handle answer from
+  with the column comments, while listing the columns of all tables describes
+  the table again),
   `TestProtobufSchemaParser`, `TestNoConfluentProtobufDependency`, protobuf
   cases in `TestConfluentSchemaRegistryTableDescriptionSupplier`, and new
   Docker cases in `TestKafkaProtobufWithSchemaRegistryMinimalFunctionality`
