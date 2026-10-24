@@ -63,12 +63,12 @@ message Value {
     double double = 8;
     // DECIMAL(p, s)
     Decimal decimal = 9;
-    // VARCHAR(n): UTF-8. The bytes are sent as stored, and a stored value is
-    // not guaranteed to be valid UTF-8; the Java client replaces malformed
-    // sequences with U+FFFD, while generated proto3 parsers reject them
+    // VARCHAR(n): UTF-8. A stored value is not guaranteed to be valid UTF-8;
+    // the server replaces each malformed sequence with U+FFFD, so that every
+    // proto3 parser accepts the segment
     string varchar = 10;
-    // CHAR(n): UTF-8, without the trailing pad spaces; the reader pads the
-    // value to n code points
+    // CHAR(n): UTF-8, without the trailing pad spaces, malformed sequences
+    // replaced like VARCHAR; the reader pads the value to n code points
     string char = 11;
     // VARBINARY, and every other type whose client value is a byte array
     // (HyperLogLog, P4HyperLogLog, SetDigest, qdigest, tdigest, ...)

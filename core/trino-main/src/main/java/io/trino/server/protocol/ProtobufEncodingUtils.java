@@ -85,6 +85,10 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static com.google.common.base.Verify.verify;
+import static io.airlift.slice.SliceUtf8.isAscii;
+import static io.airlift.slice.SliceUtf8.lengthOfCodePoint;
+import static io.airlift.slice.SliceUtf8.tryGetCodePointAt;
+import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.ARRAY_ELEMENTS;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.DECIMAL_SCALE;
@@ -394,7 +398,7 @@ public final class ProtobufEncodingUtils
         @Override
         public void encode(ProtobufWireWriter writer, Block block, int position)
         {
-            writeSlice(writer, VALUE_VARCHAR, VARCHAR.getSlice(block, position));
+            writeSlice(writer, VALUE_VARCHAR, toValidUtf8(VARCHAR.getSlice(block, position)));
         }
     }
 
@@ -405,7 +409,7 @@ public final class ProtobufEncodingUtils
         public void encode(ProtobufWireWriter writer, Block block, int position)
         {
             // Stored without trailing spaces; the client pads to the declared length
-            writeSlice(writer, VALUE_CHAR, VARCHAR.getSlice(block, position));
+            writeSlice(writer, VALUE_CHAR, toValidUtf8(VARCHAR.getSlice(block, position)));
         }
     }
 
@@ -822,6 +826,7 @@ public final class ProtobufEncodingUtils
         private final TypeEncoder keyEncoder;
         private final TypeEncoder valueEncoder;
         private final boolean checkLegacyIntervalKeys;
+        private final boolean checkTextKeys;
 
         private MapEncoder(MapType type, TypeEncoder keyEncoder, TypeEncoder valueEncoder, boolean checkLegacyIntervalKeys)
         {
@@ -829,6 +834,7 @@ public final class ProtobufEncodingUtils
             this.keyEncoder = requireNonNull(keyEncoder, "keyEncoder is null");
             this.valueEncoder = requireNonNull(valueEncoder, "valueEncoder is null");
             this.checkLegacyIntervalKeys = checkLegacyIntervalKeys;
+            this.checkTextKeys = containsVarcharOrChar(type.getKeyType());
         }
 
         @Override
@@ -839,14 +845,18 @@ public final class ProtobufEncodingUtils
             Block keys = sqlMap.getRawKeyBlock();
             Block values = sqlMap.getRawValueBlock();
             ProtobufWireWriter map = writer.child();
-            // Day to second intervals rounded to milliseconds for a legacy client can make distinct keys equal,
-            // which the client would silently merge; fail like the json encoding does
-            Set<Slice> legacyKeys = checkLegacyIntervalKeys ? new HashSet<>() : Set.of();
+            // Day to second intervals rounded to milliseconds for a legacy client, and text with malformed UTF-8
+            // replaced, can make distinct keys equal, which the client rejects as a corrupt segment; fail here
+            // with the reason instead, like the json encoding does for intervals
+            boolean checkKeys = checkLegacyIntervalKeys || (checkTextKeys && mayHaveReplacedText(keys, offset, sqlMap.getSize()));
+            Set<Slice> encodedKeys = checkKeys ? new HashSet<>() : Set.of();
             for (int i = 0; i < sqlMap.getSize(); i++) {
                 int start = map.size();
                 writeValue(map, MAP_KEYS, keyEncoder, keys, offset + i);
-                if (checkLegacyIntervalKeys && !legacyKeys.add(wrappedBuffer(Arrays.copyOfRange(map.buffer(), start, map.size())))) {
-                    throw new TrinoException(NOT_SUPPORTED, "Interval map keys collide at millisecond precision; use a client supporting PARAMETRIC_INTERVAL");
+                if (checkKeys && !encodedKeys.add(wrappedBuffer(Arrays.copyOfRange(map.buffer(), start, map.size())))) {
+                    throw new TrinoException(NOT_SUPPORTED, checkLegacyIntervalKeys
+                            ? "Interval map keys collide at millisecond precision; use a client supporting PARAMETRIC_INTERVAL"
+                            : "Map keys collide once malformed UTF-8 is replaced with U+FFFD");
                 }
             }
             for (int i = 0; i < sqlMap.getSize(); i++) {
@@ -854,6 +864,26 @@ public final class ProtobufEncodingUtils
             }
             writer.writeMessage(VALUE_MAP, map);
         }
+
+        private boolean mayHaveReplacedText(Block keys, int offset, int size)
+        {
+            Type keyType = type.getKeyType();
+            if (!(keyType instanceof VarcharType || keyType instanceof CharType)) {
+                // text nested in a key: rare enough to always check
+                return true;
+            }
+            for (int i = 0; i < size; i++) {
+                if (!isValidUtf8(VARCHAR.getSlice(keys, offset + i))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    private static boolean containsVarcharOrChar(Type type)
+    {
+        return type instanceof VarcharType || type instanceof CharType || type.getTypeParameters().stream().anyMatch(ProtobufEncodingUtils::containsVarcharOrChar);
     }
 
     private static final class RowEncoder
@@ -938,6 +968,31 @@ public final class ProtobufEncodingUtils
                 }
             }
         }
+    }
+
+    /**
+     * A varchar is not guaranteed to be valid UTF-8, but a proto3 {@code string} field must be. Replace
+     * malformed sequences with U+FFFD the way the JDK decoder does, so that every reader sees the same text.
+     */
+    private static Slice toValidUtf8(Slice slice)
+    {
+        return isValidUtf8(slice) ? slice : utf8Slice(slice.toStringUtf8());
+    }
+
+    private static boolean isValidUtf8(Slice slice)
+    {
+        if (isAscii(slice)) {
+            return true;
+        }
+        int position = 0;
+        while (position < slice.length()) {
+            int codePoint = tryGetCodePointAt(slice, position);
+            if (codePoint < 0) {
+                return false;
+            }
+            position += lengthOfCodePoint(codePoint);
+        }
+        return true;
     }
 
     private static void writeSlice(ProtobufWireWriter writer, int fieldNumber, Slice slice)

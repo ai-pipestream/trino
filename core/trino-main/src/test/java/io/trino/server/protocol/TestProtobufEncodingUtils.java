@@ -17,6 +17,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.net.InetAddresses;
+import com.google.common.primitives.Bytes;
 import io.airlift.slice.Slice;
 import io.airlift.units.DataSize;
 import io.trino.Session;
@@ -39,6 +40,7 @@ import io.trino.spi.block.MapBlockBuilder;
 import io.trino.spi.block.RowBlockBuilder;
 import io.trino.spi.type.AbstractIntType;
 import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.CharType;
 import io.trino.spi.type.DecimalType;
 import io.trino.spi.type.Int128;
 import io.trino.spi.type.LongTimeWithTimeZone;
@@ -1054,15 +1056,106 @@ public class TestProtobufEncodingUtils
     public void testMalformedUtf8Varchar()
             throws IOException
     {
-        // A varchar is not guaranteed to be valid UTF-8. The json decoder of the client fails on it; the protobuf
-        // decoder replaces each malformed sequence with U+FFFD, like new String(bytes, UTF_8)
-        List<TypedColumn> columns = ImmutableList.of(typed("col", VARCHAR));
-        Page page = page(block(VARCHAR, builder -> VARCHAR.writeSlice(builder, wrappedBuffer(new byte[] {'a', (byte) 0xC3, 'b', (byte) 0xFF}))));
-        assertThatThrownBy(() -> decode(TEST_SESSION, columns, "json", ImmutableList.of(page)))
-                .hasMessageContaining("Invalid UTF-8");
+        // A varchar is not guaranteed to be valid UTF-8. The json decoder of the client fails on a varchar with
+        // malformed UTF-8, while the json encoding of a char replaces it on the server. A proto3 string
+        // field must be valid UTF-8, so the server replaces malformed sequences with U+FFFD the way the JDK
+        // decoder does, so the result is the same for every reader: an overlong encoding becomes one U+FFFD per
+        // byte, an encoded surrogate a single one
+        Slice malformed = wrappedBuffer(new byte[] {'a', (byte) 0xC3, 'b', (byte) 0xFF});
+        Slice overlong = wrappedBuffer(new byte[] {(byte) 0xC0, (byte) 0x80});
+        Slice surrogate = wrappedBuffer(new byte[] {(byte) 0xED, (byte) 0xA0, (byte) 0x80});
+        Slice truncated = wrappedBuffer(new byte[] {'x', (byte) 0xF0, (byte) 0x9F, (byte) 0x98});
+        Slice valid = utf8Slice("é\uD83D\uDE00");
+        for (Type type : ImmutableList.of(VARCHAR, createVarcharType(10), createCharType(5))) {
+            List<TypedColumn> columns = ImmutableList.of(typed("col", type));
+            Page page = page(block(type, builder -> {
+                type.writeSlice(builder, malformed);
+                type.writeSlice(builder, overlong);
+                type.writeSlice(builder, surrogate);
+                type.writeSlice(builder, truncated);
+                type.writeSlice(builder, valid);
+            }));
+            String pad = type instanceof CharType ? " " : "";
+            List<List<Object>> expected = ImmutableList.of(
+                    ImmutableList.of("a\uFFFDb\uFFFD" + pad),
+                    ImmutableList.of("\uFFFD\uFFFD" + pad + pad + pad),
+                    ImmutableList.of("\uFFFD" + pad + pad + pad + pad),
+                    ImmutableList.of("x\uFFFD" + pad + pad + pad),
+                    ImmutableList.of("é\uD83D\uDE00" + pad + pad + pad));
+            if (type instanceof CharType) {
+                // The json encoding pads a char through a Java string, which replaces the same way, but it counts
+                // the code points before the replacement: the overlong encoding counts as one code point and turns
+                // into two, so the value is longer than the declared length. The protobuf encoding pads on the
+                // client, after the replacement.
+                assertThat(decode(TEST_SESSION, columns, "json", ImmutableList.of(page))).isEqualTo(ImmutableList.of(
+                        expected.get(0),
+                        ImmutableList.of("\uFFFD\uFFFD    "),
+                        expected.get(2),
+                        expected.get(3),
+                        expected.get(4)));
+            }
+            else {
+                assertThatThrownBy(() -> decode(TEST_SESSION, columns, "json", ImmutableList.of(page)))
+                        .hasMessageContaining("Invalid UTF-8");
+            }
+            for (String encoding : PROTOBUF_ENCODINGS) {
+                assertThat(decode(TEST_SESSION, columns, encoding, ImmutableList.of(page)))
+                        .as("%s %s", type, encoding)
+                        .isEqualTo(expected);
+            }
+            // the uncompressed segment holds the replacement, not the malformed bytes
+            byte[] segment = encode(TEST_SESSION, columns, "protobuf", ImmutableList.of(page)).data();
+            assertThat(Bytes.indexOf(segment, (byte) 0xFF)).isEqualTo(-1);
+            assertThat(Bytes.indexOf(segment, new byte[] {(byte) 0xC0, (byte) 0x80})).isEqualTo(-1);
+            assertThat(Bytes.indexOf(segment, new byte[] {(byte) 0xEF, (byte) 0xBF, (byte) 0xBD})).isNotEqualTo(-1);
+        }
+    }
+
+    @Test
+    public void testMalformedUtf8MapKeysCollide()
+            throws IOException
+    {
+        // Two keys that differ only in malformed bytes are equal once those are replaced; fail with the reason
+        // instead of sending a map the client rejects as corrupt
+        MapType mapType = mapType(VARCHAR, BIGINT);
+        Page colliding = page(block(mapType, builder -> ((MapBlockBuilder) builder).buildEntry((keys, values) -> {
+            VARCHAR.writeSlice(keys, wrappedBuffer(new byte[] {'a', (byte) 0xFE}));
+            BIGINT.writeLong(values, 1);
+            VARCHAR.writeSlice(keys, wrappedBuffer(new byte[] {'a', (byte) 0xFF}));
+            BIGINT.writeLong(values, 2);
+        })));
+        // a malformed key and the valid key it is replaced with
+        Page collidingWithValid = page(block(mapType, builder -> ((MapBlockBuilder) builder).buildEntry((keys, values) -> {
+            VARCHAR.writeSlice(keys, utf8Slice("a\uFFFD"));
+            BIGINT.writeLong(values, 1);
+            VARCHAR.writeSlice(keys, wrappedBuffer(new byte[] {'a', (byte) 0xFF}));
+            BIGINT.writeLong(values, 2);
+        })));
+        RowType rowKey = RowType.anonymousRow(VARCHAR);
+        MapType nestedMapType = mapType(rowKey, BIGINT);
+        Page nestedColliding = page(block(nestedMapType, builder -> ((MapBlockBuilder) builder).buildEntry((keys, values) -> {
+            ((RowBlockBuilder) keys).buildEntry(fields -> VARCHAR.writeSlice(fields.getFirst(), wrappedBuffer(new byte[] {(byte) 0xFE})));
+            BIGINT.writeLong(values, 1);
+            ((RowBlockBuilder) keys).buildEntry(fields -> VARCHAR.writeSlice(fields.getFirst(), wrappedBuffer(new byte[] {(byte) 0xFF})));
+            BIGINT.writeLong(values, 2);
+        })));
         for (String encoding : PROTOBUF_ENCODINGS) {
-            assertThat(decode(TEST_SESSION, columns, encoding, ImmutableList.of(page)))
-                    .isEqualTo(ImmutableList.of(ImmutableList.of("a\uFFFDb\uFFFD")));
+            assertThatThrownBy(() -> encode(TEST_SESSION, ImmutableList.of(typed("col", mapType)), encoding, ImmutableList.of(colliding)))
+                    .hasMessage("Map keys collide once malformed UTF-8 is replaced with U+FFFD");
+            assertThatThrownBy(() -> encode(TEST_SESSION, ImmutableList.of(typed("col", mapType)), encoding, ImmutableList.of(collidingWithValid)))
+                    .hasMessage("Map keys collide once malformed UTF-8 is replaced with U+FFFD");
+            assertThatThrownBy(() -> encode(TEST_SESSION, ImmutableList.of(typed("col", nestedMapType)), encoding, ImmutableList.of(nestedColliding)))
+                    .hasMessage("Map keys collide once malformed UTF-8 is replaced with U+FFFD");
+
+            // a malformed key that stays distinct
+            Page distinct = page(block(mapType, builder -> ((MapBlockBuilder) builder).buildEntry((keys, values) -> {
+                VARCHAR.writeSlice(keys, wrappedBuffer(new byte[] {'a', (byte) 0xFF}));
+                BIGINT.writeLong(values, 1);
+                VARCHAR.writeSlice(keys, utf8Slice("b"));
+                BIGINT.writeLong(values, 2);
+            })));
+            assertThat(decode(TEST_SESSION, ImmutableList.of(typed("col", mapType)), encoding, ImmutableList.of(distinct)))
+                    .isEqualTo(ImmutableList.of(ImmutableList.of(Map.of("a\uFFFD", 1L, "b", 2L))));
         }
     }
 
