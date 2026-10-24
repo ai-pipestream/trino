@@ -65,7 +65,7 @@ Size and timing comparison on TPC-H `lineitem` sf1:
 - `TestProtobuf{,Zstd,Lz4}SpooledDistributedQueries`: the engine query suite
   over spooled protobuf segments on S3 compatible storage (Floci container).
 - `BenchmarkQueryDataEncoding`: JMH benchmark of encode and decode of
-  `lineitem` sf1 for all six encodings.
+  `lineitem` sf1 and a generated type-rich table for all six encodings.
 
 ## Additional context and related issues
 
@@ -75,16 +75,19 @@ Size and timing comparison on TPC-H `lineitem` sf1:
   older server keeps working.
 - Related discussion of alternative segment encodings: trinodb/trino#24586
   (Arrow encoding), draft PR trinodb/trino#24587.
-- Benchmark results (TPC-H `lineitem` sf1, 6,001,215 rows, 46 segments):
-  `protobuf` encodes 2.9× and decodes 1.5× faster than `json` but is 4.5%
-  larger; `protobuf+zstd` is 25% faster to encode and 18% faster to decode
-  than `json+zstd` but 16% larger (283 MB vs 244 MB). Details in
+- Benchmark results (`BenchmarkQueryDataEncoding`, 3 forks, TPC-H `lineitem`
+  sf1 and a generated type-rich table): the server encodes 2.2× to 4.3×
+  faster uncompressed and up to 2.9× faster compressed. Client decoding is
+  faster on `lineitem` but 1.5× to 1.9× slower on the type-rich table,
+  because the client now formats decimals and timestamps as strings, which
+  JSON receives preformatted. Size after Zstandard is 16% larger on
+  `lineitem` and 14% smaller on the type-rich table. Details in
   `docs/briefs/protobuf-spooling-encoding-results.md`.
 - Open questions for reviewers:
   1. Default client preference order: this PR keeps `json+zstd` first.
-  2. The row layout with a `oneof` per value costs two bytes per value (tag and
-     length of the nested `Value`), which is why the uncompressed protobuf
-     segment is larger than JSON for `lineitem`. A columnar layout per segment
+  2. The row layout with a `oneof` per value costs three bytes per value (tag
+     and length of the nested `Value`, and the `oneof` tag), which is why the
+     uncompressed protobuf segment is larger than JSON for `lineitem`. A columnar layout per segment
      (packed repeated fields per column with a null bitmap) would remove this
      overhead; it is out of scope here and would be a new encoding name.
   3. Whether the hand-written codec is acceptable versus a test-only

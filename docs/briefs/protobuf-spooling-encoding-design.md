@@ -78,8 +78,8 @@ the CLI, and every other consumer of `trino-client` work unchanged.
 | `REAL` | `real` (7) | fixed32 IEEE 754 (NaN, ±Infinity preserved) | `Float` |
 | `DOUBLE` | `double` (8) | fixed64 IEEE 754 (NaN, ±Infinity preserved) | `Double` |
 | `DECIMAL(p, s)` | `decimal` (9) | `Decimal{unscaled_long` (zig-zag, when the unscaled value fits in 64 bits) or `unscaled_bytes` (big-endian two's complement, `BigInteger.toByteArray`), `scale` (zig-zag)`}` | `String`, plain notation with `s` fraction digits |
-| `VARCHAR(n)` | `varchar` (10) | UTF-8 bytes | `String` |
-| `CHAR(n)` | `char` (11) | UTF-8 bytes without pad spaces | `String` padded to `n` code points |
+| `VARCHAR(n)` | `varchar` (10) | UTF-8 bytes, malformed sequences replaced with U+FFFD by the server | `String` |
+| `CHAR(n)` | `char` (11) | UTF-8 bytes without pad spaces, malformed sequences replaced like `VARCHAR` | `String` padded to `n` code points |
 | `VARBINARY` | `varbinary` (12) | bytes | `byte[]` |
 | `DATE` | `date` (13) | zig-zag varint, days since 1970-01-01 | `String` `uuuu-MM-dd` |
 | `TIME(p)` | `time` (14) | `Time{picos` since midnight (varint), `precision}` | `String` `HH:mm:ss[.f{p}]` |
@@ -87,7 +87,7 @@ the CLI, and every other consumer of `trino-client` work unchanged.
 | `TIMESTAMP(p)` | `timestamp` (16) | `Timestamp{epoch_micros` (zig-zag), `picos_of_micro, precision}` | `String` `uuuu-MM-dd HH:mm:ss[.f{p}]` |
 | `TIMESTAMP(p) WITH TIME ZONE` | `timestamp_with_time_zone` (17) | `TimestampWithTimeZone{epoch_millis` (zig-zag), `picos_of_milli, precision, zone_id, offset_seconds` (zig-zag, the zone's offset at that instant, resolved by the server)`}` | `String` `uuuu-MM-dd HH:mm:ss[.f{p}] <zone id>` |
 | `INTERVAL YEAR TO MONTH` | `interval_year_to_month` (18) | zig-zag varint, total months | `String` `Y-M` |
-| `INTERVAL DAY TO SECOND` | `interval_day_to_second` (19) | `IntervalDayToSecond{micros` (zig-zag), `picos_of_micro, fractional_precision}` | `String` `D HH:mm:ss[.f{p}]` |
+| `INTERVAL DAY TO SECOND` | `interval_day_to_second` (19) | `IntervalDayToSecond{micros` (zig-zag), `picos_of_micro, fractional_precision}`; for a client without `PARAMETRIC_INTERVAL` only `legacy_millis` (zig-zag, explicit presence), the value rounded half up to milliseconds | `String` `D HH:mm:ss[.f{p}]`, `D HH:mm:ss.fff` for the legacy form |
 | `JSON` | `json` (20) | UTF-8 JSON text | `String` |
 | `UUID` | `uuid` (21) | 16 bytes, network byte order | `String` canonical form |
 | `IPADDRESS` | `ipaddress` (22) | 16 bytes, IPv4 as IPv4-mapped IPv6 | `String` canonical form |
@@ -172,22 +172,31 @@ pinned by a test in `TestProtobufEncodingUtils`:
   json decoder copies the JSON value through a parser, which normalizes
   numbers (`1.50` becomes `1.5`, a decimal beyond double precision is
   rounded). The protobuf decoder returns the text the server wrote.
-- **Malformed UTF-8 in a varchar**: the client's json decoder fails, the
-  protobuf decoder replaces each malformed sequence with U+FFFD. Generated
-  proto3 parsers in other languages reject the segment, as the json decoder
-  does.
-- **Legacy day to second intervals at the ends of the range** (client without
-  `PARAMETRIC_INTERVAL`): the json encoding formats the value rounded to
-  milliseconds as text, which can exceed the microsecond range; the protobuf
-  encoding sends microseconds and fails with "Value out of range for an
-  interval after rounding" for values within half a millisecond of the ends.
+- **Malformed UTF-8 in a varchar**: the client's json decoder fails. A proto3
+  `string` must be valid UTF-8, so the protobuf encoder replaces malformed
+  sequences with U+FFFD the way the JDK decoder does (an all-ASCII value is
+  checked with one vectorized pass and sent as is). Every proto3 parser,
+  generated or not, then reads the same text. The json encoding of a `CHAR`
+  already replaces the same way, but pads by the code points counted before
+  the replacement, so a value with an overlong sequence comes out longer than
+  `n`; the protobuf client pads after the replacement.
 - **Types the client does not know**: the json decoder base64 decodes them,
   which fails for a type whose value is text or a JSON document; the protobuf
   decoder returns the text, bytes or parsed JSON document.
 
 Map keys of day to second intervals that collide once rounded to
 milliseconds for a legacy client fail with the json encoding's error, rather
-than one entry being dropped by the client.
+than one entry being dropped by the client. Text map keys that collide once
+malformed UTF-8 is replaced fail on the server with "Map keys collide once
+malformed UTF-8 is replaced with U+FFFD"; the encoder only tracks the keys of
+a map that holds a malformed key (or, for a key type that nests text, of
+every map).
+
+Legacy day to second intervals (client without `PARAMETRIC_INTERVAL`) are
+sent as `legacy_millis`: rounded to milliseconds, a value within half a
+millisecond of either end of the range no longer fits in microseconds, so the
+microsecond form could not carry it. The client renders it with the legacy
+millisecond formatter, exactly like the json encoding.
 
 ## Files
 
@@ -229,5 +238,5 @@ than one entry being dropped by the client.
 ## Results
 
 See [protobuf-spooling-encoding-results.md](protobuf-spooling-encoding-results.md)
-for the size and decode time comparison against `json+zstd` on TPC-H
-`lineitem` at scale factor 1.
+for the size, encode and decode time comparison against the json encodings
+on TPC-H `lineitem` at scale factor 1 and on a generated type-rich table.

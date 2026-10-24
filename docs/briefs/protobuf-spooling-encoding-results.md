@@ -5,23 +5,35 @@ Branch: `feature/protobuf-spooling-encoding`. Design notes:
 
 ## Setup
 
-- Data: TPC-H `lineitem` at scale factor 1, generated in memory with the
-  `io.trino.tpch` generator: 6,001,215 rows, 16 columns with the types the
-  TPC-H connector exposes (3 `bigint`, 1 `integer`, 4 `double`, 3 `date`,
-  5 `varchar`). Rows are grouped into 46 segments of 131,072 rows each
-  (about 19 MB of JSON per segment).
+- Data, generated in memory:
+  - `lineitem`: TPC-H `lineitem` at scale factor 1 from the `io.trino.tpch`
+    generator, 6,001,215 rows, 16 columns with the types the TPC-H connector
+    exposes (3 `bigint`, 1 `integer`, 4 `double`, 3 `date`, 5 `varchar`). No
+    nulls, short strings, doubles with two fraction digits: a table that
+    favors JSON on size.
+  - `types`: 2,000,000 generated rows (fixed seed) of `bigint`,
+    `decimal(12, 2)`, `decimal(38, 10)` with 30 digit values,
+    `timestamp(6)`, `timestamp(3) with time zone` over five zones,
+    full precision `double`, `boolean`, `varchar` (20% null), `integer`
+    (30% null), `uuid` and `array(varchar)` of 0 to 4 elements.
+- Segments of 65,536 rows: about 9.5 MB of JSON for `lineitem` (92
+  segments) and 15 MB for `types` (31 segments), below the default
+  `protocol.spooling.max-segment-size` of 16 MB.
 - Benchmark: `BenchmarkQueryDataEncoding` (JMH, trino-main tests). One
-  operation encodes, or decodes, all 46 segments. Encoding goes from `Page`s
-  to a discarding output stream through the server `QueryDataEncoder`;
-  decoding reads the encoded bytes from memory through the client
-  `QueryDataDecoder` and iterates every row, so it includes producing the Java
-  values the JDBC driver consumes. Compression and decompression are included
-  in the compressed variants. The compression threshold is the default 8 kB,
-  so every segment is compressed.
-- Machine: 4 vCPU Intel Xeon 2.80 GHz container, 15 GB RAM, JDK 25.0.5,
-  `-Xmx8g`, single thread, average time mode, 1 fork, 3 warmup iterations of
-  5 s, 5 measurement iterations of 5 s. Error is the 99.9% confidence
-  interval reported by JMH.
+  operation encodes, or decodes, all segments of a table. Encoding goes from
+  `Page`s to a discarding output stream through the server
+  `QueryDataEncoder`; decoding reads the encoded bytes from memory through the
+  client `QueryDataDecoder` and iterates every row, so it includes producing
+  the Java values the JDBC driver consumes. Compression is included in the
+  compressed variants, with the default 8 kB threshold, so every segment is
+  compressed.
+- Machine: 4 vCPU Intel Xeon 2.80 GHz container (shared), JDK 25.0.5,
+  `-Xmx8g`, single thread, average time, **3 forks**, 3 warmup and 5
+  measurement iterations of 3 s each. Error is the 99.9% confidence interval
+  over the 15 measurements.
+- The decode times and the encode times come from two runs in two
+  containers (the first run was cut short). Compare encode times only with
+  encode times, and decode times only with decode times.
 
 Run with:
 
@@ -31,88 +43,72 @@ Run with:
     -Dexec.args="-cp %classpath io.trino.server.protocol.spooling.encoding.BenchmarkQueryDataEncoding"
 ```
 
-## Results
+## Size
 
-| Encoding | Encoded size | Bytes per row | Relative to `json+zstd` | Encode (ms, all rows) | Decode (ms, all rows) |
-|---|---:|---:|---:|---:|---:|
-| `json` | 870,511,731 | 145.1 | 3.57× | 6,255 ± 171 | 5,488 ± 744 |
-| `json+zstd` | 243,602,071 | 40.6 | 1.00× | 12,102 ± 1,847 | 7,681 ± 800 |
-| `json+lz4` | 395,836,713 | 66.0 | 1.62× | 9,559 ± 758 | 6,242 ± 1,051 |
-| `protobuf` | 909,745,035 | 151.6 | 3.73× | 2,184 ± 380 | 3,720 ± 194 |
-| `protobuf+zstd` | 282,639,046 | 47.1 | 1.16× | 9,132 ± 2,660 | 6,336 ± 790 |
-| `protobuf+lz4` | 409,095,007 | 68.2 | 1.68× | 6,035 ± 2,736 | 4,969 ± 1,192 |
+| Encoding | `lineitem` bytes | per row | vs `json+zstd` | `types` bytes | per row | vs `json+zstd` |
+|---|---:|---:|---:|---:|---:|---:|
+| `json` | 870,511,777 | 145.1 | 3.57× | 455,036,886 | 227.5 | 2.11× |
+| `json+zstd` | 243,582,699 | 40.6 | 1.00× | 216,092,822 | 108.0 | 1.00× |
+| `json+lz4` | 395,875,643 | 66.0 | 1.63× | 356,279,048 | 178.1 | 1.65× |
+| `protobuf` | 909,745,035 | 151.6 | 3.73× | 337,186,093 | 168.6 | 1.56× |
+| `protobuf+zstd` | 282,973,724 | 47.2 | 1.16× | 186,396,901 | 93.2 | **0.86×** |
+| `protobuf+lz4` | 409,123,750 | 68.2 | 1.68× | 223,739,674 | 111.9 | 1.04× |
 
-Throughput for the uncompressed encodings, from the averages above:
+## Time (ms for the whole table)
 
-| | `json` | `protobuf` |
-|---|---:|---:|
-| Encode, rows per second | 0.96 M | 2.75 M |
-| Decode, rows per second | 1.09 M | 1.61 M |
+| Encoding | `lineitem` encode | `lineitem` decode | `types` encode | `types` decode |
+|---|---:|---:|---:|---:|
+| `json` | 6,383 ± 353 | 4,313 ± 171 | 4,757 ± 175 | 1,426 ± 45 |
+| `json+zstd` | 12,595 ± 364 | 6,012 ± 175 | 8,980 ± 327 | 2,280 ± 73 |
+| `json+lz4` | 10,640 ± 617 | 5,453 ± 215 | 6,414 ± 497 | 1,897 ± 38 |
+| `protobuf` | 2,844 ± 607 | 3,391 ± 107 | 1,118 ± 133 | 2,654 ± 89 |
+| `protobuf+zstd` | 11,374 ± 3,022 | 5,546 ± 175 | 3,846 ± 563 | 3,414 ± 233 |
+| `protobuf+lz4` | 7,557 ± 2,332 | 4,750 ± 146 | 2,229 ± 515 | 2,938 ± 201 |
 
 ## Reading the numbers
 
-- **Time.** Encoding a protobuf segment is 2.9 times faster than encoding a
-  JSON segment, and decoding it on the client is 1.5 times faster, because
-  nothing is formatted or parsed as text: numbers are written as varints and
-  IEEE 754 bit patterns, and dates as day counts. With compression the
-  compressor dominates, so `protobuf+zstd` is 25% faster to produce and 18%
-  faster to consume than `json+zstd`, and `protobuf+lz4` is 37% and 20% faster
-  than `json+lz4`.
-- **Size.** The protobuf segment is 4.5% larger than the JSON segment before
-  compression and 16% larger after Zstandard compression. Two things work
-  against protobuf on this table:
-  - Every value is a nested `Value` message, which costs a tag byte, a length
-    byte and the `oneof` tag byte: 3 bytes for each of the 16 columns, or
-    48 of the 152 bytes of a row. JSON spends about 17 bytes per row on
-    brackets and commas. This overhead is the price of the row-of-typed-values
-    layout and of the self-describing `oneof`.
-  - The four `double` columns of `lineitem` hold prices and percentages with
-    two decimals, which JSON prints in 4 to 9 characters while protobuf always
-    writes 8 bytes. `date` columns go the other way (3 to 4 bytes instead of
-    13) and `bigint` columns are about even.
-  Tables with wide integer, decimal, timestamp or binary columns, or with
-  nulls, lean further toward protobuf; tables of short strings and "nice"
-  doubles lean toward JSON.
-- **Variance.** The compressed encodings have wide confidence intervals
-  because the container's 4 vCPUs are shared; the uncompressed `protobuf`
-  results are the most stable. The relative ordering was the same in every
-  iteration.
+- **Server encode.** Protobuf is faster everywhere it can be measured:
+  2.2× (`lineitem`) and 4.3× (`types`) uncompressed, 2.3× with Zstandard
+  and 2.9× with LZ4 on `types`, 1.4× with LZ4 on `lineitem`. With Zstandard
+  on `lineitem` the compressor dominates, and the difference is within the
+  noise (11,374 ± 3,022 against 12,595 ± 364). The JSON encoder formats every
+  decimal, timestamp and double as text, which is what protobuf saves.
+- **Client decode.** Here the type mix decides. On `lineitem` protobuf decodes
+  1.27× faster uncompressed and 8% to 15% faster compressed. On `types` it is
+  **1.5× to 1.9× slower**: the client values of decimals and timestamps are
+  strings, which the JSON decoder receives already formatted by the server,
+  while the protobuf decoder must format them itself. Protobuf moves that
+  work from the coordinator to the client; on `types` with Zstandard the
+  total, across the two runs, is lower (about 7.3 s against 11.3 s), but
+  the client's share grows.
+  The client formats dates and decimals by hand (about 15% faster than
+  through `DateTimeFormatter` and `BigInteger`); what remains is the cost of
+  building the strings. Typed client values instead of strings would remove
+  it, but that is a client API change outside this encoding.
+- **Size.** It depends on the data. On `lineitem`, protobuf is 4.5% larger
+  before and 16% larger after Zstandard: each value costs 3 bytes of framing
+  (48 of the 152 bytes of a row), and the two-digit doubles are shorter as
+  text than as 8 bytes. On `types`, protobuf is 26% smaller before and 14%
+  smaller after Zstandard: decimals, timestamps, zone ids, uuids and nulls are
+  much shorter in binary.
+- **Noise.** The compressed protobuf encodes of `lineitem` are bimodal
+  (single operations between 4.8 s and 15.8 s with LZ4); a GC profile shows
+  under 0.1% of the time in GC, so this is the shared machine, not the
+  encoder. The uncompressed and the `types` results are stable across forks.
 
 ## Conclusions
 
-- `protobuf+zstd` trades about 16% more storage and transfer for about 20%
-  less CPU on both the coordinator and the client on this workload. Whether
-  that is a good trade depends on whether a deployment is bound by object
-  storage and network or by CPU. The Java client therefore keeps requesting
-  `json+zstd` first; protobuf is opt-in through the `encoding` property.
-- Uncompressed `protobuf` is the fastest option end to end when the storage
-  is local or the network is fast, which also makes it the natural choice for
-  the `coordinator_proxy` and `worker_proxy` retrieval modes within a data
-  center.
-- If size matters more, a columnar segment layout (one packed repeated field
-  per column with a null bitmap, so that values carry no per-value tags or
-  lengths) would remove the 48 bytes of overhead per row and is expected to
-  land well below JSON before compression. It is a different encoding and is
-  left as follow-up work; see the open questions in the pull request draft.
-
-## Review notes
-
-Added by the cross-model review; the numbers above were not re-measured.
-
-- **Scope of the size result.** `lineitem` has no nulls, timestamps or
-  decimals, and its doubles have two fractional digits, which favors JSON on
-  size. Measure at least one type-rich table (decimals, timestamps with time
-  zone, nulls, arrays) before using these numbers to decide the client's
-  default order.
-- **Noise in the compressed timings.** With one fork on 4 shared vCPUs, the
-  99.9% intervals of `protobuf+zstd` and `json+zstd` encode overlap
-  (9,132 ± 2,660 ms against 12,102 ± 1,847 ms), so the encode speedup with
-  Zstandard is not established; decode is marginal. The uncompressed
-  results are clear. Use several forks on a quiet machine for the compressed
-  variants.
-- **Segment size.** The benchmark's segments (131,072 rows, about 19 MB of
-  JSON) are larger than the default `protocol.spooling.max-segment-size` of
-  16 MB; the comparison holds, but production segments are smaller.
-- **Streaming.** The compressed decoders read and decompress the whole
-  segment before decoding it (`CompressedQueryDataDecoder`), so row by row
-  streaming only applies to uncompressed `protobuf` segments.
+- Protobuf reliably saves coordinator CPU, by 2× to 4× before compression.
+  That is the case for it: a coordinator that encodes many large results.
+- It is not a uniform win for the client: type-rich results decode slower
+  than with JSON, because the client now formats what the server used to.
+- Size is a wash that depends on the column types: worse on string and
+  "nice" double heavy tables, better on decimal, timestamp and nullable
+  tables.
+- The Java client therefore keeps requesting `json+zstd` first; protobuf is
+  opt-in through the `encoding` property. A columnar layout (fork issue #34)
+  would remove the 3 bytes of framing per value and should help the
+  `lineitem` case most.
+- The compressed decoders read and decompress the whole segment before
+  decoding it (`CompressedQueryDataDecoder`), so row by row streaming only
+  applies to uncompressed `protobuf` segments.
