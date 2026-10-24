@@ -207,9 +207,16 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
                         .buildOrThrow());
         waitUntilTableExists(topic);
 
+        String table = format("\"%1$s&value-subject=%1$s-io.trino.protobuf.Order.Line\"", topic);
         assertQuery(
-                format("SELECT key, sku, quantity FROM \"%1$s&value-subject=%1$s-io.trino.protobuf.Order.Line\"", topic),
+                format("SELECT key, sku, quantity FROM %s", table),
                 "VALUES (0, 'sku-0', 1), (1, 'sku-1', 2), (2, 'sku-2', 3)");
+
+        // rows are written with the nested message, whose message indexes name its position within Order
+        assertUpdate(format("INSERT INTO %s (key, sku, quantity) VALUES (3, 'sku-3', 4)", table), 1);
+        assertQuery(
+                format("SELECT key, sku, quantity FROM %s", table),
+                "VALUES (0, 'sku-0', 1), (1, 'sku-1', 2), (2, 'sku-2', 3), (3, 'sku-3', 4)");
     }
 
     @Test
