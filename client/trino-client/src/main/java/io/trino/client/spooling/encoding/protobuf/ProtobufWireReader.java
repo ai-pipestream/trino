@@ -34,6 +34,8 @@ public final class ProtobufWireReader
 {
     private static final int MAX_VARINT_SIZE = 10;
 
+    // formats the values read with this reader, which confines its buffer to the reader's thread
+    private final ProtobufValueFormatter formatter = new ProtobufValueFormatter();
     private byte[] buffer = new byte[0];
     private int position;
     private int limit;
@@ -101,6 +103,15 @@ public final class ProtobufWireReader
 
     public int readVarint32()
     {
+        // most tags, lengths and small values are one byte
+        int position = this.position;
+        if (position < limit) {
+            byte b = buffer[position];
+            if (b >= 0) {
+                this.position = position + 1;
+                return b;
+            }
+        }
         long value = readVarint64();
         if (value != (value & 0xFFFFFFFFL)) {
             throw new ProtobufFormatException("Varint does not fit in 32 bits: " + value);
@@ -112,6 +123,10 @@ public final class ProtobufWireReader
     {
         byte[] buffer = this.buffer;
         int position = this.position;
+        if (position < limit && buffer[position] >= 0) {
+            this.position = position + 1;
+            return buffer[position];
+        }
         if (limit - position < MAX_VARINT_SIZE) {
             return readVarint64Checked();
         }
@@ -177,6 +192,25 @@ public final class ProtobufWireReader
             value = (value << 8) | (buffer[position + i] & 0xFF);
         }
         position += 8;
+        return value;
+    }
+
+    /**
+     * Reads {@code length} bytes, at least one and at most eight, as a big-endian two's complement
+     * number, sign-extended to 64 bits.
+     */
+    public long readBigEndianSigned(int length)
+    {
+        if (length < 1 || length > Long.BYTES) {
+            throw new IllegalArgumentException("Invalid length: " + length);
+        }
+        ensureRemaining(length);
+        // the first byte carries the sign
+        long value = buffer[position];
+        for (int i = 1; i < length; i++) {
+            value = (value << 8) | (buffer[position + i] & 0xFF);
+        }
+        position += length;
         return value;
     }
 
@@ -259,6 +293,11 @@ public final class ProtobufWireReader
             default:
                 throw new ProtobufFormatException(format("Unsupported wire type %s for field %s", wireType(tag), fieldNumber(tag)));
         }
+    }
+
+    ProtobufValueFormatter formatter()
+    {
+        return formatter;
     }
 
     private byte readByte()

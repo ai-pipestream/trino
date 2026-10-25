@@ -27,12 +27,6 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 
-import static io.trino.client.spooling.encoding.protobuf.ProtobufValueFormatter.formatDate;
-import static io.trino.client.spooling.encoding.protobuf.ProtobufValueFormatter.formatDecimal;
-import static io.trino.client.spooling.encoding.protobuf.ProtobufValueFormatter.formatTime;
-import static io.trino.client.spooling.encoding.protobuf.ProtobufValueFormatter.formatTimeWithTimeZone;
-import static io.trino.client.spooling.encoding.protobuf.ProtobufValueFormatter.formatTimestamp;
-import static io.trino.client.spooling.encoding.protobuf.ProtobufValueFormatter.formatTimestampWithTimeZone;
 import static java.lang.Math.floorDiv;
 import static java.lang.Math.floorMod;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -49,6 +43,9 @@ public class TestProtobufValueFormatter
     private static final long PICOSECONDS_PER_SECOND = 1_000_000_000_000L;
     private static final long PICOSECONDS_PER_DAY = 24 * 60 * 60 * PICOSECONDS_PER_SECOND;
     private static final int[] YEARS = {-999_999_999, -292_275, -10000, -9999, -1000, -999, -100, -99, -10, -9, -1, 0, 1, 9, 10, 99, 100, 999, 1000, 1582, 1600, 1900, 1970, 2000, 2024, 9999, 10000, 99999, 294247, 999_999_999};
+
+    // one formatter per test, so every case after the first also checks that the reused buffer leaves no trace
+    private final ProtobufValueFormatter formatter = new ProtobufValueFormatter();
 
     @Test
     public void testDate()
@@ -71,7 +68,7 @@ public class TestProtobufValueFormatter
             days.add((long) random.nextInt());
         }
         for (long day : days) {
-            assertThat(formatDate(day)).as("day %s", day).isEqualTo(LocalDate.ofEpochDay(day).toString());
+            assertThat(formatter.formatDate(day)).as("day %s", day).isEqualTo(LocalDate.ofEpochDay(day).toString());
         }
     }
 
@@ -101,7 +98,7 @@ public class TestProtobufValueFormatter
             int picosOfMicro = random.nextInt(1_000_000);
             for (int precision = 0; precision <= 12; precision++) {
                 String expected = expectedTimestamp(precision, epochMicros, picosOfMicro, 0);
-                assertThat(formatTimestamp(precision, epochMicros, picosOfMicro))
+                assertThat(formatter.formatTimestamp(precision, epochMicros, picosOfMicro))
                         .as("micros %s picos %s precision %s", epochMicros, picosOfMicro, precision)
                         .isEqualTo(expected);
             }
@@ -128,16 +125,16 @@ public class TestProtobufValueFormatter
             int precision = random.nextInt(13);
             String zone = zones[random.nextInt(zones.length)];
             String expected = expectedDateTime(precision, floorDiv(epochMillis, 1000), floorMod(epochMillis, 1000L) * 1_000_000_000 + picosOfMilli, offsetSeconds) + " " + zone;
-            assertThat(formatTimestampWithTimeZone(precision, epochMillis, picosOfMilli, offsetSeconds, zone, zone.getBytes(UTF_8)))
+            assertThat(formatter.formatTimestampWithTimeZone(precision, epochMillis, picosOfMilli, offsetSeconds, zone, zone.getBytes(UTF_8)))
                     .as("millis %s picos %s offset %s precision %s zone %s", epochMillis, picosOfMilli, offsetSeconds, precision, zone)
                     .isEqualTo(expected);
             // the zone id text without its bytes, the path of a zone id that is not ASCII
-            assertThat(formatTimestampWithTimeZone(precision, epochMillis, picosOfMilli, offsetSeconds, zone, null)).isEqualTo(expected);
+            assertThat(formatter.formatTimestampWithTimeZone(precision, epochMillis, picosOfMilli, offsetSeconds, zone, null)).isEqualTo(expected);
         }
-        assertThat(formatTimestampWithTimeZone(3, 0, 0, 0, "Zone/Zürich", null)).isEqualTo("1970-01-01 00:00:00.000 Zone/Zürich");
-        assertThat(formatTimestampWithTimeZone(0, Long.MAX_VALUE, 999_999_999, 18 * 3600, "+18:00", "+18:00".getBytes(UTF_8)))
+        assertThat(formatter.formatTimestampWithTimeZone(3, 0, 0, 0, "Zone/Zürich", null)).isEqualTo("1970-01-01 00:00:00.000 Zone/Zürich");
+        assertThat(formatter.formatTimestampWithTimeZone(0, Long.MAX_VALUE, 999_999_999, 18 * 3600, "+18:00", "+18:00".getBytes(UTF_8)))
                 .isEqualTo(expectedDateTime(0, floorDiv(Long.MAX_VALUE, 1000), 0, 18 * 3600) + " +18:00");
-        assertThat(formatTimestampWithTimeZone(12, Long.MIN_VALUE, 0, -18 * 3600, "-18:00", "-18:00".getBytes(UTF_8)))
+        assertThat(formatter.formatTimestampWithTimeZone(12, Long.MIN_VALUE, 0, -18 * 3600, "-18:00", "-18:00".getBytes(UTF_8)))
                 .isEqualTo(expectedDateTime(12, floorDiv(Long.MIN_VALUE, 1000), floorMod(Long.MIN_VALUE, 1000L) * 1_000_000_000, -18 * 3600) + " -18:00");
     }
 
@@ -158,16 +155,16 @@ public class TestProtobufValueFormatter
         for (long picos : values) {
             for (int precision = 0; precision <= 12; precision++) {
                 String expected = TIME_FORMATTER.format(LocalTime.ofSecondOfDay(picos / PICOSECONDS_PER_SECOND)) + fraction(precision, picos % PICOSECONDS_PER_SECOND);
-                assertThat(formatTime(precision, picos)).as("picos %s precision %s", picos, precision).isEqualTo(expected);
+                assertThat(formatter.formatTime(precision, picos)).as("picos %s precision %s", picos, precision).isEqualTo(expected);
                 int offsetMinutes = random.nextInt(2 * 14 * 60 + 1) - 14 * 60;
                 String offset = String.format("%s%02d:%02d", offsetMinutes < 0 ? "-" : "+", Math.abs(offsetMinutes) / 60, Math.abs(offsetMinutes) % 60);
-                assertThat(formatTimeWithTimeZone(precision, picos, offsetMinutes)).as("picos %s precision %s offset %s", picos, precision, offsetMinutes).isEqualTo(expected + offset);
+                assertThat(formatter.formatTimeWithTimeZone(precision, picos, offsetMinutes)).as("picos %s precision %s offset %s", picos, precision, offsetMinutes).isEqualTo(expected + offset);
             }
         }
-        assertThat(formatTimeWithTimeZone(0, 0, 0)).isEqualTo("00:00:00+00:00");
-        assertThat(formatTimeWithTimeZone(0, 0, -1)).isEqualTo("00:00:00-00:01");
-        assertThat(formatTimeWithTimeZone(0, 0, -14 * 60)).isEqualTo("00:00:00-14:00");
-        assertThat(formatTimeWithTimeZone(0, 0, 14 * 60)).isEqualTo("00:00:00+14:00");
+        assertThat(formatter.formatTimeWithTimeZone(0, 0, 0)).isEqualTo("00:00:00+00:00");
+        assertThat(formatter.formatTimeWithTimeZone(0, 0, -1)).isEqualTo("00:00:00-00:01");
+        assertThat(formatter.formatTimeWithTimeZone(0, 0, -14 * 60)).isEqualTo("00:00:00-14:00");
+        assertThat(formatter.formatTimeWithTimeZone(0, 0, 14 * 60)).isEqualTo("00:00:00+14:00");
     }
 
     @Test
@@ -196,7 +193,7 @@ public class TestProtobufValueFormatter
         for (long unscaled : values) {
             for (int scale = 0; scale <= 40; scale++) {
                 String expected = new BigDecimal(BigInteger.valueOf(unscaled), scale).toPlainString();
-                assertThat(formatDecimal(unscaled, scale)).as("unscaled %s scale %s", unscaled, scale).isEqualTo(expected);
+                assertThat(formatter.formatDecimal(unscaled, scale)).as("unscaled %s scale %s", unscaled, scale).isEqualTo(expected);
             }
         }
     }
@@ -238,16 +235,16 @@ public class TestProtobufValueFormatter
             }
             for (int scale : new int[] {0, 1, 2, 9, 10, 18, 19, 20, 37, 38, 39, 40, 45}) {
                 String expected = new BigDecimal(unscaled, scale).toPlainString();
-                assertThat(formatDecimal(unscaled.toByteArray(), scale)).as("unscaled %s scale %s", unscaled, scale).isEqualTo(expected);
+                assertThat(formatter.formatDecimal(unscaled.toByteArray(), scale)).as("unscaled %s scale %s", unscaled, scale).isEqualTo(expected);
                 // the same value sign-extended to 16 bytes, the raw form of a 128-bit integer
-                assertThat(formatDecimal(signExtend(unscaled, 16), scale)).as("unscaled %s scale %s, 16 bytes", unscaled, scale).isEqualTo(expected);
+                assertThat(formatter.formatDecimal(signExtend(unscaled, 16), scale)).as("unscaled %s scale %s, 16 bytes", unscaled, scale).isEqualTo(expected);
             }
         }
         // beyond 128 bits, which no Trino decimal reaches, through BigInteger
         BigInteger huge = BigInteger.ONE.shiftLeft(200).add(BigInteger.valueOf(12345));
-        assertThat(formatDecimal(huge.toByteArray(), 3)).isEqualTo(new BigDecimal(huge, 3).toPlainString());
-        assertThat(formatDecimal(huge.negate().toByteArray(), 0)).isEqualTo(huge.negate().toString());
-        assertThat(formatDecimal(signExtend(BigInteger.valueOf(-5), 20), 2)).isEqualTo("-0.05");
+        assertThat(formatter.formatDecimal(huge.toByteArray(), 3)).isEqualTo(new BigDecimal(huge, 3).toPlainString());
+        assertThat(formatter.formatDecimal(huge.negate().toByteArray(), 0)).isEqualTo(huge.negate().toString());
+        assertThat(formatter.formatDecimal(signExtend(BigInteger.valueOf(-5), 20), 2)).isEqualTo("-0.05");
     }
 
     private static byte[] signExtend(BigInteger value, int length)

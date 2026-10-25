@@ -25,7 +25,9 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.math.BigInteger;
 import java.util.Arrays;
+import java.util.Random;
 
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.WIRETYPE_FIXED32;
 import static io.trino.client.spooling.encoding.protobuf.ProtobufWireFormat.WIRETYPE_FIXED64;
@@ -350,6 +352,34 @@ public class TestProtobufWireFormat
         assertThat(reader.hasRemaining()).isFalse();
         assertThatThrownBy(() -> reader.reset(new byte[] {1}, 1, 1))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    public void testReadBigEndianSigned()
+    {
+        Random random = new Random(42);
+        for (int i = 0; i < 10_000; i++) {
+            // at most 63 bits, which with the sign bit is at most eight bytes
+            BigInteger value = new BigInteger(1 + random.nextInt(63), random);
+            if (random.nextBoolean()) {
+                value = value.negate();
+            }
+            byte[] bytes = value.toByteArray();
+            assertThat(reader(bytes).readBigEndianSigned(bytes.length)).as("value %s", value).isEqualTo(value.longValueExact());
+        }
+        assertThat(reader(new byte[] {(byte) 0x80}).readBigEndianSigned(1)).isEqualTo(-128);
+        assertThat(reader(new byte[] {0, (byte) 0xFF}).readBigEndianSigned(2)).isEqualTo(255);
+        assertThat(reader(new byte[] {(byte) 0xFF, (byte) 0xFF, 0}).readBigEndianSigned(3)).isEqualTo(-256);
+
+        ProtobufWireReader reader = reader(new byte[] {1, 2, 3});
+        assertThatThrownBy(() -> reader.readBigEndianSigned(4))
+                .isInstanceOf(ProtobufFormatException.class)
+                .hasMessageStartingWith("Truncated message");
+        assertThatThrownBy(() -> reader.readBigEndianSigned(0))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> reader.readBigEndianSigned(9))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(reader.readBigEndianSigned(3)).isEqualTo(0x010203);
     }
 
     private static ProtobufWireReader reader(byte[] bytes)

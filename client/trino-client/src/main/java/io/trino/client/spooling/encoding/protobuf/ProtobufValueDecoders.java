@@ -511,7 +511,7 @@ public final class ProtobufValueDecoders
         @Override
         Object decodeValue(ProtobufWireReader reader)
         {
-            return ProtobufValueFormatter.formatDate(reader.readSint32());
+            return reader.formatter().formatDate(reader.readSint32());
         }
     }
 
@@ -616,7 +616,9 @@ public final class ProtobufValueDecoders
         Object decodeMessage(ProtobufWireReader reader)
         {
             boolean hasUnscaled = false;
-            long unscaledLong = 0;
+            // the unscaled value as 128-bit two's complement, unless it is wider and kept as bytes
+            long unscaledHigh = 0;
+            long unscaledLow = 0;
             byte[] unscaledBytes = null;
             int scale = 0;
             while (reader.hasRemaining()) {
@@ -624,13 +626,30 @@ public final class ProtobufValueDecoders
                 switch (fieldNumber(tag)) {
                     case DECIMAL_UNSCALED_LONG:
                         expectWireType(tag, WIRETYPE_VARINT);
-                        unscaledLong = reader.readSint64();
+                        unscaledLow = reader.readSint64();
+                        unscaledHigh = unscaledLow >> 63;
                         unscaledBytes = null;
                         hasUnscaled = true;
                         break;
                     case DECIMAL_UNSCALED_BYTES:
                         expectWireType(tag, WIRETYPE_LENGTH_DELIMITED);
-                        unscaledBytes = readUnscaledBytes(reader);
+                        int length = reader.readLength();
+                        if (length == 0) {
+                            throw new ProtobufFormatException("Decimal has empty unscaled bytes");
+                        }
+                        if (length > 2 * Long.BYTES) {
+                            unscaledBytes = reader.readBytes(length);
+                        }
+                        else if (length > Long.BYTES) {
+                            unscaledHigh = reader.readBigEndianSigned(length - Long.BYTES);
+                            unscaledLow = reader.readBigEndianSigned(Long.BYTES);
+                            unscaledBytes = null;
+                        }
+                        else {
+                            unscaledLow = reader.readBigEndianSigned(length);
+                            unscaledHigh = unscaledLow >> 63;
+                            unscaledBytes = null;
+                        }
                         hasUnscaled = true;
                         break;
                     case DECIMAL_SCALE:
@@ -647,10 +666,13 @@ public final class ProtobufValueDecoders
             if (scale < 0) {
                 throw new ProtobufFormatException("Invalid decimal scale: " + scale);
             }
-            if (unscaledBytes == null) {
-                return ProtobufValueFormatter.formatDecimal(unscaledLong, scale);
+            if (unscaledBytes != null) {
+                return reader.formatter().formatDecimal(unscaledBytes, scale);
             }
-            return ProtobufValueFormatter.formatDecimal(unscaledBytes, scale);
+            if (unscaledHigh == unscaledLow >> 63) {
+                return reader.formatter().formatDecimal(unscaledLow, scale);
+            }
+            return reader.formatter().formatDecimal(unscaledHigh, unscaledLow, scale);
         }
     }
 
@@ -724,7 +746,7 @@ public final class ProtobufValueDecoders
                 }
             }
             checkRange("picos", picos, 0, PICOSECONDS_PER_DAY - 1);
-            return ProtobufValueFormatter.formatTime(checkPrecision(precision), picos);
+            return reader.formatter().formatTime(checkPrecision(precision), picos);
         }
     }
 
@@ -763,7 +785,7 @@ public final class ProtobufValueDecoders
             }
             checkRange("picos", picos, 0, PICOSECONDS_PER_DAY - 1);
             checkRange("offset minutes", offsetMinutes, -MAX_TIME_ZONE_OFFSET_MINUTES, MAX_TIME_ZONE_OFFSET_MINUTES);
-            return ProtobufValueFormatter.formatTimeWithTimeZone(checkPrecision(precision), picos, offsetMinutes);
+            return reader.formatter().formatTimeWithTimeZone(checkPrecision(precision), picos, offsetMinutes);
         }
     }
 
@@ -801,17 +823,20 @@ public final class ProtobufValueDecoders
                 }
             }
             checkRange("picos of micro", picosOfMicro, 0, PICOSECONDS_PER_MICROSECOND - 1);
-            return ProtobufValueFormatter.formatTimestamp(checkPrecision(precision), epochMicros, picosOfMicro);
+            return reader.formatter().formatTimestamp(checkPrecision(precision), epochMicros, picosOfMicro);
         }
     }
 
     private static class TimestampWithTimeZoneDecoder
             extends MessageDecoder
     {
-        // The zone id of the last value: a column usually holds one zone, so the text is decoded
-        // once. The entry is immutable and the field is only a hint, so a racing thread sees either
-        // a complete entry or none
-        private ZoneId lastZoneId;
+        private static final int ZONE_ID_CACHE_SIZE = 8;
+
+        // The zone ids of recent values: a column usually holds a few zones, so the text of each is
+        // decoded once. The entries are immutable and the cache is only a hint, so a racing thread
+        // sees either a complete entry or none
+        private final ZoneId[] zoneIds = new ZoneId[ZONE_ID_CACHE_SIZE];
+        private int nextZoneId;
 
         TimestampWithTimeZoneDecoder()
         {
@@ -860,18 +885,25 @@ public final class ProtobufValueDecoders
             checkRange("offset seconds", offsetSeconds, -MAX_OFFSET_SECONDS, MAX_OFFSET_SECONDS);
             // The server resolves the offset with its own time zone rules, so the client renders the
             // local date-time the json encoding would have, even for a zone the client does not know
-            return ProtobufValueFormatter.formatTimestampWithTimeZone(checkPrecision(precision), epochMillis, picosOfMilli, offsetSeconds, zoneId.id, zoneId.ascii);
+            return reader.formatter().formatTimestampWithTimeZone(checkPrecision(precision), epochMillis, picosOfMilli, offsetSeconds, zoneId.id, zoneId.ascii);
         }
 
         private ZoneId readZoneId(ProtobufWireReader reader)
         {
             int length = reader.readLength();
-            ZoneId cached = lastZoneId;
-            if (cached != null && reader.skipIfEqual(length, cached.utf8)) {
-                return cached;
+            for (ZoneId cached : zoneIds) {
+                if (cached == null) {
+                    break;
+                }
+                if (reader.skipIfEqual(length, cached.utf8)) {
+                    return cached;
+                }
             }
             ZoneId zoneId = new ZoneId(reader.readBytes(length));
-            lastZoneId = zoneId;
+            // the oldest entry makes room
+            int index = nextZoneId;
+            zoneIds[index] = zoneId;
+            nextZoneId = (index + 1) % ZONE_ID_CACHE_SIZE;
             return zoneId;
         }
     }

@@ -27,9 +27,11 @@ import static java.nio.charset.StandardCharsets.ISO_8859_1;
  * variants in trino-spi, which the client cannot depend on; the formats here are pinned to them by
  * tests.
  * <p>
- * The text is written into a byte array of the exact length and turned into a Latin-1 string, which
- * is one array copy. This is the hot path of a result with many decimals or timestamps, where the
- * json decoder gets the text preformatted.
+ * The text is written into a buffer the formatter reuses and turned into a Latin-1 string, so a value
+ * costs one allocation, the string itself. This is the hot path of a result with many decimals or
+ * timestamps, where the json decoder gets the text preformatted.
+ * <p>
+ * Instances are not thread-safe.
  */
 final class ProtobufValueFormatter
 {
@@ -66,47 +68,51 @@ final class ProtobufValueFormatter
     private static final int DECIMAL_WORD_DIGITS = 9;
     // 2^127 has 39 digits, which is five words
     private static final int MAX_DECIMAL_DIGITS = 5 * DECIMAL_WORD_DIGITS;
+    private static final int INITIAL_BUFFER_SIZE = 64;
 
-    private ProtobufValueFormatter() {}
+    private byte[] buffer = new byte[INITIAL_BUFFER_SIZE];
 
     /**
      * Formats like {@code LocalDate.toString()}: {@code uuuu-MM-dd}, a year beyond 9999 with a plus
      * sign, a negative year with a minus sign, both padded to four digits.
      */
-    static String formatDate(long epochDay)
+    String formatDate(long epochDay)
     {
         long date = civilDate(epochDay);
         int year = yearOf(date);
         int yearLength = yearLength(year);
-        byte[] buffer = new byte[yearLength + 6];
+        int length = yearLength + 6;
+        byte[] buffer = buffer(length);
         int index = writeYear(buffer, year, yearLength);
         buffer[index++] = '-';
         index = writeTwoDigits(buffer, index, monthOf(date));
         buffer[index++] = '-';
         writeTwoDigits(buffer, index, dayOf(date));
-        return latin1(buffer);
+        return latin1(buffer, length);
     }
 
     /**
      * Formats like {@code SqlTime}: {@code HH:mm:ss}, followed by {@code precision} fraction digits
      * after a point when {@code precision} is positive.
      */
-    static String formatTime(int precision, long picos)
+    String formatTime(int precision, long picos)
     {
-        byte[] buffer = new byte[8 + fractionLength(precision)];
+        int length = 8 + fractionLength(precision);
+        byte[] buffer = buffer(length);
         writeTime(buffer, 0, precision, picos);
-        return latin1(buffer);
+        return latin1(buffer, length);
     }
 
     /**
      * Formats like {@code SqlTimeWithTimeZone}: the time followed by the offset as {@code +HH:mm}.
      */
-    static String formatTimeWithTimeZone(int precision, long picos, int offsetMinutes)
+    String formatTimeWithTimeZone(int precision, long picos, int offsetMinutes)
     {
-        byte[] buffer = new byte[8 + fractionLength(precision) + 6];
+        int length = 8 + fractionLength(precision) + 6;
+        byte[] buffer = buffer(length);
         int index = writeTime(buffer, 0, precision, picos);
         writeOffset(buffer, index, offsetMinutes);
-        return latin1(buffer);
+        return latin1(buffer, length);
     }
 
     /**
@@ -114,14 +120,15 @@ final class ProtobufValueFormatter
      * renders it, followed by {@code precision} fraction digits after a point when {@code precision}
      * is positive.
      */
-    static String formatTimestamp(int precision, long epochMicros, int picosOfMicro)
+    String formatTimestamp(int precision, long epochMicros, int picosOfMicro)
     {
         long epochSecond = floorDiv(epochMicros, MICROSECONDS_PER_SECOND);
         long picoFraction = floorMod(epochMicros, MICROSECONDS_PER_SECOND) * PICOSECONDS_PER_MICROSECOND + picosOfMicro;
         long date = civilDate(floorDiv(epochSecond, SECONDS_PER_DAY));
-        byte[] buffer = new byte[dateTimeLength(date, precision)];
+        int length = dateTimeLength(date, precision);
+        byte[] buffer = buffer(length);
         writeDateTime(buffer, date, epochSecond, picoFraction, precision);
-        return latin1(buffer);
+        return latin1(buffer, length);
     }
 
     /**
@@ -129,36 +136,38 @@ final class ProtobufValueFormatter
      * followed by a space and the zone id. The zone id is given as text and, when it is ASCII, as the
      * bytes of that text, so a cached zone id costs no conversion.
      */
-    static String formatTimestampWithTimeZone(int precision, long epochMillis, int picosOfMilli, int offsetSeconds, String zoneId, byte[] asciiZoneId)
+    String formatTimestampWithTimeZone(int precision, long epochMillis, int picosOfMilli, int offsetSeconds, String zoneId, byte[] asciiZoneId)
     {
         long epochSecond = floorDiv(epochMillis, MILLISECONDS_PER_SECOND) + offsetSeconds;
         long picoFraction = floorMod(epochMillis, MILLISECONDS_PER_SECOND) * PICOSECONDS_PER_MILLISECOND + picosOfMilli;
         long date = civilDate(floorDiv(epochSecond, SECONDS_PER_DAY));
         int dateTimeLength = dateTimeLength(date, precision);
         if (asciiZoneId == null) {
-            byte[] buffer = new byte[dateTimeLength];
+            byte[] buffer = buffer(dateTimeLength);
             writeDateTime(buffer, date, epochSecond, picoFraction, precision);
-            return latin1(buffer) + " " + zoneId;
+            return latin1(buffer, dateTimeLength) + " " + zoneId;
         }
-        byte[] buffer = new byte[dateTimeLength + 1 + asciiZoneId.length];
+        int length = dateTimeLength + 1 + asciiZoneId.length;
+        byte[] buffer = buffer(length);
         int index = writeDateTime(buffer, date, epochSecond, picoFraction, precision);
         buffer[index++] = ' ';
         System.arraycopy(asciiZoneId, 0, buffer, index, asciiZoneId.length);
-        return latin1(buffer);
+        return latin1(buffer, length);
     }
 
     /**
      * Formats like {@code SqlDecimal}: plain notation with exactly {@code scale} fraction digits, and
      * a zero before the point when the value is below one.
      */
-    static String formatDecimal(long unscaled, int scale)
+    String formatDecimal(long unscaled, int scale)
     {
         boolean negative = unscaled < 0;
         // the magnitude is kept negative, which has room for Long.MIN_VALUE
         long magnitude = negative ? unscaled : -unscaled;
         int digits = digitsOfNegative(magnitude);
-        byte[] buffer = new byte[decimalLength(negative, digits, scale)];
-        int index = buffer.length;
+        int length = decimalLength(negative, digits, scale);
+        byte[] buffer = buffer(length);
+        int index = length;
         if (scale > 0) {
             for (int i = 0; i < scale; i++) {
                 buffer[--index] = (byte) ('0' - (magnitude % 10));
@@ -176,7 +185,7 @@ final class ProtobufValueFormatter
         if (negative) {
             buffer[--index] = '-';
         }
-        return latin1(buffer);
+        return latin1(buffer, length);
     }
 
     /**
@@ -184,7 +193,7 @@ final class ProtobufValueFormatter
      * writes it. A value of up to 128 bits, which covers every Trino decimal, is converted without
      * a {@code BigInteger}.
      */
-    static String formatDecimal(byte[] unscaled, int scale)
+    String formatDecimal(byte[] unscaled, int scale)
     {
         if (unscaled.length > 16) {
             return new BigDecimal(new BigInteger(unscaled), scale).toPlainString();
@@ -195,6 +204,14 @@ final class ProtobufValueFormatter
             high = (high << 8) | (low >>> 56);
             low = (low << 8) | (b & 0xFF);
         }
+        return formatDecimal(high, low, scale);
+    }
+
+    /**
+     * Formats the 128-bit two's complement unscaled value {@code high:low}.
+     */
+    String formatDecimal(long high, long low, int scale)
+    {
         boolean negative = high < 0;
         if (negative) {
             low = -low;
@@ -234,7 +251,8 @@ final class ProtobufValueFormatter
         }
         int digitCount = digits.length - start;
 
-        byte[] buffer = new byte[decimalLength(negative, digitCount, scale)];
+        int length = decimalLength(negative, digitCount, scale);
+        byte[] buffer = buffer(length);
         int index = 0;
         if (negative) {
             buffer[index++] = '-';
@@ -253,7 +271,7 @@ final class ProtobufValueFormatter
             }
             System.arraycopy(digits, start + Math.max(0, digitCount - scale), buffer, index, Math.min(digitCount, scale));
         }
-        return latin1(buffer);
+        return latin1(buffer, length);
     }
 
     private static int decimalLength(boolean negative, int digits, int scale)
@@ -413,8 +431,19 @@ final class ProtobufValueFormatter
         return (int) (packed & 0xFF);
     }
 
-    private static String latin1(byte[] buffer)
+    /**
+     * Returns the reusable buffer, grown to at least {@code length} bytes.
+     */
+    private byte[] buffer(int length)
     {
-        return new String(buffer, ISO_8859_1);
+        if (buffer.length < length) {
+            buffer = new byte[Math.max(length, 2 * buffer.length)];
+        }
+        return buffer;
+    }
+
+    private static String latin1(byte[] buffer, int length)
+    {
+        return new String(buffer, 0, length, ISO_8859_1);
     }
 }

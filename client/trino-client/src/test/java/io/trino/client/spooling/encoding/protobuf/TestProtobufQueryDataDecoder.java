@@ -291,6 +291,25 @@ public class TestProtobufQueryDataDecoder
     }
 
     @Test
+    public void testTimestampWithTimeZoneZoneIds()
+    {
+        // more zones than the decoder caches, ids that share a prefix or a length, a non-ASCII id, in rows of one segment
+        List<String> zones = ImmutableList.of("UTC", "Europe/Warsaw", "Europe/Berlin", "Europe/Paris", "+05:30", "-05:30", "Asia/Kolkata", "America/New_York",
+                "America/Chicago", "Etc/GMT+1", "Zone/Zürich", "Europe/Warsaw2");
+        Random random = new Random(42);
+        Segment.Builder segment = Segment.newBuilder();
+        List<List<Object>> expected = new ArrayList<>();
+        for (int i = 0; i < 500; i++) {
+            // runs of one zone and random switches
+            String zone = zones.get(i < 100 ? i % zones.size() : random.nextInt(zones.size()));
+            segment.addRows(io.trino.client.spooling.encoding.protobuf.generated.Row.newBuilder()
+                    .addValues(Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder().setEpochMillis(1_600_000_000_123L).setPrecision(3).setZoneId(zone))));
+            expected.add(ImmutableList.of("2020-09-13 12:26:40.123 " + zone));
+        }
+        assertThat(decode(ImmutableList.of(column(TIMESTAMP_WITH_TIME_ZONE)), segment.build().toByteArray(), false)).isEqualTo(expected);
+    }
+
+    @Test
     public void testIntervals()
     {
         Column yearToMonth = column(INTERVAL_YEAR_TO_MONTH);
