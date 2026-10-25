@@ -63,14 +63,24 @@ final class ProtobufValueFormatter
             100_000_000_000_000_000L,
             1_000_000_000_000_000_000L,
     };
-    // digits of one 128-bit decimal word: the magnitude is divided by this until it is zero
+    // nine digits of a 128-bit decimal: the magnitude is divided by this until it fits in a long
     private static final long DECIMAL_WORD = 1_000_000_000L;
-    private static final int DECIMAL_WORD_DIGITS = 9;
-    // 2^127 has 39 digits, which is five words
-    private static final int MAX_DECIMAL_DIGITS = 5 * DECIMAL_WORD_DIGITS;
+    // 2^128 has 39 digits
+    private static final int DIGITS_LENGTH = 39;
+    // "00" to "99"
+    private static final byte[] DIGIT_PAIRS = new byte[200];
     private static final int INITIAL_BUFFER_SIZE = 64;
 
+    static {
+        for (int i = 0; i < 100; i++) {
+            DIGIT_PAIRS[2 * i] = (byte) ('0' + i / 10);
+            DIGIT_PAIRS[2 * i + 1] = (byte) ('0' + i % 10);
+        }
+    }
+
     private byte[] buffer = new byte[INITIAL_BUFFER_SIZE];
+    // the digits of a decimal, written backwards from the end before they are laid out in the buffer
+    private final byte[] digits = new byte[DIGITS_LENGTH];
 
     /**
      * Formats like {@code LocalDate.toString()}: {@code uuuu-MM-dd}, a year beyond 9999 with a plus
@@ -161,31 +171,13 @@ final class ProtobufValueFormatter
      */
     String formatDecimal(long unscaled, int scale)
     {
+        if (unscaled == Long.MIN_VALUE) {
+            // its magnitude does not fit in a long
+            return formatDecimal(-1, unscaled, scale);
+        }
         boolean negative = unscaled < 0;
-        // the magnitude is kept negative, which has room for Long.MIN_VALUE
-        long magnitude = negative ? unscaled : -unscaled;
-        int digits = digitsOfNegative(magnitude);
-        int length = decimalLength(negative, digits, scale);
-        byte[] buffer = buffer(length);
-        int index = length;
-        if (scale > 0) {
-            for (int i = 0; i < scale; i++) {
-                buffer[--index] = (byte) ('0' - (magnitude % 10));
-                magnitude /= 10;
-            }
-            buffer[--index] = '.';
-        }
-        if (magnitude == 0) {
-            buffer[--index] = '0';
-        }
-        while (magnitude != 0) {
-            buffer[--index] = (byte) ('0' - (magnitude % 10));
-            magnitude /= 10;
-        }
-        if (negative) {
-            buffer[--index] = '-';
-        }
-        return latin1(buffer, length);
+        int start = writeDigits(digits, DIGITS_LENGTH, Math.abs(unscaled));
+        return formatDecimal(negative, start, scale);
     }
 
     /**
@@ -217,19 +209,19 @@ final class ProtobufValueFormatter
             low = -low;
             high = ~high + (low == 0 ? 1 : 0);
         }
-        if (high == 0 && low >= 0) {
-            return formatDecimal(negative ? -low : low, scale);
-        }
-
-        // Divide the unsigned 128-bit magnitude, as four 32-bit words, by 10^9 until it is zero;
-        // each remainder is nine digits
+        // the unsigned magnitude as four 32-bit words, most significant first
         long word0 = high >>> 32;
         long word1 = high & 0xFFFF_FFFFL;
         long word2 = low >>> 32;
         long word3 = low & 0xFFFF_FFFFL;
-        byte[] digits = new byte[MAX_DECIMAL_DIGITS];
-        int start = digits.length;
-        while ((word0 | word1 | word2 | word3) != 0) {
+        // Divide by 10^9 until the quotient fits in a non-negative long; each remainder is nine
+        // digits. Every division is by a constant, which the compiler turns into a multiplication.
+        // 2^128 is below 10^39, so at most three remainders are taken
+        int remainders = 0;
+        long remainder0 = 0;
+        long remainder1 = 0;
+        long remainder2 = 0;
+        while (word0 != 0 || word1 != 0 || word2 > Integer.MAX_VALUE) {
             long remainder = word0 % DECIMAL_WORD;
             word0 /= DECIMAL_WORD;
             long current = (remainder << 32) | word1;
@@ -241,16 +233,40 @@ final class ProtobufValueFormatter
             current = (remainder << 32) | word3;
             word3 = current / DECIMAL_WORD;
             remainder = current % DECIMAL_WORD;
-            for (int i = 0; i < DECIMAL_WORD_DIGITS; i++) {
-                digits[--start] = (byte) ('0' + (remainder % 10));
-                remainder /= 10;
+            if (remainders == 0) {
+                remainder0 = remainder;
             }
+            else if (remainders == 1) {
+                remainder1 = remainder;
+            }
+            else {
+                remainder2 = remainder;
+            }
+            remainders++;
         }
-        while (start < digits.length - 1 && digits[start] == '0') {
-            start++;
+        long quotient = (word2 << 32) | word3;
+        if (remainders == 0) {
+            return formatDecimal(negative, writeDigits(digits, DIGITS_LENGTH, quotient), scale);
         }
-        int digitCount = digits.length - start;
+        // the remainders are the least significant words, each padded to nine digits
+        int end = DIGITS_LENGTH;
+        end = writeNineDigits(digits, end, (int) remainder0);
+        if (remainders > 1) {
+            end = writeNineDigits(digits, end, (int) remainder1);
+        }
+        if (remainders > 2) {
+            end = writeNineDigits(digits, end, (int) remainder2);
+        }
+        return formatDecimal(negative, writeDigits(digits, end, quotient), scale);
+    }
 
+    /**
+     * Lays out the digits in {@code digits[start, DIGITS_LENGTH)}, which have no leading zero, with
+     * the sign, the point and the zeros the scale needs.
+     */
+    private String formatDecimal(boolean negative, int start, int scale)
+    {
+        int digitCount = DIGITS_LENGTH - start;
         int length = decimalLength(negative, digitCount, scale);
         byte[] buffer = buffer(length);
         int index = 0;
@@ -272,6 +288,44 @@ final class ProtobufValueFormatter
             System.arraycopy(digits, start + Math.max(0, digitCount - scale), buffer, index, Math.min(digitCount, scale));
         }
         return latin1(buffer, length);
+    }
+
+    /**
+     * Writes the digits of the non-negative {@code value}, without leading zeros, so that they end before
+     * {@code end}, and returns the index of the first digit.
+     */
+    private static int writeDigits(byte[] buffer, int end, long value)
+    {
+        while (value >= 100) {
+            int pair = (int) (value % 100);
+            value /= 100;
+            buffer[--end] = DIGIT_PAIRS[2 * pair + 1];
+            buffer[--end] = DIGIT_PAIRS[2 * pair];
+        }
+        if (value >= 10) {
+            buffer[--end] = DIGIT_PAIRS[2 * (int) value + 1];
+            buffer[--end] = DIGIT_PAIRS[2 * (int) value];
+        }
+        else {
+            buffer[--end] = (byte) ('0' + value);
+        }
+        return end;
+    }
+
+    /**
+     * Writes {@code value}, below 10^9, as nine digits ending before {@code end}, and returns the index
+     * of the first digit.
+     */
+    private static int writeNineDigits(byte[] buffer, int end, int value)
+    {
+        for (int i = 0; i < 4; i++) {
+            int pair = value % 100;
+            value /= 100;
+            buffer[--end] = DIGIT_PAIRS[2 * pair + 1];
+            buffer[--end] = DIGIT_PAIRS[2 * pair];
+        }
+        buffer[--end] = (byte) ('0' + value);
+        return end;
     }
 
     private static int decimalLength(boolean negative, int digits, int scale)
