@@ -158,6 +158,19 @@ public class BenchmarkQueryDataEncoding
         private long rows;
         private long encodedBytes;
 
+        /**
+         * Generates and encodes {@code table}, for benchmarks of other modules that decode it.
+         */
+        public static BenchmarkData create(String table, String encoding)
+                throws IOException
+        {
+            BenchmarkData data = new BenchmarkData();
+            data.table = table;
+            data.encoding = encoding;
+            data.setup();
+            return data;
+        }
+
         @Setup
         public void setup()
                 throws IOException
@@ -294,6 +307,21 @@ public class BenchmarkQueryDataEncoding
         {
             return segments.size();
         }
+
+        public List<byte[]> getEncodedSegments()
+        {
+            return encodedSegments;
+        }
+
+        public List<DataAttributes> getSegmentAttributes()
+        {
+            return segmentAttributes;
+        }
+
+        public List<Column> getClientColumns()
+        {
+            return clientColumns;
+        }
     }
 
     @Benchmark
@@ -347,10 +375,7 @@ public class BenchmarkQueryDataEncoding
         // print the encoded size of each encoding before measuring the times
         for (String table : List.of("lineitem", "types")) {
             for (String encoding : List.of("json", "json+zstd", "json+lz4", "protobuf", "protobuf+zstd", "protobuf+lz4")) {
-                BenchmarkData data = new BenchmarkData();
-                data.table = table;
-                data.encoding = encoding;
-                data.setup();
+                BenchmarkData data = BenchmarkData.create(table, encoding);
                 System.out.println(format("%-9s %-14s rows=%d segments=%d bytes=%d", table, encoding, data.getRows(), data.getSegments(), data.getEncodedBytes()));
             }
         }
