@@ -61,6 +61,7 @@ public class ClientSession
     private final boolean compressionDisabled;
     private final Optional<String> encoding;
     private final Duration heartbeatInterval;
+    private final boolean typedValues;
 
     public static Builder builder()
     {
@@ -104,7 +105,8 @@ public class ClientSession
             Duration clientRequestTimeout,
             boolean compressionDisabled,
             Optional<String> encoding,
-            Duration heartbeatInterval)
+            Duration heartbeatInterval,
+            boolean typedValues)
     {
         this.server = requireNonNull(server, "server is null");
         this.user = requireNonNull(user, "user is null");
@@ -131,6 +133,7 @@ public class ClientSession
         this.compressionDisabled = compressionDisabled;
         this.encoding = requireNonNull(encoding, "encoding is null");
         this.heartbeatInterval = requireNonNull(heartbeatInterval, "heartbeatInterval is null");
+        this.typedValues = typedValues;
 
         for (String clientTag : clientTags) {
             checkArgument(!clientTag.contains(","), "client tag cannot contain ','");
@@ -294,6 +297,18 @@ public class ClientSession
         return heartbeatInterval;
     }
 
+    /**
+     * Whether the rows of a binary encoding hold {@link DecimalValue}, {@link java.time.LocalDate} and
+     * {@link TimestampValue} for top-level {@code decimal}, {@code date}, {@code timestamp} and
+     * {@code timestamp with time zone} values, instead of their text. The text is what
+     * {@code toString()} of each returns. Encodings that carry text, such as {@code json}, return text
+     * either way.
+     */
+    public boolean isTypedValues()
+    {
+        return typedValues;
+    }
+
     @Override
     public String toString()
     {
@@ -319,6 +334,7 @@ public class ClientSession
                 .add("compressionDisabled", compressionDisabled)
                 .add("encoding", encoding)
                 .add("heartbeatInterval", heartbeatInterval)
+                .add("typedValues", typedValues)
                 .omitNullValues()
                 .toString();
     }
@@ -350,6 +366,7 @@ public class ClientSession
         private boolean compressionDisabled;
         private Optional<String> encoding = Optional.empty();
         private Duration heartbeatInterval = new Duration(30, SECONDS);
+        private boolean typedValues;
 
         private Builder() {}
 
@@ -380,6 +397,7 @@ public class ClientSession
             clientRequestTimeout = clientSession.getClientRequestTimeout();
             compressionDisabled = clientSession.isCompressionDisabled();
             encoding = clientSession.getEncoding();
+            typedValues = clientSession.isTypedValues();
         }
 
         public Builder server(URI server)
@@ -532,6 +550,12 @@ public class ClientSession
             return this;
         }
 
+        public Builder typedValues(boolean typedValues)
+        {
+            this.typedValues = typedValues;
+            return this;
+        }
+
         public ClientSession build()
         {
             return new ClientSession(
@@ -559,7 +583,8 @@ public class ClientSession
                     clientRequestTimeout,
                     compressionDisabled,
                     encoding,
-                    heartbeatInterval);
+                    heartbeatInterval,
+                    typedValues);
         }
     }
 }

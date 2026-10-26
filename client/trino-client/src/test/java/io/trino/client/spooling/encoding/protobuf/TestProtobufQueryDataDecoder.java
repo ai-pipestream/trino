@@ -23,11 +23,13 @@ import io.trino.client.ClientTypeSignature;
 import io.trino.client.ClientTypeSignatureParameter;
 import io.trino.client.CloseableIterator;
 import io.trino.client.Column;
+import io.trino.client.DecimalValue;
 import io.trino.client.EncodedVariant;
 import io.trino.client.NamedClientTypeSignature;
 import io.trino.client.QueryDataDecoder;
 import io.trino.client.Row;
 import io.trino.client.RowFieldName;
+import io.trino.client.TimestampValue;
 import io.trino.client.spooling.DataAttribute;
 import io.trino.client.spooling.DataAttributes;
 import io.trino.client.spooling.encoding.QueryDataDecoders;
@@ -51,8 +53,10 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -291,11 +295,107 @@ public class TestProtobufQueryDataDecoder
     }
 
     @Test
+    public void testTypedValues()
+    {
+        List<Column> columns = ImmutableList.of(
+                column(DECIMAL),
+                column(DATE),
+                column(TIMESTAMP),
+                column(TIMESTAMP_WITH_TIME_ZONE),
+                column(array(new ClientTypeSignature(DECIMAL))),
+                column(BIGINT));
+        List<String> zones = ImmutableList.of("UTC", "Europe/Warsaw", "+05:45", "-18:00", "America/New_York", "Zone/Zürich");
+        Random random = new Random(42);
+        Segment.Builder segment = Segment.newBuilder();
+        for (int i = 0; i < 20_000; i++) {
+            BigInteger unscaled = new BigInteger(random.nextInt(128), random);
+            if (random.nextBoolean()) {
+                unscaled = unscaled.negate();
+            }
+            int scale = random.nextInt(39);
+            Decimal.Builder decimal = Decimal.newBuilder().setScale(scale);
+            if (unscaled.bitLength() < 64 && random.nextInt(4) != 0) {
+                decimal.setUnscaledLong(unscaled.longValueExact());
+            }
+            else {
+                // the bytes also carry small values, with any sign extension up to 16 bytes
+                decimal.setUnscaledBytes(ByteString.copyFrom(signExtend(unscaled.toByteArray(), unscaled.toByteArray().length + random.nextInt(17 - unscaled.toByteArray().length))));
+            }
+            int precision = random.nextInt(13);
+            // every timestamp Trino has, and all of the days of a sint32
+            long epochMicros = random.nextLong() >> random.nextInt(64);
+            long epochMillis = random.nextLong() >> (11 + random.nextInt(53));
+            int epochDay = random.nextInt() >> random.nextInt(32);
+            segment.addRows(io.trino.client.spooling.encoding.protobuf.generated.Row.newBuilder()
+                    .addValues(Value.newBuilder().setDecimal(decimal))
+                    .addValues(Value.newBuilder().setDate(epochDay))
+                    .addValues(Value.newBuilder().setTimestamp(Timestamp.newBuilder().setEpochMicros(epochMicros).setPicosOfMicro(random.nextInt(1_000_000)).setPrecision(precision)))
+                    .addValues(Value.newBuilder().setTimestampWithTimeZone(TimestampWithTimeZone.newBuilder()
+                            .setEpochMillis(epochMillis)
+                            .setPicosOfMilli(random.nextInt(1_000_000_000))
+                            .setPrecision(precision)
+                            .setOffsetSeconds(random.nextInt(2 * 18 * 3600 + 1) - 18 * 3600)
+                            .setZoneId(zones.get(random.nextInt(zones.size())))))
+                    .addValues(Value.newBuilder().setArray(ArrayValue.newBuilder().addElements(Value.newBuilder().setDecimal(decimal))))
+                    .addValues(Value.newBuilder().setBigint(i)));
+        }
+        byte[] bytes = segment.build().toByteArray();
+        List<List<Object>> textRows = decode(columns, bytes, true, false);
+        List<List<Object>> typedRows = decode(columns, bytes, true, true);
+        assertThat(typedRows).hasSameSizeAs(textRows);
+        for (int row = 0; row < textRows.size(); row++) {
+            List<Object> text = textRows.get(row);
+            List<Object> typed = typedRows.get(row);
+            assertThat(typed.get(0)).isInstanceOf(DecimalValue.class);
+            assertThat(typed.get(1)).isInstanceOf(LocalDate.class);
+            assertThat(typed.get(2)).isInstanceOf(TimestampValue.class);
+            assertThat(typed.get(3)).isInstanceOf(TimestampValue.class);
+            for (int column = 0; column < 4; column++) {
+                // a typed value stands in for its text
+                assertThat(typed.get(column).toString()).as("row %s column %s", row, column).isEqualTo(text.get(column));
+            }
+            assertThat(((DecimalValue) typed.get(0)).toBigDecimal()).isEqualTo(new BigDecimal((String) text.get(0)));
+            assertThat(((TimestampValue) typed.get(2)).getZoneId()).isEmpty();
+            assertThat(((TimestampValue) typed.get(3)).getZoneId()).isPresent();
+            // nested values and the other types stay as they are
+            assertThat(typed.subList(4, 6)).isEqualTo(text.subList(4, 6));
+        }
+
+        // a decimal beyond 128 bits, which no Trino decimal reaches, stays text
+        BigInteger huge = BigInteger.ONE.shiftLeft(200);
+        Segment hugeSegment = Segment.newBuilder()
+                .addRows(io.trino.client.spooling.encoding.protobuf.generated.Row.newBuilder()
+                        .addValues(Value.newBuilder().setDecimal(Decimal.newBuilder().setUnscaledBytes(ByteString.copyFrom(huge.toByteArray())).setScale(2))))
+                .build();
+        assertThat(decode(ImmutableList.of(column(DECIMAL)), hugeSegment.toByteArray(), true, true))
+                .containsExactly(ImmutableList.of(new BigDecimal(huge, 2).toPlainString()));
+    }
+
+    private static byte[] signExtend(byte[] value, int length)
+    {
+        byte[] result = new byte[length];
+        Arrays.fill(result, 0, length - value.length, value[0] < 0 ? (byte) -1 : 0);
+        System.arraycopy(value, 0, result, length - value.length, value.length);
+        return result;
+    }
+
+    @Test
     public void testTimestampWithTimeZoneZoneIds()
     {
         // more zones than the decoder caches, ids that share a prefix or a length, a non-ASCII id, in rows of one segment
-        List<String> zones = ImmutableList.of("UTC", "Europe/Warsaw", "Europe/Berlin", "Europe/Paris", "+05:30", "-05:30", "Asia/Kolkata", "America/New_York",
-                "America/Chicago", "Etc/GMT+1", "Zone/Zürich", "Europe/Warsaw2");
+        List<String> zones = ImmutableList.of(
+                "UTC",
+                "Europe/Warsaw",
+                "Europe/Berlin",
+                "Europe/Paris",
+                "+05:30",
+                "-05:30",
+                "Asia/Kolkata",
+                "America/New_York",
+                "America/Chicago",
+                "Etc/GMT+1",
+                "Zone/Zürich",
+                "Europe/Warsaw2");
         Random random = new Random(42);
         Segment.Builder segment = Segment.newBuilder();
         List<List<Object>> expected = new ArrayList<>();
@@ -931,7 +1031,12 @@ public class TestProtobufQueryDataDecoder
 
     private static List<List<Object>> decode(List<Column> columns, byte[] segment, boolean supportsVariantBinary)
     {
-        QueryDataDecoder decoder = QueryDataDecoders.get("protobuf").create(columns, DataAttributes.empty(), supportsVariantBinary);
+        return decode(columns, segment, supportsVariantBinary, false);
+    }
+
+    private static List<List<Object>> decode(List<Column> columns, byte[] segment, boolean supportsVariantBinary, boolean typedValues)
+    {
+        QueryDataDecoder decoder = QueryDataDecoders.get("protobuf").create(columns, DataAttributes.empty(), supportsVariantBinary, typedValues);
         try (CloseableIterator<List<Object>> iterator = decoder.decode(new ByteArrayInputStream(segment), DataAttributes.empty())) {
             return ImmutableList.copyOf(iterator);
         }

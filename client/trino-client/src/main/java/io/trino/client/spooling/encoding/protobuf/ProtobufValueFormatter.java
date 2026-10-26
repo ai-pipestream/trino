@@ -13,8 +13,11 @@
  */
 package io.trino.client.spooling.encoding.protobuf;
 
+import io.trino.client.TimestampValue;
+
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.util.Optional;
 
 import static java.lang.Math.floorDiv;
 import static java.lang.Math.floorMod;
@@ -139,6 +142,44 @@ final class ProtobufValueFormatter
         byte[] buffer = buffer(length);
         writeDateTime(buffer, date, epochSecond, picoFraction, precision);
         return latin1(buffer, length);
+    }
+
+    /**
+     * The fields of the text {@link #formatTimestamp} returns.
+     */
+    static TimestampValue timestampValue(int precision, long epochMicros, int picosOfMicro)
+    {
+        long epochSecond = floorDiv(epochMicros, MICROSECONDS_PER_SECOND);
+        long picoFraction = floorMod(epochMicros, MICROSECONDS_PER_SECOND) * PICOSECONDS_PER_MICROSECOND + picosOfMicro;
+        return timestampValue(epochSecond, picoFraction, precision, Optional.empty());
+    }
+
+    /**
+     * The fields of the text {@link #formatTimestampWithTimeZone} returns.
+     */
+    static TimestampValue timestampWithTimeZoneValue(int precision, long epochMillis, int picosOfMilli, int offsetSeconds, Optional<String> zoneId)
+    {
+        long epochSecond = floorDiv(epochMillis, MILLISECONDS_PER_SECOND) + offsetSeconds;
+        long picoFraction = floorMod(epochMillis, MILLISECONDS_PER_SECOND) * PICOSECONDS_PER_MILLISECOND + picosOfMilli;
+        return timestampValue(epochSecond, picoFraction, precision, zoneId);
+    }
+
+    private static TimestampValue timestampValue(long epochSecond, long picoFraction, int precision, Optional<String> zoneId)
+    {
+        long date = civilDate(floorDiv(epochSecond, SECONDS_PER_DAY));
+        int secondOfDay = (int) floorMod(epochSecond, SECONDS_PER_DAY);
+        // the text has precision digits of the fraction
+        long picosOfSecond = picoFraction - picoFraction % POWERS_OF_TEN[MAX_PRECISION - precision];
+        return new TimestampValue(
+                yearOf(date),
+                monthOf(date),
+                dayOf(date),
+                secondOfDay / 3600,
+                (secondOfDay / 60) % 60,
+                secondOfDay % 60,
+                picosOfSecond,
+                precision,
+                zoneId);
     }
 
     /**

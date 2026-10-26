@@ -19,10 +19,12 @@ import com.google.common.net.InetAddresses;
 import io.trino.client.ClientTypeSignature;
 import io.trino.client.ClientTypeSignatureParameter;
 import io.trino.client.Column;
+import io.trino.client.DecimalValue;
 import io.trino.client.EncodedVariant;
 import io.trino.client.IntervalDayTime;
 import io.trino.client.IntervalYearMonth;
 import io.trino.client.Row;
+import io.trino.client.TimestampValue;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -30,6 +32,7 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -161,14 +164,17 @@ public final class ProtobufValueDecoders
     private static final ValueDecoder BIGINT_DECODER = new BigintDecoder();
     private static final ValueDecoder REAL_DECODER = new RealDecoder();
     private static final ValueDecoder DOUBLE_DECODER = new DoubleDecoder();
-    private static final ValueDecoder DECIMAL_DECODER = new DecimalDecoder();
+    private static final ValueDecoder DECIMAL_DECODER = new DecimalDecoder(false);
+    private static final ValueDecoder TYPED_DECIMAL_DECODER = new DecimalDecoder(true);
     private static final ValueDecoder VARCHAR_DECODER = new StringDecoder(VALUE_VARCHAR);
     private static final ValueDecoder JSON_DECODER = new StringDecoder(VALUE_JSON);
     private static final ValueDecoder VARBINARY_DECODER = new BytesDecoder(VALUE_VARBINARY);
-    private static final ValueDecoder DATE_DECODER = new DateDecoder();
+    private static final ValueDecoder DATE_DECODER = new DateDecoder(false);
+    private static final ValueDecoder TYPED_DATE_DECODER = new DateDecoder(true);
     private static final ValueDecoder TIME_DECODER = new TimeDecoder();
     private static final ValueDecoder TIME_WITH_TIME_ZONE_DECODER = new TimeWithTimeZoneDecoder();
-    private static final ValueDecoder TIMESTAMP_DECODER = new TimestampDecoder();
+    private static final ValueDecoder TIMESTAMP_DECODER = new TimestampDecoder(false);
+    private static final ValueDecoder TYPED_TIMESTAMP_DECODER = new TimestampDecoder(true);
     private static final ValueDecoder INTERVAL_YEAR_TO_MONTH_DECODER = new IntervalYearToMonthDecoder();
     private static final ValueDecoder INTERVAL_DAY_TO_SECOND_DECODER = new IntervalDayToSecondDecoder();
     private static final ValueDecoder UUID_DECODER = new UuidDecoder();
@@ -190,12 +196,40 @@ public final class ProtobufValueDecoders
 
     public static ValueDecoder[] createValueDecoders(List<Column> columns, boolean supportsVariantBinary)
     {
+        return createValueDecoders(columns, supportsVariantBinary, false);
+    }
+
+    /**
+     * Creates the decoders of the columns. With {@code typedValues}, top-level {@code decimal},
+     * {@code date}, {@code timestamp} and {@code timestamp with time zone} values are decoded as
+     * {@link DecimalValue}, {@link LocalDate} and {@link TimestampValue} instead of their text; the
+     * values nested in arrays, maps and rows stay text.
+     */
+    public static ValueDecoder[] createValueDecoders(List<Column> columns, boolean supportsVariantBinary, boolean typedValues)
+    {
         verify(!columns.isEmpty(), "Columns must not be empty");
         ValueDecoder[] decoders = new ValueDecoder[columns.size()];
         for (int i = 0; i < columns.size(); i++) {
-            decoders[i] = createValueDecoder(columns.get(i).getTypeSignature(), supportsVariantBinary);
+            ClientTypeSignature signature = columns.get(i).getTypeSignature();
+            decoders[i] = typedValues ? createTypedValueDecoder(signature, supportsVariantBinary) : createValueDecoder(signature, supportsVariantBinary);
         }
         return decoders;
+    }
+
+    private static ValueDecoder createTypedValueDecoder(ClientTypeSignature signature, boolean supportsVariantBinary)
+    {
+        switch (signature.getRawType()) {
+            case DECIMAL:
+                return TYPED_DECIMAL_DECODER;
+            case DATE:
+                return TYPED_DATE_DECODER;
+            case TIMESTAMP:
+                return TYPED_TIMESTAMP_DECODER;
+            case TIMESTAMP_WITH_TIME_ZONE:
+                return new TimestampWithTimeZoneDecoder(true);
+            default:
+                return createValueDecoder(signature, supportsVariantBinary);
+        }
     }
 
     public static ValueDecoder createValueDecoder(ClientTypeSignature signature, boolean supportsVariantBinary)
@@ -234,8 +268,8 @@ public final class ProtobufValueDecoders
             case TIMESTAMP:
                 return TIMESTAMP_DECODER;
             case TIMESTAMP_WITH_TIME_ZONE:
-                // one per column: it caches the zone id of the last value
-                return new TimestampWithTimeZoneDecoder();
+                // one per column: it caches the zone ids of recent values
+                return new TimestampWithTimeZoneDecoder(false);
             case INTERVAL_YEAR_TO_MONTH:
                 return INTERVAL_YEAR_TO_MONTH_DECODER;
             case INTERVAL_DAY_TO_SECOND:
@@ -503,15 +537,22 @@ public final class ProtobufValueDecoders
     private static class DateDecoder
             extends ScalarDecoder
     {
-        DateDecoder()
+        private final boolean typed;
+
+        DateDecoder(boolean typed)
         {
             super(VALUE_DATE, WIRETYPE_VARINT);
+            this.typed = typed;
         }
 
         @Override
         Object decodeValue(ProtobufWireReader reader)
         {
-            return reader.formatter().formatDate(reader.readSint32());
+            int epochDay = reader.readSint32();
+            if (typed) {
+                return LocalDate.ofEpochDay(epochDay);
+            }
+            return reader.formatter().formatDate(epochDay);
         }
     }
 
@@ -607,9 +648,12 @@ public final class ProtobufValueDecoders
     private static class DecimalDecoder
             extends MessageDecoder
     {
-        DecimalDecoder()
+        private final boolean typed;
+
+        DecimalDecoder(boolean typed)
         {
             super(VALUE_DECIMAL);
+            this.typed = typed;
         }
 
         @Override
@@ -667,7 +711,11 @@ public final class ProtobufValueDecoders
                 throw new ProtobufFormatException("Invalid decimal scale: " + scale);
             }
             if (unscaledBytes != null) {
+                // beyond 128 bits, which no Trino decimal reaches, the value stays text
                 return reader.formatter().formatDecimal(unscaledBytes, scale);
+            }
+            if (typed) {
+                return new DecimalValue(unscaledHigh, unscaledLow, scale);
             }
             if (unscaledHigh == unscaledLow >> 63) {
                 return reader.formatter().formatDecimal(unscaledLow, scale);
@@ -792,9 +840,12 @@ public final class ProtobufValueDecoders
     private static class TimestampDecoder
             extends MessageDecoder
     {
-        TimestampDecoder()
+        private final boolean typed;
+
+        TimestampDecoder(boolean typed)
         {
             super(VALUE_TIMESTAMP);
+            this.typed = typed;
         }
 
         @Override
@@ -823,6 +874,9 @@ public final class ProtobufValueDecoders
                 }
             }
             checkRange("picos of micro", picosOfMicro, 0, PICOSECONDS_PER_MICROSECOND - 1);
+            if (typed) {
+                return ProtobufValueFormatter.timestampValue(checkPrecision(precision), epochMicros, picosOfMicro);
+            }
             return reader.formatter().formatTimestamp(checkPrecision(precision), epochMicros, picosOfMicro);
         }
     }
@@ -837,10 +891,12 @@ public final class ProtobufValueDecoders
         // sees either a complete entry or none
         private final ZoneId[] zoneIds = new ZoneId[ZONE_ID_CACHE_SIZE];
         private int nextZoneId;
+        private final boolean typed;
 
-        TimestampWithTimeZoneDecoder()
+        TimestampWithTimeZoneDecoder(boolean typed)
         {
             super(VALUE_TIMESTAMP_WITH_TIME_ZONE);
+            this.typed = typed;
         }
 
         @Override
@@ -885,6 +941,9 @@ public final class ProtobufValueDecoders
             checkRange("offset seconds", offsetSeconds, -MAX_OFFSET_SECONDS, MAX_OFFSET_SECONDS);
             // The server resolves the offset with its own time zone rules, so the client renders the
             // local date-time the json encoding would have, even for a zone the client does not know
+            if (typed) {
+                return ProtobufValueFormatter.timestampWithTimeZoneValue(checkPrecision(precision), epochMillis, picosOfMilli, offsetSeconds, zoneId.optionalId);
+            }
             return reader.formatter().formatTimestampWithTimeZone(checkPrecision(precision), epochMillis, picosOfMilli, offsetSeconds, zoneId.id, zoneId.ascii);
         }
 
@@ -912,6 +971,7 @@ public final class ProtobufValueDecoders
     {
         private final byte[] utf8;
         private final String id;
+        private final Optional<String> optionalId;
         // the bytes again when they are all ASCII, which every zone id Trino knows is, otherwise null
         private final byte[] ascii;
 
@@ -919,6 +979,7 @@ public final class ProtobufValueDecoders
         {
             this.utf8 = utf8;
             this.id = new String(utf8, UTF_8);
+            this.optionalId = Optional.of(id);
             this.ascii = isAscii(utf8) ? utf8 : null;
         }
 

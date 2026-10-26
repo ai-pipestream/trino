@@ -61,7 +61,13 @@ public class ProtobufQueryDataDecoder
         @Override
         public QueryDataDecoder create(List<Column> columns, DataAttributes queryAttributes, boolean supportsVariantBinary)
         {
-            return new ProtobufQueryDataDecoder(createValueDecoders(columns, supportsVariantBinary));
+            return create(columns, queryAttributes, supportsVariantBinary, false);
+        }
+
+        @Override
+        public QueryDataDecoder create(List<Column> columns, DataAttributes queryAttributes, boolean supportsVariantBinary, boolean typedValues)
+        {
+            return new ProtobufQueryDataDecoder(createValueDecoders(columns, supportsVariantBinary, typedValues));
         }
 
         @Override
@@ -75,9 +81,9 @@ public class ProtobufQueryDataDecoder
             extends Factory
     {
         @Override
-        public QueryDataDecoder create(List<Column> columns, DataAttributes queryAttributes, boolean supportsVariantBinary)
+        public QueryDataDecoder create(List<Column> columns, DataAttributes queryAttributes, boolean supportsVariantBinary, boolean typedValues)
         {
-            return new ZstdQueryDataDecoder(super.create(columns, queryAttributes, supportsVariantBinary));
+            return new ZstdQueryDataDecoder(super.create(columns, queryAttributes, supportsVariantBinary, typedValues));
         }
 
         @Override
@@ -91,9 +97,9 @@ public class ProtobufQueryDataDecoder
             extends Factory
     {
         @Override
-        public QueryDataDecoder create(List<Column> columns, DataAttributes queryAttributes, boolean supportsVariantBinary)
+        public QueryDataDecoder create(List<Column> columns, DataAttributes queryAttributes, boolean supportsVariantBinary, boolean typedValues)
         {
-            return new Lz4QueryDataDecoder(super.create(columns, queryAttributes, supportsVariantBinary));
+            return new Lz4QueryDataDecoder(super.create(columns, queryAttributes, supportsVariantBinary, typedValues));
         }
 
         @Override

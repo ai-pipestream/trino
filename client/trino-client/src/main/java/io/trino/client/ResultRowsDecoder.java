@@ -40,18 +40,20 @@ public class ResultRowsDecoder
 {
     private final SegmentLoader loader;
     private final boolean supportsVariantBinary;
+    private final boolean typedValues;
     private QueryDataDecoder decoder;
 
     @VisibleForTesting
     public ResultRowsDecoder()
     {
-        this(new OkHttpSegmentLoader(), false);
+        this(new OkHttpSegmentLoader(), false, false);
     }
 
-    ResultRowsDecoder(SegmentLoader loader, boolean supportsVariantBinary)
+    ResultRowsDecoder(SegmentLoader loader, boolean supportsVariantBinary, boolean typedValues)
     {
         this.loader = requireNonNull(loader, "loader is null");
         this.supportsVariantBinary = supportsVariantBinary;
+        this.typedValues = typedValues;
     }
 
     private void setEncoding(List<Column> columns, String encoding)
@@ -63,7 +65,7 @@ public class ResultRowsDecoder
             checkState(!columns.isEmpty(), "Columns must be set when decoding data");
             this.decoder = QueryDataDecoders.get(encoding)
                     // we don't use query-level attributes for now
-                    .create(columns, DataAttributes.empty(), supportsVariantBinary);
+                    .create(columns, DataAttributes.empty(), supportsVariantBinary, typedValues);
         }
     }
 

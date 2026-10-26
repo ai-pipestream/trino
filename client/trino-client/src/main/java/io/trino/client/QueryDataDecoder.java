@@ -25,6 +25,15 @@ public interface QueryDataDecoder
     {
         QueryDataDecoder create(List<Column> columns, DataAttributes attributes, boolean supportsVariantBinary);
 
+        /**
+         * Creates a decoder that returns typed values, as {@link ClientSession#isTypedValues()} describes,
+         * when the encoding carries them in binary. An encoding that carries text returns text.
+         */
+        default QueryDataDecoder create(List<Column> columns, DataAttributes attributes, boolean supportsVariantBinary, boolean typedValues)
+        {
+            return create(columns, attributes, supportsVariantBinary);
+        }
+
         String encoding();
     }
 
