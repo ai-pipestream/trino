@@ -47,7 +47,8 @@ import static java.util.Objects.requireNonNull;
  * Decodes the tables of {@link io.trino.server.protocol.spooling.encoding.BenchmarkQueryDataEncoding}
  * and reads every value through a JDBC {@link ResultSet}, which is what an application pays for a
  * result: {@code object} reads each value with {@link ResultSet#getObject(int)}, as tools that map
- * rows generically do, and {@code string} with {@link ResultSet#getString(int)}.
+ * rows generically do, and {@code string} with {@link ResultSet#getString(int)}. The driver asks for
+ * typed values; {@code typedValues=false} measures the text instead.
  */
 @State(Scope.Benchmark)
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
@@ -65,6 +66,9 @@ public class BenchmarkResultSetDecoding
 
     @Param({"object", "string"})
     private String access = "object";
+
+    @Param({"true", "false"})
+    private boolean typedValues = true;
 
     private BenchmarkData data;
     private QueryDataDecoder.Factory decoderFactory;
@@ -85,7 +89,7 @@ public class BenchmarkResultSetDecoding
         boolean readObjects = access.equals("object");
         long rows = 0;
         for (int i = 0; i < data.getEncodedSegments().size(); i++) {
-            QueryDataDecoder decoder = decoderFactory.create(columns, DataAttributes.empty(), true);
+            QueryDataDecoder decoder = decoderFactory.create(columns, DataAttributes.empty(), true, typedValues);
             CloseableIterator<List<Object>> iterator = decoder.decode(new ByteArrayInputStream(data.getEncodedSegments().get(i)), data.getSegmentAttributes().get(i));
             try (ResultSet resultSet = new IteratorResultSet(columns, iterator)) {
                 while (resultSet.next()) {

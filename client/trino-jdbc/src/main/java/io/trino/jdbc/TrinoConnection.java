@@ -925,6 +925,8 @@ public class TrinoConnection
                 .clientRequestTimeout(timeout)
                 .compressionDisabled(compressionDisabled)
                 .encoding(encoding)
+                // the result set converts typed values and their text alike, and skips parsing for the former
+                .typedValues(true)
                 .build();
 
         return newStatementClient(httpCallFactory, segmentHttpCallFactory, session, sql);
