@@ -136,6 +136,7 @@ import static io.trino.SystemSessionProperties.TASK_MAX_WRITER_COUNT;
 import static io.trino.SystemSessionProperties.TASK_MIN_WRITER_COUNT;
 import static io.trino.SystemSessionProperties.TASK_SCALE_WRITERS_ENABLED;
 import static io.trino.SystemSessionProperties.USE_PREFERRED_WRITE_PARTITIONING;
+import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_GC_DISABLED;
 import static io.trino.plugin.iceberg.IcebergErrorCode.ICEBERG_INVALID_METADATA;
 import static io.trino.plugin.iceberg.IcebergFileFormat.AVRO;
 import static io.trino.plugin.iceberg.IcebergFileFormat.ORC;
@@ -421,7 +422,7 @@ public abstract class BaseIcebergConnectorTest
     @Override
     protected MaterializedResult getDescribeOrdersResult()
     {
-        return resultBuilder(getSession(), VARCHAR, VARCHAR, VARCHAR, VARCHAR)
+        return resultBuilder(VARCHAR, VARCHAR, VARCHAR, VARCHAR)
                 .row("orderkey", "bigint", "", "")
                 .row("custkey", "bigint", "", "")
                 .row("orderstatus", "varchar", "", "")
@@ -4537,13 +4538,13 @@ public abstract class BaseIcebergConnectorTest
 
         MaterializedResult result = computeActual("SHOW STATS FOR " + tableName);
         MaterializedResult expectedStatistics =
-                resultBuilder(getSession(), VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                         .row("col", null, 2.0, 0.0, null, "-10.0", "100.0")
                         .row(null, null, null, null, 2.0, null, null)
                         .build();
         if (format == AVRO) {
             expectedStatistics =
-                    resultBuilder(getSession(), VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                    resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                             .row("col", null, 2.0, 0.0, null, null, null)
                             .row(null, null, null, null, 2.0, null, null)
                             .build();
@@ -4554,13 +4555,13 @@ public abstract class BaseIcebergConnectorTest
 
         result = computeActual("SHOW STATS FOR " + tableName);
         expectedStatistics =
-                resultBuilder(getSession(), VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                         .row("col", null, 3.0, 0.0, null, "-10.0", "200.0")
                         .row(null, null, null, null, 3.0, null, null)
                         .build();
         if (format == AVRO) {
             expectedStatistics =
-                    resultBuilder(getSession(), VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                    resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                             .row("col", null, 3.0, 0.0, null, null, null)
                             .row(null, null, null, null, 3.0, null, null)
                             .build();
@@ -4615,14 +4616,14 @@ public abstract class BaseIcebergConnectorTest
         MaterializedResult result = computeActual("SHOW STATS FOR " + tableName);
 
         MaterializedResult expectedStatistics =
-                resultBuilder(getSession(), VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                         .row("col1", null, 2.0, 0.0, null, "-10.0", "100.0")
                         .row("col2", null, 2.0, 0.0, null, "-1", "10")
                         .row("col3", null, 2.0, 0.0, null, "2019-06-28", "2020-01-01")
                         .row(null, null, null, null, 2.0, null, null)
                         .build();
         if (format == AVRO) {
-            expectedStatistics = resultBuilder(getSession(), VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+            expectedStatistics = resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                     .row("col1", null, 2.0, 0.0, null, null, null)
                     .row("col2", null, 2.0, 0.0, null, null, null)
                     .row("col3", null, 2.0, 0.0, null, null, null)
@@ -4634,7 +4635,7 @@ public abstract class BaseIcebergConnectorTest
         assertUpdate("INSERT INTO " + tableName + " VALUES (200, 20, DATE '2020-06-28')", 1);
         result = computeActual("SHOW STATS FOR " + tableName);
         expectedStatistics =
-                resultBuilder(getSession(), VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                         .row("col1", null, 3.0, 0.0, null, "-10.0", "200.0")
                         .row("col2", null, 3.0, 0.0, null, "-1", "20")
                         .row("col3", null, 3.0, 0.0, null, "2019-06-28", "2020-06-28")
@@ -4642,7 +4643,7 @@ public abstract class BaseIcebergConnectorTest
                         .build();
         if (format == AVRO) {
             expectedStatistics =
-                    resultBuilder(getSession(), VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                    resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                             .row("col1", null, 3.0, 0.0, null, null, null)
                             .row("col2", null, 3.0, 0.0, null, null, null)
                             .row("col3", null, 3.0, 0.0, null, null, null)
@@ -4662,7 +4663,7 @@ public abstract class BaseIcebergConnectorTest
         result = computeActual("SHOW STATS FOR " + tableName);
 
         expectedStatistics =
-                resultBuilder(getSession(), VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                         .row("col1", null, 3.0, 5.0 / 13.0, null, "-10.0", "200.0")
                         .row("col2", null, 13.0, 0.0, null, "-1", "30")
                         .row("col3", null, 12.0, 0.0, null, "2019-06-28", "2020-07-25")
@@ -4670,7 +4671,7 @@ public abstract class BaseIcebergConnectorTest
                         .build();
         if (format == AVRO) {
             expectedStatistics =
-                    resultBuilder(getSession(), VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                    resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                             .row("col1", null, 3.0, 0.1, null, null, null)
                             .row("col2", null, 13.0, 0.0, null, null, null)
                             .row("col3", null, 12.0, 1.0 / 13.0, null, null, null)
@@ -5439,7 +5440,7 @@ public abstract class BaseIcebergConnectorTest
                 .setSystemProperty("redistribute_writes", "false")
                 .build();
 
-        // The zone is a column: a constant zone is unwrapped by UnwrapAtTimeZoneInComparison before
+        // The zone is a column: a constant zone is unwrapped by the comparison preimage rule before
         // pushdown, so only a column zone exercises the DomainTranslator derivation.
         assertUpdate("CREATE TABLE " + tableName + " (id BIGINT, zone VARCHAR, ts TIMESTAMP(6) WITH TIME ZONE) WITH (partitioning = ARRAY['month(ts)'])");
         // The wall time 2020-10-25 02:31:18 Europe/Warsaw is ambiguous: it occurs at 00:31:18 UTC
@@ -7301,14 +7302,14 @@ public abstract class BaseIcebergConnectorTest
         // Make sure the whole table has stats
         MaterializedResult tableStatistics = computeActual(collectingStatisticsSession, "SHOW STATS FOR (SELECT * FROM %s WHERE \"$path\" IS NOT NULL)".formatted(tableName));
         MaterializedResult expectedTableStatistics =
-                resultBuilder(collectingStatisticsSession, VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                         .row("id", null, 4.0, 0.0, null, "1", "4")
                         .row("value", null, 3.0, 0.25, null, "1", "4")
                         .row(null, null, null, null, 4.0, null, null)
                         .build();
         if (format == AVRO) {
             expectedTableStatistics =
-                    resultBuilder(collectingStatisticsSession, VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                    resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                             .row("id", null, 4.0, 0.0, null, null, null)
                             .row("value", null, 3.0, 0.1, null, null, null)
                             .row(null, null, null, null, 4.0, null, null)
@@ -7329,14 +7330,14 @@ public abstract class BaseIcebergConnectorTest
 
         MaterializedResult firstPathStatistics = computeActual(collectingStatisticsSession, "SHOW STATS FOR (" + pathPredicateSql.formatted(firstPath) + ")");
         MaterializedResult expectedFirstPathStatistics =
-                resultBuilder(collectingStatisticsSession, VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                         .row("id", null, 1.0, 0.0, null, "1", "1")
                         .row("value", null, 1.0, 0.0, null, "1", "1")
                         .row(null, null, null, null, 1.0, null, null)
                         .build();
         if (format == AVRO) {
             expectedFirstPathStatistics =
-                    resultBuilder(collectingStatisticsSession, VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                    resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                             .row("id", null, 1.0, 0.0, null, null, null)
                             .row("value", null, 1.0, 0.0, null, null, null)
                             .row(null, null, null, null, 1.0, null, null)
@@ -7346,14 +7347,14 @@ public abstract class BaseIcebergConnectorTest
 
         MaterializedResult secondThirdPathStatistics = computeActual(collectingStatisticsSession, "SHOW STATS FOR (SELECT * FROM %s WHERE \"$path\" IN ('%s', '%s'))".formatted(tableName, secondPath, thirdPath));
         MaterializedResult expectedSecondThirdPathStatistics =
-                resultBuilder(collectingStatisticsSession, VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                         .row("id", null, 2.0, 0.0, null, "2", "3")
                         .row("value", null, 1.0, 0.5, null, "2", "2")
                         .row(null, null, null, null, 2.0, null, null)
                         .build();
         if (format == AVRO) {
             expectedSecondThirdPathStatistics =
-                    resultBuilder(collectingStatisticsSession, VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                    resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                             .row("id", null, 2.0, 0.0, null, null, null)
                             .row("value", null, 2.0, 0.0, null, null, null)
                             .row(null, null, null, null, 2.0, null, null)
@@ -7363,14 +7364,14 @@ public abstract class BaseIcebergConnectorTest
 
         MaterializedResult fourthPathStatistics = computeActual(collectingStatisticsSession, "SHOW STATS FOR (" + pathPredicateSql.formatted(fourthPath) + ")");
         MaterializedResult expectedFourthPathStatistics =
-                resultBuilder(collectingStatisticsSession, VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                         .row("id", null, 1.0, 0.0, null, "4", "4")
                         .row("value", null, 1.0, 0.0, null, "4", "4")
                         .row(null, null, null, null, 1.0, null, null)
                         .build();
         if (format == AVRO) {
             expectedFourthPathStatistics =
-                    resultBuilder(collectingStatisticsSession, VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
+                    resultBuilder(VARCHAR, DOUBLE, DOUBLE, DOUBLE, DOUBLE, VARCHAR, VARCHAR)
                             .row("id", null, 1.0, 0.0, null, null, null)
                             .row("value", null, 1.0, 0.0, null, null, null)
                             .row(null, null, null, null, 1.0, null, null)
@@ -7546,6 +7547,24 @@ public abstract class BaseIcebergConnectorTest
         assertThat(updatedSnapshots.size()).isLessThan(initialSnapshots.size());
         assertThat(updatedSnapshots).hasSize(1);
         assertThat(initialSnapshots).containsAll(updatedSnapshots);
+    }
+
+    @Test
+    public void testExpireSnapshotsWithGcDisabled()
+    {
+        try (TestTable table = newTrinoTable("test_expire_snapshots_gc_disabled_", "(key varchar, value integer) WITH (gc_enabled = false)")) {
+            assertUpdate("INSERT INTO " + table.getName() + " VALUES ('one', 1)", 1);
+            assertUpdate("INSERT INTO " + table.getName() + " VALUES ('two', 2)", 1);
+            List<Long> initialSnapshots = getSnapshotIds(table.getName());
+
+            assertThat(query(
+                    prepareCleanUpSession(),
+                    "ALTER TABLE " + table.getName() + " EXECUTE EXPIRE_SNAPSHOTS (retention_threshold => '0s')"))
+                    .failure()
+                    .hasErrorCode(ICEBERG_GC_DISABLED)
+                    .hasMessage("Cannot expire snapshots from a table with 'gc_enabled' set to false");
+            assertThat(getSnapshotIds(table.getName())).isEqualTo(initialSnapshots);
+        }
     }
 
     @Test
@@ -7832,6 +7851,25 @@ public abstract class BaseIcebergConnectorTest
         List<String> updatedDataFiles = getAllDataFilesFromTableDirectory(tableName);
         assertThat(updatedDataFiles.size()).isLessThan(initialDataFiles.size());
         assertThat(updatedDataFiles).doesNotContain(orphanFile1, orphanFile2);
+    }
+
+    @Test
+    public void testRemoveOrphanFilesWithGcDisabled()
+            throws Exception
+    {
+        try (TestTable table = newTrinoTable("test_remove_orphan_files_gc_disabled_", "(key varchar, value integer) WITH (gc_enabled = false)")) {
+            assertUpdate("INSERT INTO " + table.getName() + " VALUES ('one', 1)", 1);
+            String orphanFile = getIcebergTableDataPath(getTableLocation(table.getName())) + "/invalidData." + format;
+            createFile(orphanFile, new byte[123]);
+
+            assertThat(query(
+                    prepareCleanUpSession(),
+                    "ALTER TABLE " + table.getName() + " EXECUTE REMOVE_ORPHAN_FILES (retention_threshold => '0s')"))
+                    .failure()
+                    .hasErrorCode(ICEBERG_GC_DISABLED)
+                    .hasMessage("Cannot remove orphan files from a table with 'gc_enabled' set to false");
+            assertThat(getAllDataFilesFromTableDirectory(table.getName())).contains(orphanFile);
+        }
     }
 
     @Test
