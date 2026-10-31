@@ -18,5 +18,8 @@ ai-pipestream/trino#51; this folder holds the detailed reports behind it.
 | `spooling-cross-review/fable-cross-review-fixes.patch` | The 4 pending client decode commits (`git am` onto `9e22a234`) |
 | `control-plane-review.md` | Review of control plane phases 1-3 (#10, #15-#21, #28) |
 | `control-plane-phase3-results.md`, `phase3-review/` | Phase 3 results and its review (#35-#38), with fix patch |
+| `attribution-rewrite.md` | Old to new head hashes after the 2026-10-31 commit identity rewrite |
 
 Patches apply with `git am` onto the base named in each review file.
+Hashes cited before 2026-10-31 may predate the identity rewrite; see
+`attribution-rewrite.md`.
