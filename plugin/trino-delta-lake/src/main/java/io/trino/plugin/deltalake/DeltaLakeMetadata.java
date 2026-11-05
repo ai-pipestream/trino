@@ -367,12 +367,14 @@ import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.NumberType.NUMBER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS;
 import static io.trino.spi.type.Timestamps.MICROSECONDS_PER_MILLISECOND;
 import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.TypeUtils.blockToNativeValue;
+import static io.trino.spi.type.TypeUtils.containsTimestampWithTimeZone;
 import static io.trino.spi.type.TypeUtils.containsType;
 import static io.trino.spi.type.TypeUtils.isFloatingPointNaN;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
@@ -890,11 +892,19 @@ public class DeltaLakeMetadata
             Optional<DeltaLakeTableDescriptor> descriptor = loadDescriptorFromChecksum(table.schemaTableName(), fileSystem, tableLocation, endTableVersion);
             if (descriptor.isPresent()) {
                 latestTableVersions.put(table.schemaTableName(), descriptor.get().version());
-                return descriptor.get();
+                return requireNonEmptyColumns(table.schemaTableName(), descriptor.get());
             }
         }
 
-        return loadDescriptorFromTransactionLog(session, table, fileSystem, endTableVersion);
+        return requireNonEmptyColumns(table.schemaTableName(), loadDescriptorFromTransactionLog(session, table, fileSystem, endTableVersion));
+    }
+
+    private static DeltaLakeTableDescriptor requireNonEmptyColumns(SchemaTableName tableName, DeltaLakeTableDescriptor descriptor)
+    {
+        if (getExactColumnNames(descriptor.metadataEntry()).isEmpty()) {
+            throw new TrinoException(DELTA_LAKE_INVALID_SCHEMA, "Delta table %s has no columns".formatted(tableName));
+        }
+        return descriptor;
     }
 
     private Optional<DeltaLakeTableDescriptor> loadDescriptorFromChecksum(
@@ -4386,7 +4396,7 @@ public class DeltaLakeMetadata
                     .collect(toImmutableSet());
             if (!mergedColumnStatistics.keySet().equals(analyzePhysicalColumns)) {
                 // sanity validation
-                throw new IllegalStateException(format("Unexpected columns in in mergedColumnStatistics %s; expected %s", mergedColumnStatistics.keySet(), analyzePhysicalColumns));
+                throw new IllegalStateException(format("Unexpected columns in mergedColumnStatistics %s; expected %s", mergedColumnStatistics.keySet(), analyzePhysicalColumns));
             }
         });
 
@@ -4729,6 +4739,7 @@ public class DeltaLakeMetadata
         return ColumnMetadata.builder()
                 .setName(columnName)
                 .setType(columnType)
+                .setTimeZone(containsTimestampWithTimeZone(columnType) ? Optional.of(UTC_KEY) : Optional.empty())
                 .setHidden(column.columnType() == SYNTHESIZED)
                 .setComment(comment)
                 .setNullable(nullability)
