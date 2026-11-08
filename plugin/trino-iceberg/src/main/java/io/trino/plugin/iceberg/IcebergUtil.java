@@ -194,11 +194,13 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.TimeType.TIME_MICROS;
+import static io.trino.spi.type.TimeZoneKey.UTC_KEY;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MICROS;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_NANOS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MICROS;
 import static io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_NANOS;
 import static io.trino.spi.type.Timestamps.PICOSECONDS_PER_MICROSECOND;
+import static io.trino.spi.type.TypeUtils.containsTimestampWithTimeZone;
 import static io.trino.spi.type.TypeUtils.writeNativeValue;
 import static io.trino.spi.type.UuidType.javaUuidToTrinoUuid;
 import static java.lang.Boolean.parseBoolean;
@@ -483,9 +485,11 @@ public final class IcebergUtil
         List<NestedField> icebergColumns = schema.columns();
         ImmutableList.Builder<ColumnMetadata> columns = builderWithExpectedSize(icebergColumns.size() + 5);
         for (NestedField column : icebergColumns) {
+            Type type = toTrinoType(column.type(), typeManager);
             columns.add(ColumnMetadata.builder()
                     .setName(column.name())
-                    .setType(toTrinoType(column.type(), typeManager))
+                    .setType(type)
+                    .setTimeZone(containsTimestampWithTimeZone(type) ? Optional.of(UTC_KEY) : Optional.empty())
                     .setNullable(column.isOptional())
                     .setComment(Optional.ofNullable(column.doc()))
                     .setDefaultValue(formatIcebergDefaultAsSql(column.writeDefault(), column.type()))
@@ -716,7 +720,8 @@ public final class IcebergUtil
                     return true;
                 },
                 _ -> false,
-                _ -> true);
+                _ -> true,
+                _ -> false);
     }
 
     private static boolean canEnforceRangeWithPartitioningField(PartitionField field, ColumnTransform transform, Range range, MethodHandle targetTypeEqualOperator)
@@ -1405,6 +1410,10 @@ public final class IcebergUtil
         };
     }
 
+    /**
+     * Caches the manifests on {@code snapshot}, so use {@link #loadAllManifestsFromManifestList} instead when
+     * iterating over many snapshots
+     */
     public static List<ManifestFile> loadAllManifestsFromSnapshot(Table icebergTable, @Nullable Snapshot snapshot)
     {
         if (snapshot == null) {
@@ -1436,12 +1445,16 @@ public final class IcebergUtil
      * Each BaseSnapshot object caches manifest files separately, so loading manifests from multiple distinct snapshots
      * results in O(num_snapshots^2) copies of the same manifest file metadata in memory
      */
-    public static List<ManifestFile> loadAllManifestsFromManifestList(Table icebergTable, String manifestListLocation)
+    public static List<ManifestFile> loadAllManifestsFromManifestList(Table icebergTable, Snapshot snapshot)
     {
-        try {
-            return IcebergManifestUtils.read(icebergTable.io(), manifestListLocation);
+        if (snapshot.manifestListLocation() == null) {
+            // This is to maintain support for V1 tables which have embedded manifest lists
+            return loadAllManifestsFromSnapshot(icebergTable, snapshot);
         }
-        catch (NotFoundException | UncheckedIOException e) {
+        try {
+            return IcebergManifestUtils.read(icebergTable.io(), snapshot);
+        }
+        catch (NotFoundException | UncheckedIOException | IllegalArgumentException | IllegalStateException e) {
             throw new TrinoException(ICEBERG_INVALID_METADATA, "Error accessing manifest file for table %s".formatted(icebergTable.name()), e);
         }
     }
