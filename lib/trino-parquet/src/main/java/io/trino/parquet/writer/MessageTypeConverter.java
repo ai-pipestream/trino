@@ -18,6 +18,7 @@ import org.apache.parquet.format.FieldRepetitionType;
 import org.apache.parquet.format.SchemaElement;
 import org.apache.parquet.format.Type;
 import org.apache.parquet.schema.GroupType;
+import org.apache.parquet.schema.LogicalTypeAnnotation.DecimalLogicalTypeAnnotation;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.OriginalType;
 import org.apache.parquet.schema.PrimitiveType;
@@ -56,9 +57,9 @@ class MessageTypeConverter
                 if (primitiveType.getLogicalTypeAnnotation() != null) {
                     element.setLogicalType(convertToLogicalType(primitiveType.getLogicalTypeAnnotation()));
                 }
-                if (primitiveType.getDecimalMetadata() != null) {
-                    element.setPrecision(primitiveType.getDecimalMetadata().getPrecision());
-                    element.setScale(primitiveType.getDecimalMetadata().getScale());
+                if (primitiveType.getLogicalTypeAnnotation() instanceof DecimalLogicalTypeAnnotation decimal) {
+                    element.setPrecision(decimal.getPrecision());
+                    element.setScale(decimal.getScale());
                 }
                 if (primitiveType.getTypeLength() > 0) {
                     element.setType_length(primitiveType.getTypeLength());
