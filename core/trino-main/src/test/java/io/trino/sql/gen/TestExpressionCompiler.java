@@ -1384,7 +1384,7 @@ public class TestExpressionCompiler
                 assertThat(assertions.expression("CAST(a AS bigint)")
                         .binding("a", toLiteral(String.valueOf(value))))
                         .hasType(BIGINT)
-                        .isEqualTo(value == null ? null : (long) value);
+                        .isEqualTo((long) value);
             }
         }
         for (Double value : doubleLefts) {

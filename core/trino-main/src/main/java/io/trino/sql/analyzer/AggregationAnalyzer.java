@@ -572,8 +572,7 @@ class AggregationAnalyzer
             }
 
             FieldId fieldId = requireNonNull(columnReferences.get(NodeRef.of(node)), () -> "No field for " + node).getFieldId();
-            boolean inGroup = groupingFields.contains(fieldId);
-            if (!inGroup) {
+            if (!groupingFields.contains(fieldId)) {
                 Field field = sourceScope.getRelationType().getFieldByIndex(node.getFieldIndex());
 
                 String column;
@@ -589,7 +588,7 @@ class AggregationAnalyzer
 
                 throw semanticException(EXPRESSION_NOT_AGGREGATE, node, "Column %s not in GROUP BY clause", column);
             }
-            return inGroup;
+            return true;
         }
 
         private Boolean visitLogicalExpression(LogicalExpression node, Void context)

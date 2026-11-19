@@ -16,11 +16,13 @@ package io.trino.plugin.prometheus;
 import com.google.common.io.Resources;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
 import java.util.List;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.time.Instant.ofEpochMilli;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -61,6 +63,29 @@ public class TestPrometheusQueryVectorResponseParse
     {
         try (InputStream promVectorResponse = openStream()) {
             List<PrometheusMetricResult> results = new PrometheusQueryResponseParse(promVectorResponse).getResults();
+            assertThat(results.get(0).getTimeSeriesValues().getValues().get(0).getValue()).isEqualTo("1");
+        }
+    }
+
+    @Test
+    public void verifyResponseWithArrayBeforeData()
+            throws IOException
+    {
+        String response =
+                """
+                {
+                  "status": "success",
+                  "warnings": ["partial response"],
+                  "data": {
+                    "resultType": "vector",
+                    "result": [{"metric": {"__name__": "up"}, "value": [1565889995.668, "1"]}]
+                  }
+                }
+                """;
+        try (InputStream promVectorResponse = new ByteArrayInputStream(response.getBytes(UTF_8))) {
+            List<PrometheusMetricResult> results = new PrometheusQueryResponseParse(promVectorResponse).getResults();
+            assertThat(results).hasSize(1);
+            assertThat(results.get(0).getMetricHeader()).containsEntry("__name__", "up");
             assertThat(results.get(0).getTimeSeriesValues().getValues().get(0).getValue()).isEqualTo("1");
         }
     }

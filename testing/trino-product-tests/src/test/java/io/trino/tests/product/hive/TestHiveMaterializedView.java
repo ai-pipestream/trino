@@ -96,7 +96,7 @@ class TestHiveMaterializedView
             assertThat(env.executeTrino("SHOW COLUMNS FROM test_materialized_view_view"))
                     .containsOnly(
                             row("c", "bigint", "", ""),
-                            row("x", "varchar", partitioned ? "partition key" : "", ""));
+                            row("x", "varchar", "", ""));
 
             // Test reading data from the materialized view
             assertThat(env.executeTrino("SELECT x, c FROM test_materialized_view_view"))

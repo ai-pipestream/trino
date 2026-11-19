@@ -53,8 +53,7 @@ public class PrometheusQueryResponseParse
                     if (parser.getValueAsString().equals("success")) {
                         this.status = true;
                         while (!parser.isClosed()) {
-                            parser.nextToken();
-                            if (JsonToken.PROPERTY_NAME.equals(jsonToken)) {
+                            if (JsonToken.PROPERTY_NAME.equals(parser.nextToken())) {
                                 if (parser.currentName().equals("resultType")) {
                                     parser.nextToken();
                                     resultType = parser.getValueAsString();
