@@ -604,6 +604,10 @@ used as the target for a message. If a message includes a key, the producer will
 use a hash algorithm to choose the target partition for the message. The same
 key will always be assigned the same partition.
 
+The `key` field of a table definition file is optional. Rows inserted into a
+table without a `key` definition are written with a `null` key. A table without
+a `message` definition does not support inserts.
+
 (kafka-type-mapping)=
 ## Type mapping
 

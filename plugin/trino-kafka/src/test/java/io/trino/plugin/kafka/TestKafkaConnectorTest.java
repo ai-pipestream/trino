@@ -81,6 +81,7 @@ public class TestKafkaConnectorTest
     // These tables must not be reused because the data will be modified during tests
     private static final SchemaTableName TABLE_INSERT_NEGATIVE_DATE = new SchemaTableName("write_test", "test_insert_negative_date_" + randomNameSuffix());
     private static final SchemaTableName TABLE_INSERT_CUSTOMER = new SchemaTableName("write_test", "test_insert_customer_" + randomNameSuffix());
+    private static final SchemaTableName TABLE_INSERT_WITHOUT_KEY = new SchemaTableName("write_test", "test_insert_without_key_" + randomNameSuffix());
     private static final SchemaTableName TABLE_INSERT_ARRAY = new SchemaTableName("write_test", "test_insert_array_" + randomNameSuffix());
     private static final SchemaTableName TABLE_INSERT_UNICODE_1 = new SchemaTableName("write_test", "test_unicode_1_" + randomNameSuffix());
     private static final SchemaTableName TABLE_INSERT_UNICODE_2 = new SchemaTableName("write_test", "test_unicode_2_" + randomNameSuffix());
@@ -123,6 +124,11 @@ public class TestKafkaConnectorTest
                         TABLE_INSERT_CUSTOMER,
                         createOneFieldDescription("phone", createVarcharType(15)),
                         ImmutableList.of(createOneFieldDescription("custkey", BIGINT), createOneFieldDescription("acctbal", DOUBLE))))
+                .put(TABLE_INSERT_WITHOUT_KEY, createDescription(
+                        TABLE_INSERT_WITHOUT_KEY.getTableName(),
+                        TABLE_INSERT_WITHOUT_KEY.getSchemaName(),
+                        TABLE_INSERT_WITHOUT_KEY.getTableName(),
+                        createFieldGroup("json", ImmutableList.of(createOneFieldDescription("custkey", BIGINT), createOneFieldDescription("acctbal", DOUBLE)))))
                 .put(TABLE_INSERT_ARRAY, createDescription(
                         TABLE_INSERT_ARRAY,
                         createOneFieldDescription("a", new ArrayType(DOUBLE)),
@@ -423,6 +429,16 @@ public class TestKafkaConnectorTest
         assertUpdate(format("INSERT INTO %s (dt) VALUES (DATE '-0001-01-01')", TABLE_INSERT_NEGATIVE_DATE), 1);
         assertQuery("SELECT dt FROM " + TABLE_INSERT_NEGATIVE_DATE, "VALUES date '-0001-01-01'");
         assertQuery(format("SELECT dt FROM %s WHERE dt = date '-0001-01-01'", TABLE_INSERT_NEGATIVE_DATE), "VALUES date '-0001-01-01'");
+    }
+
+    @Test
+    public void testInsertWithoutKeyDefinition()
+    {
+        // the records of a table that defines no key are written with a null key
+        assertUpdate(format("INSERT INTO %s (custkey, acctbal) VALUES (1, 10.5), (2, 20.5)", TABLE_INSERT_WITHOUT_KEY), 2);
+        assertQuery(format("SELECT custkey, acctbal FROM %s", TABLE_INSERT_WITHOUT_KEY), "VALUES (1, 10.5), (2, 20.5)");
+        // SQL sees a null key as an empty one; TestNullRowEncoderFactory checks that the key is null
+        assertQuery(format("SELECT DISTINCT _key_length FROM %s", TABLE_INSERT_WITHOUT_KEY), "VALUES 0");
     }
 
     @Test

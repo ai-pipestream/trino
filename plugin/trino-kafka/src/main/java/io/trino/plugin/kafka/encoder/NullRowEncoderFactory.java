@@ -52,7 +52,7 @@ public class NullRowEncoderFactory
         checkArgument(rowEncoderSpec.columnHandles().isEmpty(), "No columns are expected for the %s of topic '%s'", rowEncoderSpec.kafkaFieldType(), rowEncoderSpec.topic());
         if (rowEncoderSpec.kafkaFieldType() == MESSAGE) {
             // a null message is a tombstone, which deletes the key from a compacted topic
-            throw new TrinoException(NOT_SUPPORTED, format("Inserting into the message of table '%s' requires a schema registry subject", rowEncoderSpec.topic()));
+            throw new TrinoException(NOT_SUPPORTED, format("Inserting into table '%s' requires a message definition", rowEncoderSpec.topic()));
         }
         return NULL_ROW_ENCODER;
     }

@@ -16,6 +16,7 @@ package io.trino.plugin.kafka.encoder;
 import com.google.inject.Binder;
 import com.google.inject.Module;
 import com.google.inject.multibindings.MapBinder;
+import io.trino.decoder.dummy.DummyRowDecoder;
 import io.trino.plugin.kafka.encoder.avro.AvroEncoderModule;
 import io.trino.plugin.kafka.encoder.csv.CsvRowEncoder;
 import io.trino.plugin.kafka.encoder.csv.CsvRowEncoderFactory;
@@ -39,6 +40,8 @@ public class EncoderModule
         encoderFactoriesByName.addBinding(CsvRowEncoder.NAME).to(CsvRowEncoderFactory.class).in(SINGLETON);
         encoderFactoriesByName.addBinding(RawRowEncoder.NAME).to(RawRowEncoderFactory.class).in(SINGLETON);
         encoderFactoriesByName.addBinding(JsonRowEncoder.NAME).to(JsonRowEncoderFactory.class).in(SINGLETON);
+        // a table without a key definition has no key columns, and its records are written without a key
+        encoderFactoriesByName.addBinding(DummyRowDecoder.NAME).to(NullRowEncoderFactory.class).in(SINGLETON);
         binder.install(new AvroEncoderModule());
         binder.install(new ProtobufEncoderModule());
 

@@ -49,7 +49,7 @@ public class TestNullRowEncoderFactory
         // writing a null message would write a tombstone
         assertThatThrownBy(() -> FACTORY.create(SESSION, spec(MESSAGE)))
                 .isInstanceOfSatisfying(TrinoException.class, e -> assertThat(e.getErrorCode()).isEqualTo(NOT_SUPPORTED.toErrorCode()))
-                .hasMessage("Inserting into the message of table 'orders' requires a schema registry subject");
+                .hasMessage("Inserting into table 'orders' requires a message definition");
     }
 
     @Test
