@@ -43,6 +43,7 @@ import java.util.stream.Stream;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static io.trino.decoder.protobuf.ProtobufUtils.isJsonMessageType;
 import static io.trino.plugin.kafka.schema.confluent.ConfluentSchemaRegistryDynamicMessageProvider.readerSchemaReference;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -153,6 +154,10 @@ public class ProtobufSchemaParser
             return createTimestampType(6);
         }
         else if (isProtobufAnySupportEnabled && descriptor.getFullName().equals(ANY_TYPE_NAME)) {
+            return typeManager.getType(new TypeDescriptor(JSON));
+        }
+        else if (isJsonMessageType(descriptor)) {
+            // Struct, Value and ListValue refer to each other, and their values are JSON values
             return typeManager.getType(new TypeDescriptor(JSON));
         }
 

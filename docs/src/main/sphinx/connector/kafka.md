@@ -1433,7 +1433,7 @@ The following table lists the supported Trino types which can be used in
 | `ARRAY`                  | Protobuf type with `repeated` field                |
 | `MAP`                    | `Map`                                              |
 | `TIMESTAMP`              | `Timestamp`, predefined in `timestamp.proto`       |
-| `JSON`                   | `oneof` (Confluent table supplier only), `Any`     |
+| `JSON`                   | `oneof` (Confluent table supplier only), `Any`, and `Struct`, `Value`, `ListValue`, predefined in `struct.proto` |
 
 ##### any
 
@@ -1485,6 +1485,38 @@ containing a JSON-serialized representation of the Protobuf message:
   "stringColumn":"Trino"
 }
 ```
+
+##### Struct, Value and ListValue
+
+Fields of the types
+[Struct, Value and ListValue](https://protobuf.dev/reference/protobuf/google.protobuf/#struct),
+predefined in `struct.proto`, hold JSON data of any shape and are mapped to
+`JSON` columns. A `Struct` is a JSON object, a `ListValue` is a JSON array, and
+a `Value` is any JSON value. This also applies to fields of these types within
+a `ROW`, `ARRAY` or `MAP`. The Confluent table description supplier maps the
+fields to `JSON` columns automatically.
+
+For example, given the following Protobuf schema:
+
+```text
+syntax = "proto3";
+
+import "google/protobuf/struct.proto";
+
+message schema {
+    google.protobuf.Struct metadata = 1;
+}
+```
+
+The corresponding Trino column is named `metadata` of type `JSON` containing
+the JSON object, with numbers written as JSON numbers of type `double`:
+
+```text
+{"count":3.0,"name":"Trino","tags":["a","b"]}
+```
+
+The column is `NULL` when the field is not set. A `Value` field that is set to
+`null_value` is the JSON value `null`.
 
 ##### Protobuf schema evolution
 

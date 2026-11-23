@@ -18,6 +18,9 @@ import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Descriptors.EnumValueDescriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.DynamicMessage;
+import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.protobuf.Message;
+import com.google.protobuf.util.JsonFormat;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.trino.decoder.FieldValueProvider;
@@ -62,6 +65,8 @@ import static io.trino.decoder.protobuf.ProtobufFieldMapping.findReaderField;
 import static io.trino.decoder.protobuf.ProtobufFieldMapping.findWriterField;
 import static io.trino.decoder.protobuf.ProtobufFieldMapping.getReaderFieldType;
 import static io.trino.decoder.protobuf.ProtobufFieldMapping.toReaderValue;
+import static io.trino.decoder.protobuf.ProtobufUtils.isJsonMessageType;
+import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.block.MapValueBuilder.buildMapValue;
 import static io.trino.spi.block.RowValueBuilder.buildRowValue;
 import static io.trino.spi.type.StandardTypes.JSON;
@@ -78,6 +83,11 @@ import static java.util.Objects.requireNonNull;
 public class ProtobufValueProvider
         extends FieldValueProvider
 {
+    // Trino JSON types are expected to be sorted by key
+    private static final JsonFormat.Printer JSON_PRINTER = JsonFormat.printer()
+            .omittingInsignificantWhitespace()
+            .sortingMapKeys();
+
     @Nullable
     private final Object value;
     // the type of the value in the schema the column was derived from, when the value is a message
@@ -165,9 +175,26 @@ public class ProtobufValueProvider
         }
 
         if (type.equals(jsonType)) {
-            return (Slice) value;
+            return getJsonText(value, type, columnName);
         }
 
+        throw new TrinoException(DECODER_CONVERSION_NOT_SUPPORTED, format("cannot decode object of '%s' as '%s' for column '%s'", value.getClass(), type, columnName));
+    }
+
+    private static Slice getJsonText(Object value, Type type, String columnName)
+    {
+        if (value instanceof Slice slice) {
+            return slice;
+        }
+        // a Struct, Value or ListValue is a JSON value, which can be a field of a message, an element of a list or a value of a map
+        if (value instanceof Message message && isJsonMessageType(message.getDescriptorForType())) {
+            try {
+                return utf8Slice(JSON_PRINTER.print(message));
+            }
+            catch (InvalidProtocolBufferException e) {
+                throw new TrinoException(GENERIC_INTERNAL_ERROR, format("Failed to print JSON from '%s' message type", message.getDescriptorForType().getFullName()), e);
+            }
+        }
         throw new TrinoException(DECODER_CONVERSION_NOT_SUPPORTED, format("cannot decode object of '%s' as '%s' for column '%s'", value.getClass(), type, columnName));
     }
 
@@ -185,7 +212,7 @@ public class ProtobufValueProvider
         }
 
         if (type.equals(jsonType)) {
-            return serializeJson(builder, value, type);
+            return serializeJson(builder, value, type, columnName);
         }
 
         serializePrimitive(builder, value, type, columnName);
@@ -341,10 +368,15 @@ public class ProtobufValueProvider
     }
 
     @Nullable
-    private static Object serializeJson(BlockBuilder builder, Object value, Type type)
+    private static Object serializeJson(BlockBuilder builder, @Nullable Object value, Type type, String columnName)
     {
+        if (value == null) {
+            checkState(builder != null, "parent block builder is null");
+            builder.appendNull();
+            return null;
+        }
         // The decoder carries the JSON value as its canonical text; JsonType's native value is Json.
-        Json json = JsonItems.fromText((Slice) value);
+        Json json = JsonItems.fromText(getJsonText(value, type, columnName));
         if (builder != null) {
             type.writeObject(builder, json);
             return null;

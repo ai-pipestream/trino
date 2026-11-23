@@ -29,6 +29,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.protobuf.CodedInputStream.decodeZigZag32;
 import static com.google.protobuf.CodedInputStream.decodeZigZag64;
 import static com.google.protobuf.CodedOutputStream.encodeZigZag64;
+import static io.trino.decoder.protobuf.ProtobufUtils.isJsonMessageType;
 
 /**
  * Maps the field a column names in the reader schema (the schema the table columns were derived
@@ -176,9 +177,14 @@ final class ProtobufFieldMapping
             String readerTypeName = readerField.getMessageType().getFullName();
             String writerTypeName = writerField.getMessageType().getFullName();
             return readerTypeName.equals(writerTypeName)
-                    || (!MAPPED_MESSAGE_TYPES.contains(readerTypeName) && !MAPPED_MESSAGE_TYPES.contains(writerTypeName));
+                    || (!isMappedMessageType(readerField.getMessageType()) && !isMappedMessageType(writerField.getMessageType()));
         }
         return true;
+    }
+
+    private static boolean isMappedMessageType(Descriptor descriptor)
+    {
+        return MAPPED_MESSAGE_TYPES.contains(descriptor.getFullName()) || isJsonMessageType(descriptor);
     }
 
     /**

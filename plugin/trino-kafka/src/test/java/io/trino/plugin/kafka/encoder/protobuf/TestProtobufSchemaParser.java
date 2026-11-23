@@ -153,6 +153,38 @@ public class TestProtobufSchemaParser
     }
 
     @Test
+    public void testStructValueAndListValueBecomeJsonColumns()
+    {
+        KafkaTopicFieldGroup fieldGroup = parse(
+                """
+                syntax = "proto3";
+                import "google/protobuf/struct.proto";
+                message schema {
+                    google.protobuf.Struct object = 1;
+                    google.protobuf.Value value = 2;
+                    google.protobuf.ListValue list = 3;
+                    repeated google.protobuf.Struct objects = 4;
+                    map<string, google.protobuf.Value> values = 5;
+                    message Detail {
+                        google.protobuf.Struct object = 1;
+                    }
+                    Detail detail = 6;
+                }
+                """,
+                false);
+
+        // the types refer to each other, but are not rejected as self-referencing: their values are JSON values
+        assertThat(fieldGroup.fields()).extracting(KafkaTopicFieldDescription::name).containsExactly("object", "value", "list", "objects", "values", "detail");
+        assertThat(fieldGroup.fields()).extracting(KafkaTopicFieldDescription::type).containsExactly(
+                JSON_TYPE,
+                JSON_TYPE,
+                JSON_TYPE,
+                new ArrayType(JSON_TYPE),
+                new MapType(createUnboundedVarcharType(), JSON_TYPE, TESTING_TYPE_MANAGER.getTypeOperators()),
+                RowType.rowType(RowType.field("object", JSON_TYPE)));
+    }
+
+    @Test
     public void testRecursiveSchemaIsRejected()
     {
         assertThatThrownBy(() -> parse(

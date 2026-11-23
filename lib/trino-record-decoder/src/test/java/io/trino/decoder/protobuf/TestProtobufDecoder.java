@@ -23,13 +23,19 @@ import com.google.protobuf.Descriptors;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.DynamicMessage;
+import com.google.protobuf.ListValue;
+import com.google.protobuf.NullValue;
+import com.google.protobuf.Struct;
 import com.google.protobuf.Timestamp;
+import com.google.protobuf.Value;
 import io.airlift.slice.Slices;
 import io.trino.decoder.DecoderColumnHandle;
 import io.trino.decoder.DecoderTestColumnHandle;
 import io.trino.decoder.FieldValueProvider;
 import io.trino.decoder.RowDecoder;
 import io.trino.decoder.RowDecoderSpec;
+import io.trino.json.Json;
+import io.trino.json.JsonItems;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.SqlMap;
 import io.trino.spi.block.SqlRow;
@@ -411,6 +417,111 @@ public class TestProtobufDecoder
         assertThat(actual.get("numberColumn").stringValue()).isEqualTo(enumData);
         assertThat(actual.get("timestampColumn").stringValue()).isEqualTo("2020-12-12T15:35:45.923Z");
         assertThat(actual.get("bytesColumn").binaryValue()).isEqualTo(bytesData);
+    }
+
+    @Test
+    public void testStructValueAndListValue()
+    {
+        Descriptor descriptor = messageDescriptor(
+                """
+                syntax = "proto3";
+                import "google/protobuf/struct.proto";
+                message schema {
+                  google.protobuf.Struct object = 1;
+                  google.protobuf.Value value = 2;
+                  google.protobuf.ListValue list = 3;
+                  repeated google.protobuf.Struct objects = 4;
+                  map<string, google.protobuf.Value> values = 5;
+                  message Detail {
+                    google.protobuf.Struct object = 1;
+                    google.protobuf.ListValue list = 2;
+                  }
+                  Detail detail = 6;
+                }
+                """);
+        RowType detailType = RowType.from(ImmutableList.of(RowType.field("object", JsonType.JSON), RowType.field("list", JsonType.JSON)));
+        DecoderTestColumnHandle objectColumn = new DecoderTestColumnHandle(0, "object", JsonType.JSON, "object", null, null, false, false, false);
+        DecoderTestColumnHandle valueColumn = new DecoderTestColumnHandle(1, "value", JsonType.JSON, "value", null, null, false, false, false);
+        DecoderTestColumnHandle listColumn = new DecoderTestColumnHandle(2, "list", JsonType.JSON, "list", null, null, false, false, false);
+        DecoderTestColumnHandle objectsColumn = new DecoderTestColumnHandle(3, "objects", new ArrayType(JsonType.JSON), "objects", null, null, false, false, false);
+        DecoderTestColumnHandle valuesColumn = new DecoderTestColumnHandle(4, "values", new MapType(VARCHAR, JsonType.JSON, TESTING_TYPE_MANAGER.getTypeOperators()), "values", null, null, false, false, false);
+        DecoderTestColumnHandle detailColumn = new DecoderTestColumnHandle(5, "detail", detailType, "detail", null, null, false, false, false);
+        DecoderTestColumnHandle detailObjectColumn = new DecoderTestColumnHandle(6, "detail_object", JsonType.JSON, "detail/object", null, null, false, false, false);
+        ProtobufRowDecoder decoder = new ProtobufRowDecoder(
+                new FixedSchemaDynamicMessageProvider(descriptor),
+                ImmutableSet.of(objectColumn, valueColumn, listColumn, objectsColumn, valuesColumn, detailColumn, detailObjectColumn),
+                TESTING_TYPE_MANAGER,
+                new FileDescriptorProvider());
+
+        Struct struct = Struct.newBuilder()
+                .putFields("string", Value.newBuilder().setStringValue("Trino").build())
+                .putFields("number", Value.newBuilder().setNumberValue(1.5).build())
+                .putFields("boolean", Value.newBuilder().setBoolValue(true).build())
+                .putFields("null", Value.newBuilder().setNullValue(NullValue.NULL_VALUE).build())
+                .putFields("object", Value.newBuilder().setStructValue(Struct.newBuilder().putFields("b", Value.newBuilder().setNumberValue(2).build()).putFields("a", Value.newBuilder().setNumberValue(1).build())).build())
+                .putFields("array", Value.newBuilder().setListValue(ListValue.newBuilder().addValues(Value.newBuilder().setStringValue("x")).addValues(Value.newBuilder().setStructValue(Struct.getDefaultInstance()))).build())
+                .build();
+        String structJson = "{\"array\":[\"x\",{}],\"boolean\":true,\"null\":null,\"number\":1.5,\"object\":{\"a\":1.0,\"b\":2.0},\"string\":\"Trino\"}";
+        ListValue list = ListValue.newBuilder()
+                .addValues(Value.newBuilder().setNumberValue(-1))
+                .addValues(Value.newBuilder().setStringValue("two"))
+                .addValues(Value.newBuilder().setNullValue(NullValue.NULL_VALUE))
+                .build();
+        String listJson = "[-1.0,\"two\",null]";
+
+        Descriptor valuesEntry = descriptor.findFieldByName("values").getMessageType();
+        Descriptor detailDescriptor = descriptor.findFieldByName("detail").getMessageType();
+        Map<DecoderColumnHandle, FieldValueProvider> decodedRow = decoder.decodeRow(DynamicMessage.newBuilder(descriptor)
+                        .setField(descriptor.findFieldByName("object"), struct)
+                        .setField(descriptor.findFieldByName("value"), Value.newBuilder().setStringValue("text").build())
+                        .setField(descriptor.findFieldByName("list"), list)
+                        .addRepeatedField(descriptor.findFieldByName("objects"), struct)
+                        .addRepeatedField(descriptor.findFieldByName("objects"), Struct.getDefaultInstance())
+                        .addRepeatedField(descriptor.findFieldByName("values"), DynamicMessage.newBuilder(valuesEntry)
+                                .setField(valuesEntry.findFieldByName("key"), "key")
+                                .setField(valuesEntry.findFieldByName("value"), Value.newBuilder().setListValue(list).build())
+                                .build())
+                        .setField(descriptor.findFieldByName("detail"), DynamicMessage.newBuilder(detailDescriptor)
+                                .setField(detailDescriptor.findFieldByName("object"), struct)
+                                .build())
+                        .build()
+                        .toByteArray())
+                .orElseThrow();
+
+        // a Struct is a JSON object, with its keys in order, a Value is any JSON value and a ListValue is a JSON array
+        assertThat(decodedRow.get(objectColumn).getSlice().toStringUtf8()).isEqualTo(structJson);
+        assertThat(JsonItems.toText((Json) decodedRow.get(objectColumn).getObject()).toStringUtf8()).isEqualTo(structJson);
+        assertThat(decodedRow.get(valueColumn).getSlice().toStringUtf8()).isEqualTo("\"text\"");
+        assertThat(decodedRow.get(listColumn).getSlice().toStringUtf8()).isEqualTo(listJson);
+
+        // they are JSON values as an element of a list, a value of a map and a field of a row as well
+        Block objects = (Block) decodedRow.get(objectsColumn).getObject();
+        assertThat(objects.getPositionCount()).isEqualTo(2);
+        assertThat(JsonType.JSON.getObjectValue(objects, 0)).isEqualTo(structJson);
+        assertThat(JsonType.JSON.getObjectValue(objects, 1)).isEqualTo("{}");
+        SqlMap values = (SqlMap) decodedRow.get(valuesColumn).getObject();
+        assertThat(values.getSize()).isEqualTo(1);
+        assertThat(VARCHAR.getSlice(values.getRawKeyBlock(), values.getRawOffset()).toStringUtf8()).isEqualTo("key");
+        assertThat(JsonType.JSON.getObjectValue(values.getRawValueBlock(), values.getRawOffset())).isEqualTo(listJson);
+        SqlRow detail = (SqlRow) decodedRow.get(detailColumn).getObject();
+        assertThat(JsonType.JSON.getObjectValue(detail.getRawFieldBlock(0), detail.getRawIndex())).isEqualTo(structJson);
+        assertThat(detail.getRawFieldBlock(1).isNull(detail.getRawIndex())).isTrue();
+        assertThat(decodedRow.get(detailObjectColumn).getSlice().toStringUtf8()).isEqualTo(structJson);
+
+        // a field that is not set is NULL, while a Value that is set to null is the JSON value null
+        Map<DecoderColumnHandle, FieldValueProvider> unset = decoder.decodeRow(DynamicMessage.newBuilder(descriptor)
+                        .setField(descriptor.findFieldByName("value"), Value.newBuilder().setNullValue(NullValue.NULL_VALUE).build())
+                        .setField(descriptor.findFieldByName("list"), ListValue.getDefaultInstance())
+                        .build()
+                        .toByteArray())
+                .orElseThrow();
+        assertThat(unset.get(objectColumn).isNull()).isTrue();
+        assertThat(unset.get(valueColumn).isNull()).isFalse();
+        assertThat(unset.get(valueColumn).getSlice().toStringUtf8()).isEqualTo("null");
+        assertThat(unset.get(listColumn).getSlice().toStringUtf8()).isEqualTo("[]");
+        assertThat(((Block) unset.get(objectsColumn).getObject()).getPositionCount()).isZero();
+        assertThat(unset.get(detailColumn).isNull()).isTrue();
+        assertThat(unset.get(detailObjectColumn).isNull()).isTrue();
     }
 
     @Test
@@ -1116,6 +1227,7 @@ public class TestProtobufDecoder
         Descriptor reader = messageDescriptor(
                 """
                 syntax = "proto3";
+                import "google/protobuf/struct.proto";
                 import "google/protobuf/timestamp.proto";
                 message schema {
                   google.protobuf.Timestamp created = 1;
@@ -1125,6 +1237,7 @@ public class TestProtobufDecoder
                   Detail detail = 2;
                   map<string, string> labels = 3;
                   map<string, string> notes = 4;
+                  google.protobuf.Struct metadata = 5;
                 }
                 """);
         Descriptor writer = messageDescriptor(
@@ -1139,15 +1252,17 @@ public class TestProtobufDecoder
                   google.protobuf.Timestamp detail = 2;
                   map<int32, string> labels = 3;
                   map<string, bytes> notes = 4;
+                  Instant metadata = 5;
                 }
                 """);
         DecoderTestColumnHandle createdColumn = new DecoderTestColumnHandle(0, "created", TIMESTAMP_MICROS, "created", null, null, false, false, false);
         DecoderTestColumnHandle detailColumn = new DecoderTestColumnHandle(1, "detail", RowType.from(ImmutableList.of(RowType.field("seconds", BIGINT))), "detail", null, null, false, false, false);
         DecoderTestColumnHandle labelsColumn = new DecoderTestColumnHandle(2, "labels", new MapType(VARCHAR, VARCHAR, TESTING_TYPE_MANAGER.getTypeOperators()), "labels", null, null, false, false, false);
         DecoderTestColumnHandle notesColumn = new DecoderTestColumnHandle(3, "notes", new MapType(VARCHAR, VARCHAR, TESTING_TYPE_MANAGER.getTypeOperators()), "notes", null, null, false, false, false);
+        DecoderTestColumnHandle metadataColumn = new DecoderTestColumnHandle(4, "metadata", JsonType.JSON, "metadata", null, null, false, false, false);
         ProtobufRowDecoder decoder = new ProtobufRowDecoder(
                 new EvolvedSchemaProvider(writer, Optional.of(reader)),
-                ImmutableSet.of(createdColumn, detailColumn, labelsColumn, notesColumn),
+                ImmutableSet.of(createdColumn, detailColumn, labelsColumn, notesColumn, metadataColumn),
                 TESTING_TYPE_MANAGER,
                 new FileDescriptorProvider());
 
@@ -1157,6 +1272,7 @@ public class TestProtobufDecoder
         byte[] record = DynamicMessage.newBuilder(writer)
                 .setField(writer.findFieldByName("created"), DynamicMessage.newBuilder(instant).setField(instant.findFieldByName("seconds"), 1L).build())
                 .setField(writer.findFieldByName("detail"), Timestamp.newBuilder().setSeconds(2).build())
+                .setField(writer.findFieldByName("metadata"), DynamicMessage.newBuilder(instant).setField(instant.findFieldByName("seconds"), 3L).build())
                 .addRepeatedField(writer.findFieldByName("labels"), DynamicMessage.newBuilder(labelsEntry)
                         .setField(labelsEntry.findFieldByName("key"), 1)
                         .setField(labelsEntry.findFieldByName("value"), "one")
@@ -1172,6 +1288,7 @@ public class TestProtobufDecoder
         // a message type mapped to a column type of its own is not interchangeable with other message types
         assertThat(decodedRow.get(createdColumn).isNull()).isTrue();
         assertThat(decodedRow.get(detailColumn).isNull()).isTrue();
+        assertThat(decodedRow.get(metadataColumn).isNull()).isTrue();
         // the key and value of a map must be compatible like fields
         assertThat(decodedRow.get(labelsColumn).isNull()).isTrue();
         SqlMap notes = (SqlMap) decodedRow.get(notesColumn).getObject();

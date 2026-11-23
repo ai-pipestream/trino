@@ -20,7 +20,11 @@ import com.google.protobuf.Any;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.DynamicMessage;
+import com.google.protobuf.ListValue;
+import com.google.protobuf.NullValue;
+import com.google.protobuf.Struct;
 import com.google.protobuf.Timestamp;
+import com.google.protobuf.Value;
 import dev.failsafe.Failsafe;
 import dev.failsafe.RetryPolicy;
 import io.confluent.kafka.schemaregistry.protobuf.ProtobufSchema;
@@ -641,6 +645,74 @@ public class TestKafkaProtobufWithSchemaRegistryMinimalFunctionality
                         """
                         VALUES (1, JSON '{"@type":"%s","list":["Search"],"map":{"Key1":"Value1"},"row":{"booleanColumn":true,"bytesColumn":"VHJpbm8=","doubleColumn":3.141592653589793,"floatColumn":3.14,"integerColumn":1,"longColumn":"493857959588286460","numberColumn":"ONE","stringColumn":"Trino","timestampColumn":"2020-12-12T15:35:45.923Z"}}')
                         """.formatted(anySchemaFile));
+    }
+
+    @Test
+    public void testStruct()
+            throws Exception
+    {
+        String topic = "topic-schema-with-struct";
+        assertNotExists(topic);
+
+        ProtobufSchema schema = (ProtobufSchema) new ProtobufSchemaProvider().parseSchema(Resources.toString(getResource("protobuf/test_struct.proto"), UTF_8), List.of(), true).get();
+
+        ListValue list = ListValue.newBuilder()
+                .addValues(Value.newBuilder().setNumberValue(1.5))
+                .addValues(Value.newBuilder().setStringValue("two"))
+                .addValues(Value.newBuilder().setNullValue(NullValue.NULL_VALUE))
+                .build();
+        Struct struct = Struct.newBuilder()
+                .putFields("string", Value.newBuilder().setStringValue("Trino").build())
+                .putFields("boolean", Value.newBuilder().setBoolValue(true).build())
+                .putFields("object", Value.newBuilder().setStructValue(Struct.newBuilder().putFields("number", Value.newBuilder().setNumberValue(1).build())).build())
+                .putFields("array", Value.newBuilder().setListValue(list).build())
+                .build();
+
+        Descriptor descriptor = schema.toDescriptor();
+        Descriptor valueMapEntry = descriptor.findFieldByName("value_map").getMessageType();
+        Descriptor detailDescriptor = descriptor.findFieldByName("detail").getMessageType();
+        DynamicMessage message = DynamicMessage.newBuilder(descriptor)
+                .setField(descriptor.findFieldByName("id"), 1)
+                .setField(descriptor.findFieldByName("object"), struct)
+                .setField(descriptor.findFieldByName("value"), Value.newBuilder().setStringValue("text").build())
+                .setField(descriptor.findFieldByName("list"), list)
+                .addRepeatedField(descriptor.findFieldByName("objects"), struct)
+                .addRepeatedField(descriptor.findFieldByName("value_map"), buildDynamicMessage(valueMapEntry, ImmutableMap.of("key", "key", "value", Value.newBuilder().setBoolValue(false).build())))
+                .setField(descriptor.findFieldByName("detail"), buildDynamicMessage(detailDescriptor, ImmutableMap.of("object", struct)))
+                .build();
+        // a record whose Struct, Value and ListValue fields are not set
+        DynamicMessage unsetMessage = DynamicMessage.newBuilder(descriptor)
+                .setField(descriptor.findFieldByName("id"), 2)
+                .build();
+
+        testingKafka.sendMessages(
+                Stream.of(
+                        new ProducerRecord<>(topic, createKeySchema(0, getKeySchema()), message),
+                        new ProducerRecord<>(topic, createKeySchema(1, getKeySchema()), unsetMessage)),
+                producerProperties());
+        waitUntilTableExists(topic);
+
+        assertThat(query(format("SELECT id, object, value, list, objects, value_map, detail.object FROM %s", toDoubleQuoted(topic))))
+                .matches(
+                        """
+                        VALUES
+                            (
+                                1,
+                                JSON '{"array":[1.5,"two",null],"boolean":true,"object":{"number":1.0},"string":"Trino"}',
+                                JSON '"text"',
+                                JSON '[1.5,"two",null]',
+                                ARRAY[JSON '{"array":[1.5,"two",null],"boolean":true,"object":{"number":1.0},"string":"Trino"}'],
+                                MAP(ARRAY[VARCHAR 'key'], ARRAY[JSON 'false']),
+                                JSON '{"array":[1.5,"two",null],"boolean":true,"object":{"number":1.0},"string":"Trino"}'),
+                            (
+                                2,
+                                CAST(NULL AS JSON),
+                                CAST(NULL AS JSON),
+                                CAST(NULL AS JSON),
+                                CAST(ARRAY[] AS ARRAY(JSON)),
+                                CAST(MAP() AS MAP(VARCHAR, JSON)),
+                                CAST(NULL AS JSON))
+                        """);
     }
 
     private DynamicMessage buildDynamicMessage(Descriptor descriptor, Map<String, Object> data)

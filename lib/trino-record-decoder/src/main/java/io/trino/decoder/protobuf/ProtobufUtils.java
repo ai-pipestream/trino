@@ -13,19 +13,34 @@
  */
 package io.trino.decoder.protobuf;
 
+import com.google.common.collect.ImmutableSet;
 import com.google.common.io.Resources;
+import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Descriptors.FileDescriptor;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URL;
 import java.util.Optional;
+import java.util.Set;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 public final class ProtobufUtils
 {
+    // the well-known types that hold a JSON value: an object, any value and an array
+    private static final Set<String> JSON_MESSAGE_TYPES = ImmutableSet.of("google.protobuf.Struct", "google.protobuf.Value", "google.protobuf.ListValue");
+
     private ProtobufUtils() {}
+
+    /**
+     * Whether the message type is one of the well-known types {@code Struct}, {@code Value} and
+     * {@code ListValue}, whose values are JSON values and are mapped to a {@code JSON} column.
+     */
+    public static boolean isJsonMessageType(Descriptor descriptor)
+    {
+        return JSON_MESSAGE_TYPES.contains(descriptor.getFullName());
+    }
 
     public static FileDescriptor getFileDescriptor(String protoFile)
     {
